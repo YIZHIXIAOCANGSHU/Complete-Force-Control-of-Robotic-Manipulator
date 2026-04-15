@@ -34,6 +34,9 @@ def serial_thread_func(ser, comp_tool: GravityCompTool, shared_state: SharedRobo
     frame_packer = TargetPoseFramePacker()
     step_count = 0
     last_cycle_end = None
+    complete_feedback_mask = (1 << Config.NUM_JOINTS) - 1
+    feedback_mask = 0
+    tx_started = False
 
     set_reported_pose = shared_state.set_reported_pose
     snapshot_control_inputs = shared_state.snapshot_control_inputs
@@ -57,8 +60,10 @@ def serial_thread_func(ser, comp_tool: GravityCompTool, shared_state: SharedRobo
 
                 joint_idx = motor_id - 1
                 update_joint_feedback(joint_idx, pos, vel, tor)
-                if motor_id != Config.NUM_JOINTS:
+                feedback_mask |= 1 << joint_idx
+                if feedback_mask != complete_feedback_mask:
                     continue
+                feedback_mask = 0
 
                 current_q, current_qd, tau_actual, target_pos, target_quat = snapshot_control_inputs()
 
@@ -74,7 +79,10 @@ def serial_thread_func(ser, comp_tool: GravityCompTool, shared_state: SharedRobo
                 set_reported_pose(ee_pos, ee_quat)
 
                 if Config.SERIAL_FORWARD_TARGET:
-                    write_serial(frame_packer.pack(target_pos, target_quat))
+                    write_serial(frame_packer.pack(target_pos, target_quat, current_q, current_qd))
+                    if not tx_started:
+                        print(f"[Serial] 已开始发送控制帧，每帧 {SEND_FRAME_SIZE} bytes。")
+                        tx_started = True
 
                 cycle_end = time.perf_counter()
                 uart_latency_ms = 0.0
@@ -182,7 +190,12 @@ def main() -> None:
     initial_target_pos, initial_target_quat = comp_tool.compute_fk(Config.TARGET_Q.tolist())
     shared_state.set_target_pose(initial_target_pos, initial_target_quat)
 
-    print(f"[System] 正在尝试连接串口: {SERIAL_PORT}...")
+    serial_mode_desc = "目标位姿下发已开启" if Config.SERIAL_FORWARD_TARGET else "仅接收反馈，不下发目标"
+    print(f"[System] 串口模式: {serial_mode_desc}")
+    if Config.SERIAL_FORWARD_TARGET:
+        print(f"[System] 下发协议: UartControlStatePacket, {SEND_FRAME_SIZE} bytes/frame")
+
+    print(f"[System] 正在尝试连接串口: {SERIAL_PORT} @ {BAUDRATE}...")
     try:
         ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=0)
         ser.reset_input_buffer()
