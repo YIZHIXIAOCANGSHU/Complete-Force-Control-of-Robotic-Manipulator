@@ -114,36 +114,21 @@
 /* ================================================================
  *  关节安全限位
  * ================================================================ */
-/* 位置限位输入单位为度, 内部自动转换为 rad 供控制与运动学模块使用 */
-#define JOINT_POS_MIN_1_DEG (-42.971835)
-#define JOINT_POS_MAX_1_DEG (42.971835)
-#define JOINT_POS_MIN_2_DEG (-89.954374)
-#define JOINT_POS_MAX_2_DEG (59.587610)
-#define JOINT_POS_MIN_3_DEG (-68.754935)
-#define JOINT_POS_MAX_3_DEG (45.836624)
-#define JOINT_POS_MIN_4_DEG (-119.748454)
-#define JOINT_POS_MAX_4_DEG (89.954374)
-#define JOINT_POS_MIN_5_DEG (-45.836624)
-#define JOINT_POS_MAX_5_DEG (45.836624)
-#define JOINT_POS_MIN_6_DEG (-61.306275)
-#define JOINT_POS_MAX_6_DEG (45.263666)
-#define JOINT_POS_MIN_7_DEG (-61.306275)
-#define JOINT_POS_MAX_7_DEG (61.306275)
-
-#define JOINT_POS_MIN_1 DEG2RAD(JOINT_POS_MIN_1_DEG)
-#define JOINT_POS_MAX_1 DEG2RAD(JOINT_POS_MAX_1_DEG)
-#define JOINT_POS_MIN_2 DEG2RAD(JOINT_POS_MIN_2_DEG)
-#define JOINT_POS_MAX_2 DEG2RAD(JOINT_POS_MAX_2_DEG)
-#define JOINT_POS_MIN_3 DEG2RAD(JOINT_POS_MIN_3_DEG)
-#define JOINT_POS_MAX_3 DEG2RAD(JOINT_POS_MAX_3_DEG)
-#define JOINT_POS_MIN_4 DEG2RAD(JOINT_POS_MIN_4_DEG)
-#define JOINT_POS_MAX_4 DEG2RAD(JOINT_POS_MAX_4_DEG)
-#define JOINT_POS_MIN_5 DEG2RAD(JOINT_POS_MIN_5_DEG)
-#define JOINT_POS_MAX_5 DEG2RAD(JOINT_POS_MAX_5_DEG)
-#define JOINT_POS_MIN_6 DEG2RAD(JOINT_POS_MIN_6_DEG)
-#define JOINT_POS_MAX_6 DEG2RAD(JOINT_POS_MAX_6_DEG)
-#define JOINT_POS_MIN_7 DEG2RAD(JOINT_POS_MIN_7_DEG)
-#define JOINT_POS_MAX_7 DEG2RAD(JOINT_POS_MAX_7_DEG)
+/* 位置限位单位为 rad，直接供控制与运动学模块使用 */
+#define JOINT_POS_MIN_1 (-0.830)
+#define JOINT_POS_MAX_1 (0.829)
+#define JOINT_POS_MIN_2 (-0.819)
+#define JOINT_POS_MAX_2 (0.0)
+#define JOINT_POS_MIN_3 (-1.592)
+#define JOINT_POS_MAX_3 (1.681)
+#define JOINT_POS_MIN_4 (0.0)
+#define JOINT_POS_MAX_4 (1.523)
+#define JOINT_POS_MIN_5 (-1.428)
+#define JOINT_POS_MAX_5 (1.536)
+#define JOINT_POS_MIN_6 (-0.7384)
+#define JOINT_POS_MAX_6 (0.6513)
+#define JOINT_POS_MIN_7 (-0.8899)
+#define JOINT_POS_MAX_7 (1.622)
 
 /* 速度限位 (rad/s) */
 #define JOINT_VEL_LIMIT 5.0

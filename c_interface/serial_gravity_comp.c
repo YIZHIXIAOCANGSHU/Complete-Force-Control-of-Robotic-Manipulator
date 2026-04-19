@@ -80,10 +80,7 @@ int main() {
             bin_out.calc_time_ms = stm_out.calc_time_ms;
             
             if (stm_out.status < 0) {
-                fprintf(stderr, "\n[FATAL SAFETY ERROR] Stop triggered by main_stm.\n");
-                // 在二进制模式下，我们也写回最后一帧并在 stderr 报错后退出
-                fwrite(&bin_out, sizeof(bin_output_t), 1, stdout);
-                exit(1);
+                fprintf(stderr, "\n[SAFETY WARNING] main_stm returned status=%d.\n", stm_out.status);
             }
         }
 

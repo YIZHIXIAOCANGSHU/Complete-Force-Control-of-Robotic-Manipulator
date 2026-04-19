@@ -51,7 +51,7 @@ class Config:
     SERIAL_IDLE_SLEEP_S = max(0.0, _env_float("AM_D02_SERIAL_IDLE_SLEEP_S", 0.00005))
     RERUN_QUEUE_SIZE = max(8, _env_int("AM_D02_RERUN_QUEUE_SIZE", 256))
     UART_TEXT_LOG_INTERVAL = max(1, _env_int("AM_D02_UART_TEXT_LOG_INTERVAL", 100))
-    SERIAL_FORWARD_TARGET = _env_bool("AM_D02_SERIAL_FORWARD_TARGET", False)
+    SERIAL_FORWARD_TARGET = _env_bool("AM_D02_SERIAL_FORWARD_TARGET", True)
     
     # === 关节配置 (Joints) ===
     NUM_JOINTS = 7
@@ -88,4 +88,3 @@ class Config:
     # === 目标位置 (Target Posture) ===
     # 用于重力补偿与 PD 控制的目标位置 (rad)
     TARGET_Q = np.array([-np.pi/6, 0, 0.0, np.pi/3, 0.0, 0.0, 0.0])
-

@@ -37,6 +37,7 @@ def serial_thread_func(ser, comp_tool: GravityCompTool, shared_state: SharedRobo
     complete_feedback_mask = (1 << Config.NUM_JOINTS) - 1
     feedback_mask = 0
     tx_started = False
+    last_stm_status = 0
 
     set_reported_pose = shared_state.set_reported_pose
     snapshot_control_inputs = shared_state.snapshot_control_inputs
@@ -68,12 +69,20 @@ def serial_thread_func(ser, comp_tool: GravityCompTool, shared_state: SharedRobo
                 current_q, current_qd, tau_actual, target_pos, target_quat = snapshot_control_inputs()
 
                 python_t0 = time.perf_counter()
-                tau_total, ee_pos, ee_quat, stm_status, stm32_calc_ms = comp_tool.compute(
-                    current_q,
-                    current_qd,
-                    target_pos,
-                    target_quat,
-                )
+                if Config.SERIAL_FORWARD_TARGET:
+                    # Real mode forwards the target pose to the lower controller, so
+                    # the local STM32 backend only needs FK for visualization.
+                    ee_pos, ee_quat = comp_tool.compute_fk(current_q)
+                    tau_total = [0.0] * Config.NUM_JOINTS
+                    stm_status = 0
+                    stm32_calc_ms = 0.0
+                else:
+                    tau_total, ee_pos, ee_quat, stm_status, stm32_calc_ms = comp_tool.compute(
+                        current_q,
+                        current_qd,
+                        target_pos,
+                        target_quat,
+                    )
                 python_cycle_ms = (time.perf_counter() - python_t0) * 1000.0
 
                 set_reported_pose(ee_pos, ee_quat)
@@ -143,8 +152,11 @@ def serial_thread_func(ser, comp_tool: GravityCompTool, shared_state: SharedRobo
                         stm32_calc_time_ms=stm32_calc_ms,
                         stm32_calc_hz=stm32_calc_hz,
                     )
-                if stm_status < 0:
+                if stm_status < 0 and stm_status != last_stm_status:
                     print(f"[Serial Warning] 本地 STM32 控制计算返回异常状态: {stm_status}")
+                elif stm_status == 0 and last_stm_status < 0:
+                    print("[Serial] 本地 STM32 控制计算已恢复正常。")
+                last_stm_status = stm_status
                 step_count += 1
 
             if shutdown_event.is_set():
@@ -193,7 +205,7 @@ def main() -> None:
     serial_mode_desc = "目标位姿下发已开启" if Config.SERIAL_FORWARD_TARGET else "仅接收反馈，不下发目标"
     print(f"[System] 串口模式: {serial_mode_desc}")
     if Config.SERIAL_FORWARD_TARGET:
-        print(f"[System] 下发协议: UartControlStatePacket, {SEND_FRAME_SIZE} bytes/frame")
+        print(f"[System] 下发协议: dm_motor_uart_rx_frame_t, {SEND_FRAME_SIZE} bytes/frame")
 
     print(f"[System] 正在尝试连接串口: {SERIAL_PORT} @ {BAUDRATE}...")
     try:
