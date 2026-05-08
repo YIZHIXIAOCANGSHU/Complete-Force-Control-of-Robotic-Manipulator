@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import xml.etree.ElementTree as ET
 
 import mujoco
@@ -60,6 +61,11 @@ def _add_mocap_marker(
     body.set("pos", "0 0 0")
     body.set("mocap", "true")
 
+    inertial = ET.SubElement(body, "inertial")
+    inertial.set("pos", "0 0 0")
+    inertial.set("mass", "1e-6")
+    inertial.set("diaginertia", "1e-9 1e-9 1e-9")
+
     geom = ET.SubElement(body, "geom")
     geom.set("type", "box")
     geom.set("size", f"{box_size} {box_size} {box_size}")
@@ -81,6 +87,11 @@ def _attach_tcp_body(worldbody: ET.Element, tcp_offset: np.ndarray) -> None:
         tcp_body = ET.SubElement(body, "body")
         tcp_body.set("name", "tcp")
         tcp_body.set("pos", f"{tcp_offset[0]} {tcp_offset[1]} {tcp_offset[2]}")
+
+        inertial = ET.SubElement(tcp_body, "inertial")
+        inertial.set("pos", "0 0 0")
+        inertial.set("mass", "1e-6")
+        inertial.set("diaginertia", "1e-9 1e-9 1e-9")
 
         _add_axis_geom(tcp_body, axis="x", radius=0.003, half_length=0.06, color="1 0 0 1")
         _add_axis_geom(tcp_body, axis="y", radius=0.003, half_length=0.06, color="0 1 0 1")
@@ -179,7 +190,6 @@ def _augment_scene(root: ET.Element, tcp_offset: np.ndarray) -> None:
 
 def build_enhanced_model(urdf_filename: str, tcp_offset: np.ndarray) -> mujoco.MjModel:
     """Load URDF and inject a viewer-friendly scene."""
-    resolved_urdf_filename = "_resolved_model.urdf"
     tree = ET.parse(urdf_filename)
     root = tree.getroot()
 
@@ -188,6 +198,15 @@ def build_enhanced_model(urdf_filename: str, tcp_offset: np.ndarray) -> mujoco.M
     compiler.set("meshdir", "../meshes")
     _normalize_mesh_paths(root)
 
+    resolved_file = tempfile.NamedTemporaryFile(
+        mode="wb",
+        suffix=".urdf",
+        prefix="_resolved_model_",
+        dir=os.getcwd(),
+        delete=False,
+    )
+    resolved_urdf_filename = resolved_file.name
+    resolved_file.close()
     tree.write(resolved_urdf_filename, encoding="utf-8", xml_declaration=True)
     try:
         basic_model = mujoco.MjModel.from_xml_path(resolved_urdf_filename)
@@ -197,7 +216,15 @@ def build_enhanced_model(urdf_filename: str, tcp_offset: np.ndarray) -> mujoco.M
         except OSError:
             pass
 
-    enhanced_path = "_enhanced_scene.xml"
+    enhanced_file = tempfile.NamedTemporaryFile(
+        mode="wb",
+        suffix=".xml",
+        prefix="_enhanced_scene_",
+        dir=os.getcwd(),
+        delete=False,
+    )
+    enhanced_path = enhanced_file.name
+    enhanced_file.close()
     try:
         mujoco.mj_saveLastXML(enhanced_path, basic_model)
         tree = ET.parse(enhanced_path)

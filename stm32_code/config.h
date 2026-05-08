@@ -28,8 +28,8 @@
 /* ================================================================
  *  基础运行参数
  * ================================================================ */
-#define CONTROL_DT 0.001    /* 控制步长 (秒) */
-#define NUM_JOINTS 7        /* 机器人关节数量 */
+#define CONTROL_DT 0.01  /* 控制步长 (秒) */
+#define NUM_JOINTS 7     /* 机器人关节数量 */
 /* Host bridge 仍使用该偏移量做 MuJoCo 坐标转换，保留兼容定义 */
 #define MUJOCO_Z_OFFSET 1.0 /* MuJoCo 仿真中机器人基座的高度偏移 */
 
@@ -44,16 +44,16 @@
 /* ================================================================
  *  笛卡尔空间 PD 增益
  * ================================================================ */
-#define KP_CART_X 60.0
-#define KP_CART_Y 60.0
-#define KP_CART_Z 60.0
-#define KP_CART_ROLL 2.5
-#define KP_CART_PITCH 2.5
-#define KP_CART_YAW 2.5
+#define KP_CART_X 120.0
+#define KP_CART_Y 120.0
+#define KP_CART_Z 120.0
+#define KP_CART_ROLL 5.0
+#define KP_CART_PITCH 5.0
+#define KP_CART_YAW 5.0
 
-#define KD_CART_X 15.0
-#define KD_CART_Y 15.0
-#define KD_CART_Z 15.0
+#define KD_CART_X 25.0
+#define KD_CART_Y 25.0
+#define KD_CART_Z 25.0
 #define KD_CART_ROLL 0.8
 #define KD_CART_PITCH 0.8
 #define KD_CART_YAW 0.8
@@ -116,21 +116,36 @@
 /* ================================================================
  *  关节安全限位
  * ================================================================ */
-/* 位置限位单位为 rad，直接供控制与运动学模块使用 */
-#define JOINT_POS_MIN_1 (-0.830)
-#define JOINT_POS_MAX_1 (0.829)
-#define JOINT_POS_MIN_2 (-0.819)
-#define JOINT_POS_MAX_2 (0.0)
-#define JOINT_POS_MIN_3 (-1.592)
-#define JOINT_POS_MAX_3 (1.681)
-#define JOINT_POS_MIN_4 (0.0)
-#define JOINT_POS_MAX_4 (1.523)
-#define JOINT_POS_MIN_5 (-1.428)
-#define JOINT_POS_MAX_5 (1.536)
-#define JOINT_POS_MIN_6 (-0.7384)
-#define JOINT_POS_MAX_6 (0.6513)
-#define JOINT_POS_MIN_7 (-0.8899)
-#define JOINT_POS_MAX_7 (1.622)
+/* 位置限位输入单位为度, 内部自动转换为 rad 供控制与运动学模块使用 */
+#define JOINT_POS_MIN_1_DEG (-89.971835)
+#define JOINT_POS_MAX_1_DEG (89.971835)
+#define JOINT_POS_MIN_2_DEG (-89.954374)
+#define JOINT_POS_MAX_2_DEG (20.587610)
+#define JOINT_POS_MIN_3_DEG (-68.754935)
+#define JOINT_POS_MAX_3_DEG (45.836624)
+#define JOINT_POS_MIN_4_DEG (-119.748454)
+#define JOINT_POS_MAX_4_DEG (119.954374)
+#define JOINT_POS_MIN_5_DEG (-45.836624)
+#define JOINT_POS_MAX_5_DEG (45.836624)
+#define JOINT_POS_MIN_6_DEG (-61.306275)
+#define JOINT_POS_MAX_6_DEG (45.263666)
+#define JOINT_POS_MIN_7_DEG (-61.306275)
+#define JOINT_POS_MAX_7_DEG (61.306275)
+
+#define JOINT_POS_MIN_1 DEG2RAD(JOINT_POS_MIN_1_DEG)
+#define JOINT_POS_MAX_1 DEG2RAD(JOINT_POS_MAX_1_DEG)
+#define JOINT_POS_MIN_2 DEG2RAD(JOINT_POS_MIN_2_DEG)
+#define JOINT_POS_MAX_2 DEG2RAD(JOINT_POS_MAX_2_DEG)
+#define JOINT_POS_MIN_3 DEG2RAD(JOINT_POS_MIN_3_DEG)
+#define JOINT_POS_MAX_3 DEG2RAD(JOINT_POS_MAX_3_DEG)
+#define JOINT_POS_MIN_4 DEG2RAD(JOINT_POS_MIN_4_DEG)
+#define JOINT_POS_MAX_4 DEG2RAD(JOINT_POS_MAX_4_DEG)
+#define JOINT_POS_MIN_5 DEG2RAD(JOINT_POS_MIN_5_DEG)
+#define JOINT_POS_MAX_5 DEG2RAD(JOINT_POS_MAX_5_DEG)
+#define JOINT_POS_MIN_6 DEG2RAD(JOINT_POS_MIN_6_DEG)
+#define JOINT_POS_MAX_6 DEG2RAD(JOINT_POS_MAX_6_DEG)
+#define JOINT_POS_MIN_7 DEG2RAD(JOINT_POS_MIN_7_DEG)
+#define JOINT_POS_MAX_7 DEG2RAD(JOINT_POS_MAX_7_DEG)
 
 /* 速度限位 (rad/s) */
 #define JOINT_VEL_LIMIT 5.0
@@ -142,8 +157,8 @@
 /* ================================================================
  *  路径规划参数（末端笛卡尔直线路径）
  * ================================================================ */
-#define TRAJ_PLAN_SPEED 3.0     /* 末端运动速度 (m/s) */
-#define TRAJ_PLAN_ACCEL 4.0     /* 加速度 (m/s^2) */
+#define TRAJ_PLAN_SPEED 0.75    /* 末端运动速度 (m/s) */
+#define TRAJ_PLAN_ACCEL 1.25    /* 加速度 (m/s^2) */
 #define TRAJ_REACH_THRESH 0.005 /* 到达目标的位置阈值 (m) */
 
 #endif /* CONFIG_LIB_H */

@@ -10,6 +10,7 @@ import serial
 from config import Config
 from coord_transforms import RobotMujocoTransformer
 from gravity_backend import GravityCompTool
+from mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
 from rerun_async import RerunLogger
 from serial_protocol import (
     RECV_FRAME_SIZE,
@@ -18,7 +19,6 @@ from serial_protocol import (
     SerialFrameReader,
 )
 from shared_state import SharedRobotState
-from sim_env import MujocoSimEnv
 import rerun_viz
 
 
@@ -69,14 +69,17 @@ def serial_thread_func(ser, comp_tool: GravityCompTool, shared_state: SharedRobo
                 current_q, current_qd, tau_actual, target_pos, target_quat = snapshot_control_inputs()
 
                 python_t0 = time.perf_counter()
-                if Config.SERIAL_FORWARD_TARGET:
-                    # Real mode forwards the target pose to the lower controller, so
-                    # the local STM32 backend only needs FK for visualization.
+                if Config.SERIAL_FORWARD_TARGET and not (rerun_logger is not None and Config.ENABLE_RERUN):
+                    # When Rerun is disabled, keep the forwarding path lightweight and
+                    # only recompute FK for the viewer pose.
                     ee_pos, ee_quat = comp_tool.compute_fk(current_q)
                     tau_total = [0.0] * Config.NUM_JOINTS
                     stm_status = 0
                     stm32_calc_ms = 0.0
                 else:
+                    # Even in target-forwarding mode, keep the local STM32 prediction
+                    # running while Rerun is enabled so the RBDL-Lite torque curves
+                    # continue to update.
                     tau_total, ee_pos, ee_quat, stm_status, stm32_calc_ms = comp_tool.compute(
                         current_q,
                         current_qd,
@@ -225,7 +228,10 @@ def main() -> None:
     transformer = None
     try:
         import mujoco
-        import mujoco.viewer
+        from sim_env import MujocoSimEnv
+
+        if not VIEWER_AVAILABLE:
+            raise RuntimeError("MuJoCo viewer is not available")
 
         env = MujocoSimEnv()
         env.reset(Config.HOME_QPOS)
@@ -251,7 +257,6 @@ def main() -> None:
     try:
         if mujoco_ready and env is not None and transformer is not None:
             import mujoco
-            import mujoco.viewer
 
             model = env.model
             data = env.data
@@ -259,7 +264,7 @@ def main() -> None:
 
             serial_mode_desc = "接收反馈 + 发送目标位姿" if Config.SERIAL_FORWARD_TARGET else "接收反馈 + 本地力矩计算(不下发)"
             print(f"\n[Running] 双回路运行中: 串口线程 ({serial_mode_desc}) | 主线程 (MuJoCo 渲染)")
-            with mujoco.viewer.launch_passive(model, data) as viewer:
+            with launch_passive_viewer(model, data) as viewer:
                 while viewer.is_running() and not shutdown_event.is_set():
                     current_q, reported_pos, reported_quat = shared_state.snapshot_viewer_state()
                     active_joints = min(len(current_q), model.nq)

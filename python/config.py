@@ -36,7 +36,7 @@ class Config:
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     URDF_PATH = os.path.join(
         PROJECT_ROOT,
-        "AM-D02-AemLURDF0413",
+        "AM-D02-AemLURDF_real",
         "AM-D02-AemLURDF0413",
         "urdf",
         "AM-D02-AemLURDF0413.urdf",
@@ -75,7 +75,7 @@ class Config:
     TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0])
     
     # === 仿真参数 ===
-    DT = 0.001  # 仿真步长 (秒)，对应 1000 Hz
+    DT = 0.01  # 仿真步长 (秒)，对应 100 Hz
     
     # === 初始位置 ===
     # 机械臂仿真实际起始关节角（全零，C端从这里出发）

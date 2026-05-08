@@ -42,6 +42,9 @@ _JOINT_COLORS = [
     [150, 50, 230],
 ]
 
+_POSITION_DISPLAY_UNIT = "mm"
+_POSITION_DISPLAY_SCALE = 1000.0
+
 
 _POSE_NAME_MAP = {
     "零位": "zero",
@@ -52,6 +55,11 @@ _POSE_NAME_MAP = {
 def _safe_pose_name(name: str) -> str:
     """将中文姿态名转为 ASCII 安全名称"""
     return _POSE_NAME_MAP.get(name, f"pose_{hash(name) % 10000}")
+
+
+def _position_to_display_units(position: np.ndarray) -> np.ndarray:
+    """将内部米制位置转换为 Rerun 图表展示使用的毫米。"""
+    return np.asarray(position, dtype=np.float64) * _POSITION_DISPLAY_SCALE
 
 
 def quaternion_to_euler(w, x, y, z):
@@ -303,7 +311,7 @@ def setup_realtime_styles():
     pos_views = []
     for axis in ('X', 'Y', 'Z'):
         pos_views.append(rrb.TimeSeriesView(
-            name=f"EE Position {axis} (m)", origin=f"/tracking/pos/{axis}",
+            name=f"EE Position {axis} ({_POSITION_DISPLAY_UNIT})", origin=f"/tracking/pos/{axis}",
         ))
     
     rot_views = []
@@ -435,11 +443,12 @@ def log_realtime_step(
             rr.log(f"joint_state/qd/J{i+1}", rr.Scalars(float(qd[i])))
     
     # Position Tracking & Error
+    pos_actual_display = _position_to_display_units(pos_actual)
+    pos_desired_display = _position_to_display_units(pos_desired)
     for i, axis in enumerate(('X', 'Y', 'Z')):
-        rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(float(pos_actual[i])))
-        rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(float(pos_desired[i])))
-        # Error in mm
-        rr.log(f"error/{axis}", rr.Scalars(float((pos_actual[i] - pos_desired[i]) * 1000.0)))
+        rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(float(pos_actual_display[i])))
+        rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(float(pos_desired_display[i])))
+        rr.log(f"error/{axis}", rr.Scalars(float(pos_actual_display[i] - pos_desired_display[i])))
         
     # Rotation Tracking & Error
     rot_actual = quat_to_euler(quat_actual)
