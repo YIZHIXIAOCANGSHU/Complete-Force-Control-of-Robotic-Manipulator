@@ -1,0 +1,1139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-1-g15f4949  Build Version: 1.6.7594.29634
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="AM-DPBSURDF0422">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="9.21776464331281E-06 0.0202991884256882 0.0602690877917968"
+        rpy="0 0 0" />
+      <mass
+        value="5.84986645468169" />
+      <inertia
+        ixx="0.0173874260101771"
+        ixy="2.46409227721131E-18"
+        ixz="-3.85762357879507E-14"
+        iyy="0.00964227975307062"
+        iyz="0.00172365484311292"
+        izz="0.0180119149971952" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="Waist01_Link">
+    <inertial>
+      <origin
+        xyz="-0.136089255865795 -0.0266955104433604 -0.0210146107918326"
+        rpy="0 0 0" />
+      <mass
+        value="1.48114163414581" />
+      <inertia
+        ixx="0.00238368706891446"
+        ixy="0.00299319946470922"
+        ixz="-0.00014009595791913"
+        iyy="0.0201878258251329"
+        iyz="-2.6882411603071E-05"
+        izz="0.021565107628941" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/Waist01_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/Waist01_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Waist01_Joint"
+    type="revolute">
+    <origin
+      xyz="0 0.0715607946769668 0.0930000000000011"
+      rpy="-1.5707963267949 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Waist01_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="2.09"
+      effort="376"
+      velocity="0" />
+  </joint>
+  <link
+    name="Waist02_Link">
+    <inertial>
+      <origin
+        xyz="0.149921344045953 -0.0299555203591355 -0.0477361845130898"
+        rpy="0 0 0" />
+      <mass
+        value="7.45215348480328" />
+      <inertia
+        ixx="0.00868365507023773"
+        ixy="-0.00234245312793198"
+        ixz="1.33609290988713E-05"
+        iyy="0.0225579762030009"
+        iyz="-4.16434982965338E-06"
+        izz="0.0219079561483282" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/Waist02_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/Waist02_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Waist02_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.3 -0.0600000000000001 0"
+      rpy="0 0 0" />
+    <parent
+      link="Waist01_Link" />
+    <child
+      link="Waist02_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.09"
+      upper="0"
+      effort="367"
+      velocity="0" />
+  </joint>
+  <link
+    name="Body0422_Link">
+    <inertial>
+      <origin
+        xyz="0.0405135546157809 -0.205201387083499 -0.0667611138159656"
+        rpy="0 0 0" />
+      <mass
+        value="4.97175721388093" />
+      <inertia
+        ixx="0.0425777055434599"
+        ixy="-0.000567720700534787"
+        ixz="-1.02161869096588E-05"
+        iyy="0.0196096032162506"
+        iyz="3.21428506049819E-05"
+        izz="0.0271808852131318" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/Body0422_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/Body0422_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Body0422_Joint"
+    type="revolute">
+    <origin
+      xyz="0.299999999999571 -0.0599999999995795 0"
+      rpy="0 0 0" />
+    <parent
+      link="Waist02_Link" />
+    <child
+      link="Body0422_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="367"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmL01_Link">
+    <inertial>
+      <origin
+        xyz="0.046191350353246 0.00345761585734478 1.29960341854751E-05"
+        rpy="0 0 0" />
+      <mass
+        value="1.09302490286167" />
+      <inertia
+        ixx="0.000830734455520727"
+        ixy="2.77950966885014E-05"
+        ixz="-1.09587631737973E-08"
+        iyy="0.00131214104308334"
+        iyz="9.7300835797479E-09"
+        izz="0.000876535747295842" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL01_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL01_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmL01_Joint"
+    type="fixed">
+    <origin
+      xyz="0.0430000000000131 -0.320000000000002 0.0121484787960573"
+      rpy="1.5707963268052 0 0" />
+    <parent
+      link="Body0422_Link" />
+    <child
+      link="ArmL01_Link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="ArmL02_Link">
+    <inertial>
+      <origin
+        xyz="-0.00363424298638049 -1.4989360965556E-05 0.0792167162541999"
+        rpy="0 0 0" />
+      <mass
+        value="1.10121056177596" />
+      <inertia
+        ixx="0.00142291410214384"
+        ixy="1.16752044186124E-08"
+        ixz="-2.9481963350764E-05"
+        iyy="0.000978403574312566"
+        iyz="-4.73856860837856E-08"
+        izz="0.000822778920073085" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL02_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL02_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmL02_Joint"
+    type="revolute">
+    <origin
+      xyz="0.0499999999992831 0.0352015212049103 0"
+      rpy="-1.57079632680518 0 0" />
+    <parent
+      link="ArmL01_Link" />
+    <child
+      link="ArmL02_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.35"
+      upper="2.35"
+      effort="40"
+      velocity="0" />
+  </joint>
+  <link
+    name="AM-D02-J14_Link">
+    <inertial>
+      <origin
+        xyz="-0.0431268231548414 2.96588229661832E-06 -0.0168134725731695"
+        rpy="0 0 0" />
+      <mass
+        value="0.0804363204257602" />
+      <inertia
+        ixx="3.4398827369876E-05"
+        ixy="3.21111842229668E-09"
+        ixz="2.02483617660832E-05"
+        iyy="6.69008329565981E-05"
+        iyz="4.01110111596044E-09"
+        izz="5.07555817335577E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/AM-D02-J14_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.862745098039216 0.505882352941176 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/AM-D02-J14_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="AM-D02-J14_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.0327000000002707 0 0.0850000000089008"
+      rpy="1.5707963267949 0 -1.57079632679492" />
+    <parent
+      link="ArmL02_Link" />
+    <child
+      link="AM-D02-J14_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.26"
+      upper="0.26"
+      effort="40"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmL04_Link">
+    <inertial>
+      <origin
+        xyz="-0.00707133098173909 -0.000308889013178298 -0.0836892498679569"
+        rpy="0 0 0" />
+      <mass
+        value="1.11910465523096" />
+      <inertia
+        ixx="0.00121795669351428"
+        ixy="6.23961669971991E-06"
+        ixz="0.000124067456853039"
+        iyy="0.00131937594150393"
+        iyz="7.15936467703403E-09"
+        izz="0.000385318509129543" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL04_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL04_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmL04_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.0662499999999995 0 -0.0341"
+      rpy="0 1.5707963267949 0" />
+    <parent
+      link="AM-D02-J14_Link" />
+    <child
+      link="ArmL04_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.65"
+      upper="1.65"
+      effort="27"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmL05_Link">
+    <inertial>
+      <origin
+        xyz="-0.00777666119252399 -0.0615500212475848 -0.032669207155252"
+        rpy="0 0 0" />
+      <mass
+        value="0.479985706644955" />
+      <inertia
+        ixx="0.00038451979240839"
+        ixy="1.99459725702535E-05"
+        ixz="-5.20198341625155E-06"
+        iyy="0.000170826898983065"
+        iyz="2.33352363569254E-06"
+        izz="0.000407619101814732" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL05_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL05_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmL05_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.0134219999993553 -0.031550000001845 -0.152889999999675"
+      rpy="1.57079632678464 0 0" />
+    <parent
+      link="ArmL04_Link" />
+    <child
+      link="ArmL05_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="2.268"
+      effort="27"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmL06_Link">
+    <inertial>
+      <origin
+        xyz="-0.0016661 0.0003861 0.066672"
+        rpy="0 0 0" />
+      <mass
+        value="0.61404" />
+      <inertia
+        ixx="0.00029679"
+        ixy="-1.6024E-07"
+        ixz="7.1075E-06"
+        iyy="0.00026229"
+        iyz="3.2555E-07"
+        izz="0.0001593" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL06_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL06_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmL06_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.00841049999999602 -0.0941300000000025 -0.0331993244972588"
+      rpy="1.57079632680516 0 0" />
+    <parent
+      link="ArmL05_Link" />
+    <child
+      link="ArmL06_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="9"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmL07_Link">
+    <inertial>
+      <origin
+        xyz="2.10614983673363E-05 -0.000564096193897634 -0.0368843856067864"
+        rpy="0 0 0" />
+      <mass
+        value="0.352995085283625" />
+      <inertia
+        ixx="0.000124621924206036"
+        ixy="-6.00512473680095E-10"
+        ixz="-1.43561990615247E-08"
+        iyy="0.000143260006631464"
+        iyz="7.31091061454864E-07"
+        izz="0.000122726336605248" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL07_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL07_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmL07_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.0382000000000804 -0.000300675500378905 0.137000000000005"
+      rpy="3.14159265358979 1.5707963267949 0" />
+    <parent
+      link="ArmL06_Link" />
+    <child
+      link="ArmL07_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-0.724"
+      upper="1.06"
+      effort="9"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmL07Output_Link">
+    <inertial>
+      <origin
+        xyz="-7.71715413794283E-10 -0.0531454017557083 -0.0151797843192585"
+        rpy="0 0 0" />
+      <mass
+        value="0.130071892527266" />
+      <inertia
+        ixx="5.94030554789123E-05"
+        ixy="-5.01007319996629E-13"
+        ixz="-3.38312867112602E-12"
+        iyy="6.25184504536976E-05"
+        iyz="-1.8740342666896E-06"
+        izz="5.85465949820439E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL07Output_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmL07Output_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmL07Output_Joint"
+    type="revolute">
+    <origin
+      xyz="0 -0.0204999999999969 -0.0374999999999962"
+      rpy="1.57079632678463 1.5707963267949 0" />
+    <parent
+      link="ArmL07_Link" />
+    <child
+      link="ArmL07Output_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.37"
+      upper="1.57"
+      effort="9"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmR01_Link">
+    <inertial>
+      <origin
+        xyz="0.0466674105319002 -0.00375674773209767 1.28494957234437E-05"
+        rpy="0 0 0" />
+      <mass
+        value="1.10548294861132" />
+      <inertia
+        ixx="0.000835462878795703"
+        ixy="-2.77721109811273E-05"
+        ixz="1.09593021325144E-08"
+        iyy="0.00131711151178051"
+        iyz="-9.72875644451711E-09"
+        izz="0.000876796479758843" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR01_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR01_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmR01_Joint"
+    type="fixed">
+    <origin
+      xyz="0.0430000000000021 -0.319999999999996 -0.155148478796072"
+      rpy="1.5707963268052 0 0" />
+    <parent
+      link="Body0422_Link" />
+    <child
+      link="ArmR01_Link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="ArmR02_Link">
+    <inertial>
+      <origin
+        xyz="-3.3044189595044E-05 0.00408487721681111 0.0783288220237686"
+        rpy="0 0 0" />
+      <mass
+        value="1.11959402339938" />
+      <inertia
+        ixx="0.00097924759510934"
+        ixy="9.72936642317599E-09"
+        ixz="-3.53689810254816E-08"
+        iyy="0.00142389076858966"
+        iyz="2.93367271441357E-05"
+        izz="0.000823271013985036" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR02_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR02_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmR01_Joint"
+    type="revolute">
+    <origin
+      xyz="0.0500000000007228 -0.0352015212028409 0"
+      rpy="1.57079632677436 -1.5707963267949 0" />
+    <parent
+      link="ArmR01_Link" />
+    <child
+      link="ArmR02_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.35"
+      upper="2.35"
+      effort="40"
+      velocity="0" />
+  </joint>
+  <link
+    name="AM-D02R-J03_Link">
+    <inertial>
+      <origin
+        xyz="-0.0431268231548383 2.96588229739547E-06 -0.0168134725731695"
+        rpy="0 0 0" />
+      <mass
+        value="0.08043632042576" />
+      <inertia
+        ixx="3.43988273698759E-05"
+        ixy="3.21111842180082E-09"
+        ixz="2.02483617660831E-05"
+        iyy="6.69008329565981E-05"
+        iyz="4.01110111563779E-09"
+        izz="5.07555817335578E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/AM-D02R-J03_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.862745098039216 0.505882352941176 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/AM-D02R-J03_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="AM-D02R-J03_Joint"
+    type="revolute">
+    <origin
+      xyz="0 0.0316999999999998 0.085"
+      rpy="-1.5707963267949 0 0" />
+    <parent
+      link="ArmR02_Link" />
+    <child
+      link="AM-D02R-J03_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-0.26"
+      upper="2.26"
+      effort="40"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmR04_Link">
+    <inertial>
+      <origin
+        xyz="-0.0068612 -0.00034369 -0.084609"
+        rpy="0 0 0" />
+      <mass
+        value="1.0441" />
+      <inertia
+        ixx="0.0010401"
+        ixy="5.5458E-06"
+        ixz="0.0001008"
+        iyy="0.0011255"
+        iyz="-3.5249E-09"
+        izz="0.00036818" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR04_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR04_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmR04_Joint"
+    type="revolute">
+    <origin
+      xyz="-0.0662499999999999 0 -0.0341"
+      rpy="0 1.5707963267949 0" />
+    <parent
+      link="AM-D02R-J03_Link" />
+    <child
+      link="ArmR04_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.65"
+      upper="1.65"
+      effort="27"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmR05_Link">
+    <inertial>
+      <origin
+        xyz="-0.0619910438798228 0.00774804052867251 -0.0327984712284014"
+        rpy="0 0 0" />
+      <mass
+        value="0.481598757392941" />
+      <inertia
+        ixx="0.000170910015144692"
+        ixy="-1.99340979707043E-05"
+        ixz="2.33536976739172E-06"
+        iyy="0.000384644043389551"
+        iyz="5.20518101014162E-06"
+        izz="0.000407819449326737" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR05_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR05_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmR05_Link"
+    type="revolute">
+    <origin
+      xyz="-0.0134219999993542 -0.0315500000018437 -0.152889999999675"
+      rpy="1.57079632677436 -1.5707963267949 0" />
+    <parent
+      link="ArmR04_Link" />
+    <child
+      link="ArmR05_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-2.268"
+      upper="0"
+      effort="27"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmR06_Link">
+    <inertial>
+      <origin
+        xyz="0.00197697489052784 -0.000298666132234893 0.0703999320776307"
+        rpy="0 0 0" />
+      <mass
+        value="0.685972229333382" />
+      <inertia
+        ixx="0.000375896683686663"
+        ixy="-4.40756793415572E-07"
+        ixz="1.65651918635699E-05"
+        iyy="0.00033082134283551"
+        iyz="1.72352869147883E-06"
+        izz="0.000173399938125278" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR06_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR06_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmR06_Link"
+    type="revolute">
+    <origin
+      xyz="-0.09413 0.0084105 -0.0335"
+      rpy="1.5708 0 -1.5708" />
+    <parent
+      link="ArmR05_Link" />
+    <child
+      link="ArmR06_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="9"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmR07_Link">
+    <inertial>
+      <origin
+        xyz="-2.10614983735535E-05 0.000564096194038965 -0.0377010618202429"
+        rpy="0 0 0" />
+      <mass
+        value="0.352995085283625" />
+      <inertia
+        ixx="0.000124621924206036"
+        ixy="-6.00512473262361E-10"
+        ixz="1.43561990453202E-08"
+        iyy="0.000143260006631464"
+        iyz="8.85533378580568E-07"
+        izz="0.000122726336605248" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR07_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR07_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmR07_Link"
+    type="revolute">
+    <origin
+      xyz="-0.0382 0 0.138"
+      rpy="3.1416 1.5708 0" />
+    <parent
+      link="ArmR06_Link" />
+    <child
+      link="ArmR07_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-0.724"
+      upper="1.06"
+      effort="9"
+      velocity="0" />
+  </joint>
+  <link
+    name="ArmR07Output_Link">
+    <inertial>
+      <origin
+        xyz="7.7173E-10 -0.053145 0.01418"
+        rpy="0 0 0" />
+      <mass
+        value="0.13007" />
+      <inertia
+        ixx="5.9403E-05"
+        ixy="5.0101E-13"
+        ixz="-3.3831E-12"
+        iyy="6.2518E-05"
+        iyz="1.874E-06"
+        izz="5.8547E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR07Output_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://AM-DPBSURDF0422/meshes/ArmR07Output_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ArmR07Output_Link"
+    type="revolute">
+    <origin
+      xyz="0 0.0195 -0.0381"
+      rpy="1.5708 1.5708 0" />
+    <parent
+      link="ArmR07_Link" />
+    <child
+      link="ArmR07Output_Link" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.37"
+      upper="1.57"
+      effort="9"
+      velocity="0" />
+  </joint>
+</robot>

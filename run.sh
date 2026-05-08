@@ -1,9 +1,8 @@
 #!/bin/bash
-# AM-D02 SITL 软硬件联合仿真与实机控制统一启动脚本
+# AM-DPBSURDF0422 sim/mc unified launcher.
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# 颜色定义
 PRINT_BLUE() { echo -e "\033[34m$1\033[0m"; }
 PRINT_GREEN() { echo -e "\033[32m$1\033[0m"; }
 PRINT_RED() { echo -e "\033[31m$1\033[0m"; }
@@ -27,12 +26,7 @@ select_python() {
         return
     fi
 
-    local candidates=()
-    candidates+=("python3")
-    candidates+=("python")
-    candidates+=("$HOME/miniconda3/envs/dial-mpc-py310/bin/python")
-    candidates+=("$HOME/miniconda3/bin/python")
-
+    local candidates=("python3" "python" "$HOME/miniconda3/envs/dial-mpc-py310/bin/python" "$HOME/miniconda3/bin/python")
     local candidate
     for candidate in "${candidates[@]}"; do
         if ! command -v "$candidate" >/dev/null 2>&1 && [ ! -x "$candidate" ]; then
@@ -53,24 +47,12 @@ select_python() {
 
 show_main_menu() {
     echo "=========================================================="
-    echo "            AM-D02 统一启动状态机"
+    echo "        AM-DPBSURDF0422 Sim 启动状态机"
     echo "=========================================================="
     echo "请选择启动模式："
     echo "  1) sim  - 软硬件联合仿真"
-    echo "  2) real - 真实硬件控制"
-    echo "  3) mc   - 蒙特卡罗范围检查 + MuJoCo 窗口"
+    echo "  2) mc   - 蒙特卡罗范围检查 + MuJoCo 窗口"
     echo "  q) 退出"
-    echo "----------------------------------------------------------"
-}
-
-show_real_backend_menu() {
-    echo "=========================================================="
-    echo "            AM-D02 Real 后端选择"
-    echo "=========================================================="
-    echo "请选择真实硬件链路："
-    echo "  1) serial   - 旧串口下位机链路"
-    echo "  2) usbfdcan - SocketCAN USB2FDCAN 达妙 MIT torque"
-    echo "  q) 返回/退出"
     echo "----------------------------------------------------------"
 }
 
@@ -82,18 +64,10 @@ select_mode_from_menu() {
         case "$choice" in
             1)
                 MODE="sim"
-                EXTRA_ARGS=()
                 break
                 ;;
             2)
-                MODE="real"
-                EXTRA_ARGS=()
-                select_real_backend_from_menu
-                break
-                ;;
-            3)
                 MODE="mc"
-                EXTRA_ARGS=()
                 break
                 ;;
             q|Q)
@@ -113,120 +87,49 @@ resolve_numeric_mode() {
             MODE="sim"
             ;;
         2)
-            MODE="real"
-            ;;
-        3)
             MODE="mc"
             ;;
     esac
 }
 
-select_real_backend_from_menu() {
-    local choice
-    while true; do
-        show_real_backend_menu
-        read -r -p "输入数字选择 Real 后端: " choice
-        case "$choice" in
-            1)
-                REAL_BACKEND="serial"
-                break
-                ;;
-            2)
-                REAL_BACKEND="usbfdcan"
-                break
-                ;;
-            q|Q)
-                echo "已退出。"
-                exit 0
-                ;;
-            *)
-                PRINT_RED "无效选择: $choice"
-                ;;
-        esac
-    done
-}
-
-normalize_real_backend() {
-    case "${REAL_BACKEND:-serial}" in
-        ""|serial|uart)
-            REAL_BACKEND="serial"
-            ;;
-        usbfdcan|can|socketcan)
-            REAL_BACKEND="usbfdcan"
-            ;;
-        *)
-            PRINT_RED "错误: 未知 real 后端 '$REAL_BACKEND'。请使用 'serial' 或 'usbfdcan'。"
-            exit 1
-            ;;
-    esac
-}
-
-# 1. 参数解析与模式选择
 MODE=${1:-}
-EXTRA_ARGS=()
-REAL_BACKEND=${AM_D02_REAL_BACKEND:-serial}
 if [ -z "$MODE" ] || [[ "$MODE" == -* ]]; then
     select_mode_from_menu
 else
-    shift 2>/dev/null || true # 移出第一个参数，剩余参数传递给后端程序
+    shift 2>/dev/null || true
     resolve_numeric_mode
-    if [ "$MODE" == "real" ]; then
-        case "${1:-}" in
-            serial|uart|usbfdcan|can|socketcan)
-                REAL_BACKEND="$1"
-                shift 2>/dev/null || true
-                ;;
-        esac
-    fi
 fi
-if [ "$MODE" == "real" ]; then
-    normalize_real_backend
-fi
-APP_ARGS=("${EXTRA_ARGS[@]}" "$@")
+APP_ARGS=("$@")
 select_python
 
 echo "=========================================================="
 if [ "$MODE" == "sim" ]; then
-    echo "    AM-D02 软硬件联合仿真启动系统 (SITL 模式)       "
+    echo "    AM-DPBSURDF0422 左臂联合仿真启动系统 (SITL)       "
 elif [ "$MODE" == "mc" ] || [ "$MODE" == "monte-carlo" ]; then
-    echo "    AM-D02 蒙特卡罗末端位姿范围检查 (Monte Carlo)  "
-elif [ "$MODE" == "real" ]; then
-    if [ "$REAL_BACKEND" == "usbfdcan" ]; then
-        echo "    AM-D02 机械臂 SocketCAN USB2FDCAN 控制系统 (Real) "
-    else
-        echo "    AM-D02 机械臂真实硬件串口控制系统 (Real 模式)     "
-    fi
+    echo "    AM-DPBSURDF0422 左臂蒙特卡罗末端位姿范围检查      "
 else
-    PRINT_RED "错误: 未知模式 '$MODE'。请使用 'sim'、'mc' 或 'real'。"
+    PRINT_RED "错误: 未知模式 '$MODE'。请使用 'sim'、'mc' 或 'monte-carlo'。"
     exit 1
 fi
 echo "=========================================================="
 PRINT_BLUE "[System] Python 解释器: $PYTHON_BIN"
 
-# 2. 编译必要的 C 程序
-PRINT_BLUE "[1/3] 正在编译底层 C 语言组件..."
 if [ "$MODE" == "sim" ]; then
-    make -C c_interface clean && make -C c_interface c_main serial_gravity_comp
-elif [ "$MODE" == "mc" ] || [ "$MODE" == "monte-carlo" ]; then
-    PRINT_BLUE "[1/3] Monte Carlo 模式不需要编译 C 控制回路，跳过。"
-else
-    make -C c_interface serial_gravity_comp
-fi
+    PRINT_BLUE "[1/3] 正在编译底层 C 语言仿真控制器..."
+    make -C c_interface clean
+    make -C c_interface c_main
 
-# 3. 根据模式启动不同的链路
-if [ "$MODE" == "sim" ]; then
-    # --- 模式 A: 纯仿真 (SITL) ---
     PRINT_BLUE "[2/3] 启动后台 Python MuJoCo 物理仿真服务器..."
-    READY_FILE=$(mktemp /tmp/am_d02_server_ready.XXXXXX)
+    READY_FILE=$(mktemp /tmp/am_dpbs_server_ready.XXXXXX)
     "$PYTHON_BIN" python/main_server.py --ready-file "$READY_FILE" "${APP_ARGS[@]}" &
     SERVER_PID=$!
 
     cleanup() {
-        if [ ! -z "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
             kill "$SERVER_PID" 2>/dev/null || true
             wait "$SERVER_PID" 2>/dev/null || true
         fi
-        if [ ! -z "${READY_FILE:-}" ]; then
+        if [ -n "${READY_FILE:-}" ]; then
             rm -f "$READY_FILE"
         fi
     }
@@ -264,63 +167,15 @@ if [ "$MODE" == "sim" ]; then
     APP_STATUS=$?
     set -e
     exit $APP_STATUS
-
-elif [ "$MODE" == "mc" ] || [ "$MODE" == "monte-carlo" ]; then
-    # --- 模式 C: 蒙特卡罗末端位姿范围检查 ---
-    : "${AM_D02_ENABLE_VIEWER:=0}"
-    : "${AM_D02_ENABLE_RERUN:=0}"
-    export AM_D02_ENABLE_VIEWER
-    export AM_D02_ENABLE_RERUN
-
-    PRINT_BLUE "[2/3] 启动 MuJoCo 模型并随机采样关节空间..."
-    PRINT_GREEN "[3/3] 刷新并输出末端位置和四元数数值范围..."
-    echo "----------------------------------------------------------"
-    "$PYTHON_BIN" python/main_server.py --monte-carlo "${APP_ARGS[@]}"
-
-else
-    # --- 模式 B: 真实硬件 (Real) ---
-    if [ "$REAL_BACKEND" == "usbfdcan" ]; then
-        : "${AM_D02_CAN_INTERFACE:=can0}"
-        export AM_D02_CAN_INTERFACE
-        PRINT_BLUE "[2/3] 检查 SocketCAN 接口 ${AM_D02_CAN_INTERFACE}..."
-        if [ -e "/sys/class/net/${AM_D02_CAN_INTERFACE}" ]; then
-            CAN_STATE=$(cat "/sys/class/net/${AM_D02_CAN_INTERFACE}/operstate" 2>/dev/null || true)
-            if [ "$CAN_STATE" != "up" ]; then
-                PRINT_RED "警告: ${AM_D02_CAN_INTERFACE} 当前状态为 '${CAN_STATE:-unknown}'，请确认已配置并 up。"
-            fi
-        else
-            PRINT_RED "警告: 未检测到 SocketCAN 接口 ${AM_D02_CAN_INTERFACE}，请确保 USB2FDCAN 已枚举。"
-        fi
-    else
-        PRINT_BLUE "[2/3] 检查串口权限..."
-        SERIAL_PORT="/dev/ttyUSB0"
-        if [ -e "$SERIAL_PORT" ]; then
-            if [ ! -w "$SERIAL_PORT" ]; then
-                PRINT_BLUE "[System] 正在尝试获取串口 $SERIAL_PORT 的访问权限..."
-                sudo chmod o+rw "$SERIAL_PORT"
-            fi
-        else
-            PRINT_RED "警告: 未检测到串口 $SERIAL_PORT，请确保硬件已连接。"
-        fi
-    fi
-
-    : "${AM_D02_RERUN_LOG_STRIDE:=25}"
-    : "${AM_D02_REAL_VIEWER_FPS:=30}"
-    : "${AM_D02_RERUN_QUEUE_SIZE:=512}"
-    export AM_D02_RERUN_LOG_STRIDE
-    export AM_D02_REAL_VIEWER_FPS
-    export AM_D02_RERUN_QUEUE_SIZE
-
-    PRINT_BLUE "[System] Real 模式加速参数: Rerun 每 ${AM_D02_RERUN_LOG_STRIDE} 步记录一次, Viewer ${AM_D02_REAL_VIEWER_FPS} FPS"
-    if [ "$REAL_BACKEND" == "usbfdcan" ]; then
-        PRINT_GREEN "[3/3] 正式启动 Python SocketCAN USB2FDCAN 控制回路..."
-    else
-        PRINT_GREEN "[3/3] 正式启动 Python 串口控制回路..."
-    fi
-    echo "----------------------------------------------------------"
-    if [ "$REAL_BACKEND" == "usbfdcan" ]; then
-        "$PYTHON_BIN" python/real_can_control.py "${APP_ARGS[@]}"
-    else
-        "$PYTHON_BIN" python/serial_control.py "${APP_ARGS[@]}"
-    fi
 fi
+
+: "${AM_D02_ENABLE_VIEWER:=0}"
+: "${AM_D02_ENABLE_RERUN:=0}"
+export AM_D02_ENABLE_VIEWER
+export AM_D02_ENABLE_RERUN
+
+PRINT_BLUE "[1/3] Monte Carlo 模式不需要编译 C 控制回路，跳过。"
+PRINT_BLUE "[2/3] 启动 MuJoCo 模型并随机采样关节空间..."
+PRINT_GREEN "[3/3] 刷新并输出末端位置和四元数数值范围..."
+echo "----------------------------------------------------------"
+"$PYTHON_BIN" python/main_server.py --monte-carlo "${APP_ARGS[@]}"

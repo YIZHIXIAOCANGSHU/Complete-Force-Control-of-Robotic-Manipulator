@@ -1,7 +1,4 @@
-"""
-MuJoCo 仿真环境封装
-直接加载 URDF，通过 qfrc_applied 施加关节力矩
-"""
+"""MuJoCo 仿真环境封装。"""
 
 from __future__ import annotations
 
@@ -15,7 +12,7 @@ from sim_scene import build_enhanced_model
 
 
 class MujocoSimEnv:
-    """AM-D02 七轴机械臂 MuJoCo 仿真环境"""
+    """AM-DPBSURDF0422 左臂七轴 MuJoCo 仿真环境"""
 
     def __init__(self, urdf_path: str | None = None):
         if urdf_path is None:
@@ -36,9 +33,12 @@ class MujocoSimEnv:
 
         self.joint_ids, self.dof_ids = self._resolve_joint_ids()
         self.joint_lower, self.joint_upper = self._resolve_joint_limits()
+        self._apply_joint_sim_properties()
         self.ee_body_id = self._resolve_required_body_id(Config.END_EFFECTOR_BODY)
         self.target_mocap_id = self._get_mocap_id("target_pose")
         self.reported_mocap_id = self._get_mocap_id("reported_pose")
+        self.locked_dof_ids = self._resolve_uncontrolled_dof_ids()
+        self.locked_qpos_ids = self._resolve_uncontrolled_qpos_ids()
         self._torque_buffer = np.empty(Config.NUM_JOINTS, dtype=np.float64)
         self._zero_pos = np.zeros(3, dtype=np.float64)
         self._unit_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
@@ -72,6 +72,26 @@ class MujocoSimEnv:
             joint_upper[i] = max(lo, hi)
         return joint_lower, joint_upper
 
+    def _apply_joint_sim_properties(self) -> None:
+        self.model.dof_damping[self.dof_ids] = Config.JOINT_DAMPING
+        self.model.dof_armature[self.dof_ids] = Config.JOINT_ARMATURE
+
+    def _resolve_uncontrolled_dof_ids(self) -> np.ndarray:
+        controlled = set(int(dof_id) for dof_id in self.dof_ids)
+        return np.array(
+            [dof_id for dof_id in range(self.model.nv) if dof_id not in controlled],
+            dtype=np.int32,
+        )
+
+    def _resolve_uncontrolled_qpos_ids(self) -> np.ndarray:
+        controlled = set(int(self.model.jnt_qposadr[jid]) for jid in self.joint_ids)
+        qpos_ids = []
+        for jid in range(self.model.njnt):
+            qpos_id = int(self.model.jnt_qposadr[jid])
+            if qpos_id not in controlled:
+                qpos_ids.append(qpos_id)
+        return np.array(qpos_ids, dtype=np.int32)
+
     def _resolve_required_body_id(self, body_name: str) -> int:
         body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
         if body_id < 0:
@@ -88,11 +108,14 @@ class MujocoSimEnv:
         """重置仿真状态"""
         mujoco.mj_resetData(self.model, self.data)
         self.set_qpos(Config.HOME_QPOS if qpos is None else qpos)
+        self._lock_uncontrolled_joints()
         mujoco.mj_forward(self.model, self.data)
 
     def step(self) -> None:
         """执行一步仿真"""
+        self._lock_uncontrolled_joints()
         mujoco.mj_step(self.model, self.data)
+        self._lock_uncontrolled_joints()
 
     def forward(self) -> None:
         """前向运动学计算（不步进时间）"""
@@ -201,6 +224,15 @@ class MujocoSimEnv:
         tau: (7,) 各关节力矩 (N·m)
         """
         self.data.qfrc_applied[self.dof_ids] = tau
+
+    def _lock_uncontrolled_joints(self) -> None:
+        """锁住 AM-DPBSURDF0422 中未接入 7 轴控制器的自由度。"""
+        if len(self.locked_qpos_ids):
+            self.data.qpos[self.locked_qpos_ids] = 0.0
+        if len(self.locked_dof_ids):
+            self.data.qvel[self.locked_dof_ids] = 0.0
+            self.data.qacc[self.locked_dof_ids] = 0.0
+            self.data.qfrc_applied[self.locked_dof_ids] = 0.0
 
     def clip_torque(self, tau: np.ndarray) -> np.ndarray:
         """限幅力矩到关节力矩限制范围"""

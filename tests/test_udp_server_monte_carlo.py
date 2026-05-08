@@ -12,7 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from udp_server import (
     InternalWorkspaceBox,
     RangeAccumulator,
+    RangeSnapshot,
     WorkspaceHull,
+    _format_internal_workspace_box,
+    _format_monte_carlo_report,
     _workspace_box_edges,
     compute_largest_internal_workspace_box,
     compute_workspace_hull,
@@ -184,6 +187,76 @@ def test_compute_largest_internal_workspace_box_returns_empty_for_empty_hull():
     )
 
     assert box.is_empty
+
+
+def test_format_internal_workspace_box_reports_safe_pos_ranges():
+    box = InternalWorkspaceBox(
+        center=np.array([1.0, 2.0, 3.0]),
+        half_size=np.array([0.5, 0.25, 0.75]),
+        lower=np.array([0.5, 1.75, 2.25]),
+        upper=np.array([1.5, 2.25, 3.75]),
+        volume=1.5,
+    )
+
+    report = _format_internal_workspace_box(box, hull_point_count=42)
+
+    assert "安全 pos 输入范围" in report
+    assert "参与凸包计算的采样点数：42" in report
+    assert "x" in report
+    assert "0.500000" in report
+    assert "3.750000" in report
+
+
+def test_format_monte_carlo_report_uses_chinese_terminal_labels():
+    pos_stats = RangeSnapshot(
+        count=2,
+        minimum=np.array([0.0, 1.0, 2.0]),
+        maximum=np.array([1.0, 2.0, 3.0]),
+        mean=np.array([0.5, 1.5, 2.5]),
+        last=np.array([1.0, 2.0, 3.0]),
+    )
+    quat_stats = RangeSnapshot(
+        count=2,
+        minimum=np.array([1.0, 0.0, 0.0, 0.0]),
+        maximum=np.array([1.0, 0.1, 0.2, 0.3]),
+        mean=np.array([1.0, 0.05, 0.1, 0.15]),
+        last=np.array([1.0, 0.1, 0.2, 0.3]),
+    )
+    quat_norm_stats = RangeSnapshot(
+        count=2,
+        minimum=np.array([1.0]),
+        maximum=np.array([1.1]),
+        mean=np.array([1.05]),
+        last=np.array([1.1]),
+    )
+    internal_box = InternalWorkspaceBox(
+        center=np.array([0.5, 1.5, 2.5]),
+        half_size=np.array([0.25, 0.25, 0.25]),
+        lower=np.array([0.25, 1.25, 2.25]),
+        upper=np.array([0.75, 1.75, 2.75]),
+        volume=0.125,
+    )
+
+    report = _format_monte_carlo_report(
+        samples=2,
+        seed=None,
+        joint_lower=np.array([-1.0, -2.0]),
+        joint_upper=np.array([1.0, 2.0]),
+        pos_stats=pos_stats,
+        quat_stats=quat_stats,
+        quat_norm_stats=quat_norm_stats,
+        internal_box=internal_box,
+        hull_point_count=2,
+        last_qpos=np.array([0.1, 0.2]),
+    )
+
+    assert "AM-DPBSURDF0422 蒙特卡洛末端位姿范围检查" in report
+    assert "采样数量：2" in report
+    assert "随机种子：随机" in report
+    assert "末端位置范围：" in report
+    assert "最大内部轴对齐长方体" in report
+    assert "末端四元数范围" in report
+    assert "最后刷新样本：" in report
 
 
 def test_workspace_box_edges_returns_twelve_edges():

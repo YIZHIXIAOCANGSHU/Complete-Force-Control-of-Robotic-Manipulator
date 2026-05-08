@@ -165,9 +165,9 @@ def compute_workspace_bounds(
     if lower.shape != (3,) or upper.shape != (3,):
         raise ValueError(f"workspace bounds must be 3D vectors, got {lower.shape} and {upper.shape}")
     if padding_ratio < 0.0:
-        raise ValueError("padding_ratio cannot be negative")
+        raise ValueError("padding_ratio 不能为负数")
     if min_half_size <= 0.0:
-        raise ValueError("min_half_size must be positive")
+        raise ValueError("min_half_size 必须为正数")
 
     center = 0.5 * (lower + upper)
     half_size = 0.5 * (upper - lower)
@@ -179,7 +179,7 @@ def compute_workspace_bounds(
 def select_visualization_points(points: np.ndarray, max_points: int = DEFAULT_MC_MAX_VIS_POINTS) -> np.ndarray:
     samples = np.asarray(points, dtype=np.float64)
     if samples.ndim != 2 or samples.shape[1] != 3:
-        raise ValueError(f"visualization points must have shape (N, 3), got {samples.shape}")
+        raise ValueError(f"可视化点必须是 (N, 3) 形状，当前为 {samples.shape}")
     if max_points <= 0 or len(samples) <= max_points:
         return samples.copy()
 
@@ -198,11 +198,11 @@ def compute_workspace_hull(points: np.ndarray) -> WorkspaceHull:
         halfspace_offsets=np.empty(0, dtype=np.float64),
     )
     if samples.ndim != 2 or samples.shape[1] != 3:
-        raise ValueError(f"workspace hull points must have shape (N, 3), got {samples.shape}")
+        raise ValueError(f"工作空间凸包点必须是 (N, 3) 形状，当前为 {samples.shape}")
     if len(samples) < 4:
         return empty
     if not np.all(np.isfinite(samples)):
-        raise ValueError("workspace hull points contain non-finite values")
+        raise ValueError("工作空间凸包点包含非有限数值")
     if np.linalg.matrix_rank(samples - np.mean(samples, axis=0), tol=1e-9) < 3:
         return empty
 
@@ -271,12 +271,7 @@ def compute_largest_internal_workspace_box(hull: WorkspaceHull) -> InternalWorks
     if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) == 0:
         return _empty_internal_workspace_box()
     if not (np.all(np.isfinite(normals)) and np.all(np.isfinite(offsets)) and np.all(np.isfinite(vertices))):
-        raise ValueError("workspace hull contains non-finite values")
-
-    try:
-        from scipy.optimize import Bounds, LinearConstraint, minimize
-    except ImportError:
-        return _empty_internal_workspace_box()
+        raise ValueError("工作空间凸包包含非有限数值")
 
     abs_normals = np.abs(normals)
     vertex_min = np.min(vertices, axis=0)
@@ -297,32 +292,17 @@ def compute_largest_internal_workspace_box(hull: WorkspaceHull) -> InternalWorks
     # Variables are [cx, cy, cz, hx, hy, hz]. A box is inside a halfspace when
     # n.c + |n|.h + offset <= 0 for every hull plane.
     constraint_matrix = np.hstack((normals, abs_normals))
-    linear_constraint = LinearConstraint(
+    result = _maximize_log_box_half_size(
         constraint_matrix,
-        lb=np.full(len(offsets), -np.inf, dtype=np.float64),
-        ub=-offsets,
-    )
-    lower_bounds = np.concatenate((vertex_min, np.full(3, 1e-10, dtype=np.float64)))
-    upper_bounds = np.concatenate((vertex_max, np.maximum(span * 0.5, 1e-10)))
-    bounds = Bounds(lower_bounds, upper_bounds)
-
-    def objective(values: np.ndarray) -> float:
-        half_size = np.maximum(values[3:6], 1e-12)
-        return -float(np.sum(np.log(half_size)))
-
-    result = minimize(
-        objective,
+        -offsets,
         np.concatenate((center0, half0)),
-        method="SLSQP",
-        bounds=bounds,
-        constraints=[linear_constraint],
-        options={"ftol": 1e-10, "maxiter": 400, "disp": False},
     )
-    if not result.success or not np.all(np.isfinite(result.x)):
+    if result is None:
         return _empty_internal_workspace_box()
 
-    center = result.x[:3].astype(np.float64, copy=True)
-    half_size = result.x[3:6].astype(np.float64, copy=True)
+    center = result[:3].astype(np.float64, copy=True)
+    half_size = result[3:6].astype(np.float64, copy=True)
+    half_size = _expand_box_half_size_at_center(normals, offsets, center, half_size)
     residual = normals @ center + abs_normals @ half_size + offsets
     if np.max(residual) > 1e-6:
         half_size *= max(0.0, 1.0 - np.max(residual) / max(float(np.max(abs_normals @ half_size)), 1e-12))
@@ -339,6 +319,102 @@ def compute_largest_internal_workspace_box(hull: WorkspaceHull) -> InternalWorks
         upper=upper,
         volume=volume,
     )
+
+
+def _expand_box_half_size_at_center(
+    normals: np.ndarray,
+    offsets: np.ndarray,
+    center: np.ndarray,
+    half_size: np.ndarray,
+) -> np.ndarray:
+    expanded = np.asarray(half_size, dtype=np.float64).copy()
+    abs_normals = np.abs(np.asarray(normals, dtype=np.float64))
+    remaining = -np.asarray(offsets, dtype=np.float64) - np.asarray(normals, dtype=np.float64) @ center
+    if np.any(remaining <= 0.0):
+        return expanded
+
+    for axis in range(3):
+        other_axes = [idx for idx in range(3) if idx != axis]
+        base = abs_normals[:, other_axes] @ expanded[other_axes]
+        candidates = remaining - base
+        relevant = abs_normals[:, axis] > 1e-12
+        if np.any(relevant):
+            expanded[axis] = max(
+                expanded[axis],
+                float(np.min(candidates[relevant] / abs_normals[relevant, axis])),
+            )
+            expanded[axis] = max(expanded[axis], 0.0)
+    return expanded
+
+
+def _maximize_log_box_half_size(
+    constraint_matrix: np.ndarray,
+    constraint_upper: np.ndarray,
+    initial: np.ndarray,
+) -> np.ndarray | None:
+    x = np.asarray(initial, dtype=np.float64).copy()
+    a = np.asarray(constraint_matrix, dtype=np.float64)
+    upper = np.asarray(constraint_upper, dtype=np.float64)
+    if x.shape != (6,) or a.ndim != 2 or a.shape[1] != 6 or upper.shape != (a.shape[0],):
+        raise ValueError("内部长方体优化输入形状无效")
+
+    def is_strictly_feasible(values: np.ndarray) -> bool:
+        return bool(np.all(values[3:6] > 0.0) and np.all(upper - a @ values > 0.0))
+
+    if not is_strictly_feasible(x):
+        return None
+
+    identity_floor = np.eye(6, dtype=np.float64) * 1e-12
+    for barrier_weight in (1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0):
+        for _ in range(80):
+            half_size = x[3:6]
+            slack = upper - a @ x
+            if np.any(half_size <= 0.0) or np.any(slack <= 0.0):
+                return None
+
+            gradient = a.T @ (1.0 / slack)
+            gradient[3:6] -= barrier_weight / half_size
+            weighted_a = a / slack[:, np.newaxis]
+            hessian = weighted_a.T @ weighted_a
+            hessian[3:6, 3:6] += np.diag(barrier_weight / (half_size * half_size))
+            hessian += identity_floor
+
+            try:
+                step = np.linalg.solve(hessian, -gradient)
+            except np.linalg.LinAlgError:
+                step = np.linalg.lstsq(hessian, -gradient, rcond=None)[0]
+
+            decrement_sq = -float(gradient @ step)
+            if decrement_sq <= 1e-14:
+                break
+
+            current_value = _box_barrier_objective(x, a, upper, barrier_weight)
+            step_scale = 1.0
+            directional_derivative = float(gradient @ step)
+            while step_scale > 1e-12:
+                candidate = x + step_scale * step
+                if is_strictly_feasible(candidate):
+                    candidate_value = _box_barrier_objective(candidate, a, upper, barrier_weight)
+                    if candidate_value <= current_value + 1e-4 * step_scale * directional_derivative:
+                        x = candidate
+                        break
+                step_scale *= 0.5
+            else:
+                break
+    return x
+
+
+def _box_barrier_objective(
+    values: np.ndarray,
+    constraint_matrix: np.ndarray,
+    constraint_upper: np.ndarray,
+    barrier_weight: float,
+) -> float:
+    half_size = values[3:6]
+    slack = constraint_upper - constraint_matrix @ values
+    if np.any(half_size <= 0.0) or np.any(slack <= 0.0):
+        return float("inf")
+    return float(-barrier_weight * np.sum(np.log(half_size)) - np.sum(np.log(slack)))
 
 
 def _add_viewer_geom(
@@ -486,7 +562,36 @@ def _draw_workspace_shape(scene, center: np.ndarray, half_size: np.ndarray, poin
             break
 
 
-def _draw_workspace_hull(scene, hull: WorkspaceHull, points: np.ndarray) -> None:
+def _draw_internal_workspace_box(scene, box: InternalWorkspaceBox) -> None:
+    if box.is_empty:
+        return
+    import mujoco
+
+    _add_viewer_geom(
+        scene,
+        mujoco.mjtGeom.mjGEOM_BOX,
+        size=box.half_size,
+        pos=box.center,
+        rgba=np.array([0.1, 0.85, 0.35, 0.24], dtype=np.float32),
+    )
+    for start, end in _workspace_box_edges(box.center, box.half_size):
+        if not _add_viewer_connector(
+            scene,
+            mujoco.mjtGeom.mjGEOM_LINE,
+            width=5.0,
+            start=start,
+            end=end,
+            rgba=np.array([0.0, 0.72, 0.28, 0.98], dtype=np.float32),
+        ):
+            break
+
+
+def _draw_workspace_hull(
+    scene,
+    hull: WorkspaceHull,
+    points: np.ndarray,
+    internal_box: InternalWorkspaceBox | None = None,
+) -> None:
     import mujoco
 
     scene.ngeom = 0
@@ -499,6 +604,9 @@ def _draw_workspace_hull(scene, hull: WorkspaceHull, points: np.ndarray) -> None
     edge_rgba = np.array([0.0, 0.24, 0.95, 0.95], dtype=np.float32)
     vertex_rgba = np.array([0.0, 0.68, 1.0, 0.85], dtype=np.float32)
     point_rgba = np.array([1.0, 0.72, 0.1, 0.78], dtype=np.float32)
+
+    if internal_box is not None:
+        _draw_internal_workspace_box(scene, internal_box)
 
     for a, b, c in hull.triangles:
         if not _add_viewer_triangle(scene, hull.vertices[a], hull.vertices[b], hull.vertices[c], face_rgba):
@@ -545,6 +653,8 @@ def _show_monte_carlo_workspace_viewer(
     points: np.ndarray,
     pos_stats: RangeSnapshot,
     last_qpos: np.ndarray,
+    hull: WorkspaceHull | None = None,
+    internal_box: InternalWorkspaceBox | None = None,
     max_visual_points: int = DEFAULT_MC_MAX_VIS_POINTS,
     max_hull_points: int = DEFAULT_MC_MAX_HULL_POINTS,
 ) -> None:
@@ -556,20 +666,25 @@ def _show_monte_carlo_workspace_viewer(
         return
 
     visual_points = select_visualization_points(points, max_visual_points)
-    hull_points = select_visualization_points(points, max_hull_points)
-    hull = compute_workspace_hull(hull_points)
+    if hull is None:
+        hull_points = select_visualization_points(points, max_hull_points)
+        hull = compute_workspace_hull(hull_points)
+    if internal_box is None:
+        internal_box = compute_largest_internal_workspace_box(hull)
 
     env.set_qpos(last_qpos)
     env.set_qvel(np.zeros_like(last_qpos))
     env.forward()
-    env.set_target_pose(hull.center if not hull.is_empty else pos_stats.mean)
+    target_pos = internal_box.center if not internal_box.is_empty else hull.center if not hull.is_empty else pos_stats.mean
+    env.set_target_pose(target_pos)
 
     if hull.is_empty:
         print("[MC Viewer] 凸包点云退化，回退显示范围盒子。关闭窗口后程序退出。")
     else:
         print(
             "[MC Viewer] 打开 MuJoCo 窗口：蓝色透明多面体为末端可达空间凸包，"
-            f"面数={len(hull.triangles)}, 顶点={len(hull.vertices)}, 黄色点为采样末端位置。关闭窗口后程序退出。"
+            f"绿色透明长方体为内部最大可输入 pos 范围，面数={len(hull.triangles)}, "
+            f"顶点={len(hull.vertices)}, 黄色点为采样末端位置。关闭窗口后程序退出。"
         )
     sys.stdout.flush()
     with launch_passive_viewer(env.model, env.data) as viewer:
@@ -577,7 +692,7 @@ def _show_monte_carlo_workspace_viewer(
             lock = viewer.lock() if hasattr(viewer, "lock") else nullcontext()
             with lock:
                 if hasattr(viewer, "user_scn"):
-                    _draw_workspace_hull(viewer.user_scn, hull, visual_points)
+                    _draw_workspace_hull(viewer.user_scn, hull, visual_points, internal_box)
             viewer.sync()
             time.sleep(1.0 / 30.0)
 
@@ -588,7 +703,7 @@ def _format_vector(values: np.ndarray, precision: int = 6) -> str:
 
 def _format_range_block(labels: list[str], snapshot: RangeSnapshot, unit: str = "") -> str:
     suffix = f" {unit}" if unit else ""
-    lines = ["name        min           max           span          mean"]
+    lines = ["名称        最小值        最大值        跨度          均值"]
     for label, lo, hi, span, mean in zip(
         labels,
         snapshot.minimum,
@@ -597,6 +712,34 @@ def _format_range_block(labels: list[str], snapshot: RangeSnapshot, unit: str = 
         snapshot.mean,
     ):
         lines.append(f"{label:<5} {lo:>12.6f} {hi:>12.6f} {span:>12.6f} {mean:>12.6f}{suffix}")
+    return "\n".join(lines)
+
+
+def _format_internal_workspace_box(box: InternalWorkspaceBox, hull_point_count: int) -> str:
+    if box.is_empty:
+        return "\n".join(
+            [
+                "最大内部轴对齐长方体：",
+                "不可用（工作空间凸包为空或退化）",
+            ]
+        )
+
+    lines = [
+        "最大内部轴对齐长方体（安全 pos 输入范围）：",
+        f"参与凸包计算的采样点数：{hull_point_count}",
+        f"中心位置(m)：{_format_vector(box.center)}",
+        f"半边长(m)：{_format_vector(box.half_size)}",
+        f"体积(m^3)：{box.volume:.9f}",
+        "轴          最小值        最大值        跨度          中心值",
+    ]
+    for label, lo, hi, span, center in zip(
+        ["x", "y", "z"],
+        box.lower,
+        box.upper,
+        2.0 * box.half_size,
+        box.center,
+    ):
+        lines.append(f"{label:<5} {lo:>12.6f} {hi:>12.6f} {span:>12.6f} {center:>12.6f} m")
     return "\n".join(lines)
 
 
@@ -609,33 +752,37 @@ def _format_monte_carlo_report(
     pos_stats: RangeSnapshot,
     quat_stats: RangeSnapshot,
     quat_norm_stats: RangeSnapshot,
+    internal_box: InternalWorkspaceBox,
+    hull_point_count: int,
     last_qpos: np.ndarray,
 ) -> str:
-    seed_text = "random" if seed is None else str(seed)
+    seed_text = "随机" if seed is None else str(seed)
     return "\n".join(
         [
             "",
             "=" * 72,
-            "AM-D02 Monte Carlo end-effector range check",
+            "AM-DPBSURDF0422 蒙特卡洛末端位姿范围检查",
             "=" * 72,
-            f"samples: {samples}",
-            f"seed: {seed_text}",
-            f"joint lower(rad): {_format_vector(joint_lower)}",
-            f"joint upper(rad): {_format_vector(joint_upper)}",
+            f"采样数量：{samples}",
+            f"随机种子：{seed_text}",
+            f"关节下限(rad)：{_format_vector(joint_lower)}",
+            f"关节上限(rad)：{_format_vector(joint_upper)}",
             "",
-            "End-effector position range:",
+            "末端位置范围：",
             _format_range_block(["x", "y", "z"], pos_stats, "m"),
             "",
-            "End-effector quaternion range [w, x, y, z]:",
+            _format_internal_workspace_box(internal_box, hull_point_count),
+            "",
+            "末端四元数范围 [w, x, y, z]：",
             _format_range_block(["w", "x", "y", "z"], quat_stats),
             "",
-            "Quaternion norm range:",
+            "四元数范数范围：",
             _format_range_block(["|q|"], quat_norm_stats),
             "",
-            "Latest refreshed sample:",
-            f"qpos(rad): {_format_vector(last_qpos)}",
-            f"ee_pos(m): {_format_vector(pos_stats.last)}",
-            f"ee_quat(wxyz): {_format_vector(quat_stats.last)}",
+            "最后刷新样本：",
+            f"关节角 qpos(rad)：{_format_vector(last_qpos)}",
+            f"末端位置 ee_pos(m)：{_format_vector(pos_stats.last)}",
+            f"末端四元数 ee_quat(wxyz)：{_format_vector(quat_stats.last)}",
             "=" * 72,
         ]
     )
@@ -653,15 +800,15 @@ def run_monte_carlo_range_check(
 ) -> None:
     """Use the normal sim environment to sample FK ranges without starting UDP."""
     if samples <= 0:
-        raise ValueError("samples must be positive")
+        raise ValueError("samples 必须为正数")
     if progress_interval < 0:
-        raise ValueError("progress_interval cannot be negative")
+        raise ValueError("progress_interval 不能为负数")
     if max_hull_points <= 0:
-        raise ValueError("max_hull_points must be positive")
+        raise ValueError("max_hull_points 必须为正数")
 
     print("=" * 60)
-    print("      AM-D02 Python MuJoCo Simulation Server       ")
-    print("      Monte Carlo 末端位置/四元数范围检查          ")
+    print("      AM-DPBSURDF0422 Python MuJoCo 仿真服务      ")
+    print("      蒙特卡洛末端位置/四元数范围检查              ")
     print("=" * 60)
     sys.stdout.flush()
 
@@ -681,7 +828,7 @@ def run_monte_carlo_range_check(
     last_qpos = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
     ee_points: list[np.ndarray] = []
 
-    print(f"[MC] samples={samples}, seed={'random' if seed is None else seed}")
+    print(f"[MC] 采样数量={samples}, 随机种子={'随机' if seed is None else seed}")
     print("[MC] 使用原 sim 的 MujocoSimEnv 做 FK 采样，按 Ctrl+C 可提前输出已采样范围。")
 
     try:
@@ -703,8 +850,8 @@ def run_monte_carlo_range_check(
                 sys.stdout.write(
                     "\r"
                     f"[MC] {current:>{len(str(samples))}}/{samples} "
-                    f"ee_pos={_format_vector(pos, precision=4)} "
-                    f"ee_quat={_format_vector(quat, precision=4)}"
+                    f"末端位置={_format_vector(pos, precision=4)} "
+                    f"末端四元数={_format_vector(quat, precision=4)}"
                 )
                 sys.stdout.flush()
         if progress_interval:
@@ -718,6 +865,11 @@ def run_monte_carlo_range_check(
         print("[MC] 没有采到样本，结束。")
         return
 
+    points_array = np.asarray(ee_points, dtype=np.float64)
+    hull_points = select_visualization_points(points_array, max_hull_points)
+    workspace_hull = compute_workspace_hull(hull_points)
+    internal_box = compute_largest_internal_workspace_box(workspace_hull)
+
     print(
         _format_monte_carlo_report(
             samples=pos_stats.snapshot().count,
@@ -727,6 +879,8 @@ def run_monte_carlo_range_check(
             pos_stats=pos_stats.snapshot(),
             quat_stats=quat_stats.snapshot(),
             quat_norm_stats=quat_norm_stats.snapshot(),
+            internal_box=internal_box,
+            hull_point_count=len(hull_points),
             last_qpos=last_qpos,
         )
     )
@@ -734,9 +888,11 @@ def run_monte_carlo_range_check(
     if show_viewer:
         _show_monte_carlo_workspace_viewer(
             env,
-            points=np.asarray(ee_points, dtype=np.float64),
+            points=points_array,
             pos_stats=pos_stats.snapshot(),
             last_qpos=last_qpos,
+            hull=workspace_hull,
+            internal_box=internal_box,
             max_visual_points=max_visual_points,
             max_hull_points=max_hull_points,
         )
@@ -744,7 +900,7 @@ def run_monte_carlo_range_check(
 
 def run_udp_server(ready_file: str | None = None) -> None:
     print("=" * 60)
-    print("      AM-D02 Python UDP Simulation Server       ")
+    print("      AM-DPBSURDF0422 Python UDP 仿真服务        ")
     print("   允许独立的外部 C 语言控制器通过 Socket 接入  ")
     print("=" * 60)
 
@@ -759,7 +915,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
     env.forward()
     box_init_pos = env.get_ee_pos().copy()
     box_init_quat = env.get_ee_quat().copy()
-    print(f"[Server] INIT_QPOS FK => box init pos: {box_init_pos}")
+    print(f"[Server] INIT_QPOS 正向运动学 => 初始目标位置: {box_init_pos}")
 
     env.reset(Config.HOME_QPOS)
     env.forward()
@@ -786,14 +942,14 @@ def run_udp_server(ready_file: str | None = None) -> None:
     try:
         while True:
             if viewer and not viewer.is_running():
-                print("[UDP Server] Viewer is closed. Exiting.")
+                print("[UDP Server] 可视化窗口已关闭，退出。")
                 break
 
             try:
                 data, addr = sock.recvfrom(1024)
 
                 if data == b"INIT":
-                    print(f"[UDP Server] Client {addr} connected! (INIT received)")
+                    print(f"[UDP Server] 客户端 {addr} 已连接（收到 INIT）。")
                     env.write_state_packet(state_packet)
                     sock.sendto(state_packet_view, addr)
                     continue
@@ -839,7 +995,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
                 continue
 
     except KeyboardInterrupt:
-        print("\n[UDP Server] Interrupted by user. Exiting...")
+        print("\n[UDP Server] 用户中断，正在退出...")
     finally:
         if viewer:
             viewer.close()

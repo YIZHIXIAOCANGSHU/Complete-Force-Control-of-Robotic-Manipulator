@@ -28,15 +28,13 @@
 /* ================================================================
  *  基础运行参数
  * ================================================================ */
-#define CONTROL_DT 0.01  /* 控制步长 (秒) */
-#define NUM_JOINTS 7     /* 机器人关节数量 */
-/* Host bridge 仍使用该偏移量做 MuJoCo 坐标转换，保留兼容定义 */
-#define MUJOCO_Z_OFFSET 1.0 /* MuJoCo 仿真中机器人基座的高度偏移 */
+#define CONTROL_DT 0.01 /* 控制步长 (秒) */
+#define NUM_JOINTS 7    /* 控制 AM-DPBSURDF0422 左臂七轴 */
 
 /* ================================================================
  *  TCP 偏移
  * ================================================================ */
-/* TCP 偏移量 (相对于 ArmLseventh_Joint，本地坐标系，单位 m) */
+/* TCP 偏移量 (相对于 ArmL07Output_Link，本地坐标系，单位 m) */
 #define TCP_OFFSET_X 0.0
 #define TCP_OFFSET_Y 0.07
 #define TCP_OFFSET_Z -0.03
@@ -80,13 +78,13 @@
 /* ================================================================
  *  力矩限制
  * ================================================================ */
-/* 关节力矩限制 (N.m)，与 AM-D02-AemLURDF0413 URDF limit effort 对齐 */
+/* 关节力矩限制 (N.m)，与 AM-DPBSURDF0422 左臂 URDF limit effort 对齐 */
 #define JOINT_TORQUE_LIMIT_1 40.0
 #define JOINT_TORQUE_LIMIT_2 40.0
 #define JOINT_TORQUE_LIMIT_3 27.0
 #define JOINT_TORQUE_LIMIT_4 27.0
-#define JOINT_TORQUE_LIMIT_5 7.0
-#define JOINT_TORQUE_LIMIT_6 7.0
+#define JOINT_TORQUE_LIMIT_5 9.0
+#define JOINT_TORQUE_LIMIT_6 9.0
 #define JOINT_TORQUE_LIMIT_7 9.0
 
 /* ================================================================
@@ -117,20 +115,20 @@
  *  关节安全限位
  * ================================================================ */
 /* 位置限位输入单位为度, 内部自动转换为 rad 供控制与运动学模块使用 */
-#define JOINT_POS_MIN_1_DEG (-89.971835)
-#define JOINT_POS_MAX_1_DEG (89.971835)
-#define JOINT_POS_MIN_2_DEG (-89.954374)
-#define JOINT_POS_MAX_2_DEG (20.587610)
-#define JOINT_POS_MIN_3_DEG (-68.754935)
-#define JOINT_POS_MAX_3_DEG (45.836624)
-#define JOINT_POS_MIN_4_DEG (-119.748454)
-#define JOINT_POS_MAX_4_DEG (119.954374)
-#define JOINT_POS_MIN_5_DEG (-45.836624)
-#define JOINT_POS_MAX_5_DEG (45.836624)
-#define JOINT_POS_MIN_6_DEG (-61.306275)
-#define JOINT_POS_MAX_6_DEG (45.263666)
-#define JOINT_POS_MIN_7_DEG (-61.306275)
-#define JOINT_POS_MAX_7_DEG (61.306275)
+#define JOINT_POS_MIN_1_DEG (-134.645080)
+#define JOINT_POS_MAX_1_DEG (134.645080)
+#define JOINT_POS_MIN_2_DEG (-129.488461)
+#define JOINT_POS_MAX_2_DEG (14.896902)
+#define JOINT_POS_MIN_3_DEG (-94.538036)
+#define JOINT_POS_MAX_3_DEG (94.538036)
+#define JOINT_POS_MIN_4_DEG (0.0)
+#define JOINT_POS_MAX_4_DEG (129.946151)
+#define JOINT_POS_MIN_5_DEG (-89.954374)
+#define JOINT_POS_MAX_5_DEG (89.954374)
+#define JOINT_POS_MIN_6_DEG (-41.482483)
+#define JOINT_POS_MAX_6_DEG (60.733526)
+#define JOINT_POS_MIN_7_DEG (-78.495218)
+#define JOINT_POS_MAX_7_DEG (89.954374)
 
 #define JOINT_POS_MIN_1 DEG2RAD(JOINT_POS_MIN_1_DEG)
 #define JOINT_POS_MAX_1 DEG2RAD(JOINT_POS_MAX_1_DEG)

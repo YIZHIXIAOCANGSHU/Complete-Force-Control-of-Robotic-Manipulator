@@ -1,6 +1,4 @@
-"""
-AM-D02 七轴机械臂仿真配置
-"""
+"""AM-DPBSURDF0422 左臂七轴仿真配置。"""
 import os
 import numpy as np
 
@@ -36,10 +34,9 @@ class Config:
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     URDF_PATH = os.path.join(
         PROJECT_ROOT,
-        "AM-D02-AemLURDF_real",
-        "AM-D02-AemLURDF0413",
+        "AM-DPBSURDF0422",
         "urdf",
-        "AM-D02-AemLURDF0413.urdf",
+        "AM-DPBSURDF0422.urdf",
     )
     RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
     
@@ -47,32 +44,31 @@ class Config:
     ENABLE_VIEWER = _env_bool("AM_D02_ENABLE_VIEWER", True)
     ENABLE_RERUN = _env_bool("AM_D02_ENABLE_RERUN", True)
     RERUN_LOG_STRIDE = max(1, _env_int("AM_D02_RERUN_LOG_STRIDE", 10))
-    REAL_VIEWER_FPS = max(1.0, _env_float("AM_D02_REAL_VIEWER_FPS", 60.0))
-    SERIAL_IDLE_SLEEP_S = max(0.0, _env_float("AM_D02_SERIAL_IDLE_SLEEP_S", 0.00005))
-    RERUN_QUEUE_SIZE = max(8, _env_int("AM_D02_RERUN_QUEUE_SIZE", 256))
-    UART_TEXT_LOG_INTERVAL = max(1, _env_int("AM_D02_UART_TEXT_LOG_INTERVAL", 100))
-    SERIAL_FORWARD_TARGET = _env_bool("AM_D02_SERIAL_FORWARD_TARGET", True)
     
     # === 关节配置 (Joints) ===
     NUM_JOINTS = 7
     JOINT_NAMES = [
-        "ArmLsecond_Joint",
-        "ArmLthird_Joint",
-        "ArmLfourth_Joint",
-        "ArmLfifth_Joint",
-        "ArmLsixth_Joint",
-        "ArmLsixthoutput_Joint",
-        "ArmLseventh_Joint",
+        "ArmL02_Joint",
+        "AM-D02-J14_Joint",
+        "ArmL04_Joint",
+        "ArmL05_Joint",
+        "ArmL06_Joint",
+        "ArmL07_Joint",
+        "ArmL07Output_Joint",
     ]
     
     # 末端连杆名称（用于获取末端位姿）
     END_EFFECTOR_BODY = "tcp"
     
-    # TCP 偏移量 (相对于 ArmLseventh_Joint 本体坐标系, 单位 m)
+    # TCP 偏移量 (相对于 ArmL07Output_Link 本体坐标系, 单位 m)
     TCP_OFFSET = np.array([0.0, 0.07, -0.03])  # 向前70mm, 向右40mm
     
     # 力矩限制 (N·m)
-    TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0])
+    TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 9.0, 9.0, 9.0])
+
+    # 新模型腕部惯量较轻，给纯力矩仿真补一点被动阻尼/转子惯量，避免默认目标启动时冲过速度保护。
+    JOINT_DAMPING = np.array([2.0, 2.0, 1.5, 1.5, 0.8, 0.8, 0.8])
+    JOINT_ARMATURE = np.array([0.02, 0.02, 0.015, 0.015, 0.01, 0.01, 0.01])
     
     # === 仿真参数 ===
     DT = 0.01  # 仿真步长 (秒)，对应 100 Hz

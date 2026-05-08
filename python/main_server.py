@@ -19,6 +19,38 @@ from udp_server import (
 )
 
 
+def _translate_argparse_text(text: str) -> str:
+    replacements = {
+        "usage:": "用法:",
+        "options:": "选项:",
+        "optional arguments:": "可选参数:",
+        "show this help message and exit": "显示帮助信息并退出",
+        "error:": "错误:",
+        "unrecognized arguments:": "无法识别的参数:",
+        "argument --seed: invalid _arg_seed value:": "参数 --seed 的取值无效:",
+        "argument -n/--samples: invalid int value:": "参数 -n/--samples 必须是整数:",
+        "argument --progress-interval: invalid int value:": "参数 --progress-interval 必须是整数:",
+        "argument --max-visual-points: invalid int value:": "参数 --max-visual-points 必须是整数:",
+        "argument --max-hull-points: invalid int value:": "参数 --max-hull-points 必须是整数:",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return text
+
+
+class ChineseArgumentParser(argparse.ArgumentParser):
+    def format_usage(self) -> str:
+        return _translate_argparse_text(super().format_usage())
+
+    def format_help(self) -> str:
+        return _translate_argparse_text(super().format_help())
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        if message:
+            message = _translate_argparse_text(message)
+        super().exit(status, message)
+
+
 def _arg_seed(value: str) -> int | None:
     if value.strip().lower() in ("none", "random", "-"):
         return None
@@ -43,52 +75,52 @@ def _env_seed(name: str) -> int | None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AM-D02 MuJoCo UDP simulation server")
+    parser = ChineseArgumentParser(description="AM-DPBSURDF0422 MuJoCo 仿真/蒙特卡洛服务")
     parser.add_argument(
         "--ready-file",
         default=None,
-        help="Optional file path written once the UDP server is ready for clients",
+        help="UDP 服务就绪后写入的可选标记文件路径",
     )
     parser.add_argument(
         "--monte-carlo",
         action="store_true",
-        help="Run the sim environment in Monte Carlo FK range-check mode instead of UDP server mode",
+        help="启用蒙特卡洛正向运动学范围检查模式，而不是 UDP 仿真服务模式",
     )
     parser.add_argument(
         "-n",
         "--samples",
         type=int,
         default=max(1, _env_int("AM_D02_MC_SAMPLES", DEFAULT_MC_SAMPLES)),
-        help="Monte Carlo sample count when --monte-carlo is enabled",
+        help="蒙特卡洛模式的采样数量",
     )
     parser.add_argument(
         "--seed",
         type=_arg_seed,
         default=_env_seed("AM_D02_MC_SEED"),
-        help="Monte Carlo random seed. Use 'random' for non-deterministic sampling",
+        help="蒙特卡洛随机种子；使用 'random' 表示非确定性采样",
     )
     parser.add_argument(
         "--progress-interval",
         type=int,
         default=max(0, _env_int("AM_D02_MC_PROGRESS_INTERVAL", DEFAULT_MC_PROGRESS_INTERVAL)),
-        help="Refresh terminal every N Monte Carlo samples. Use 0 to disable progress refresh",
+        help="每采样 N 次刷新一次终端进度；使用 0 关闭进度刷新",
     )
     parser.add_argument(
         "--no-viewer",
         action="store_true",
-        help="Do not open the MuJoCo workspace range viewer after Monte Carlo sampling",
+        help="蒙特卡洛采样结束后不打开 MuJoCo 工作空间范围窗口",
     )
     parser.add_argument(
         "--max-visual-points",
         type=int,
         default=max(1, _env_int("AM_D02_MC_MAX_VIS_POINTS", DEFAULT_MC_MAX_VIS_POINTS)),
-        help="Maximum end-effector sample points shown in the MuJoCo viewer",
+        help="MuJoCo 窗口中最多显示的末端采样点数量",
     )
     parser.add_argument(
         "--max-hull-points",
         type=int,
         default=max(1, _env_int("AM_D02_MC_MAX_HULL_POINTS", DEFAULT_MC_MAX_HULL_POINTS)),
-        help="Maximum end-effector sample points used to build the MuJoCo workspace hull",
+        help="用于构建工作空间凸包的最大末端采样点数量",
     )
     args = parser.parse_args()
     try:

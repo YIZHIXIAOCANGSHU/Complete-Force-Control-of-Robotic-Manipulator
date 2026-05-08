@@ -224,21 +224,21 @@ def _setup_trajectory_styles():
         rr.log(f"joint_state/qd/J{i+1}", rr.SeriesLines(colors=[_JOINT_COLORS[i]], names=[f"J{i+1} vel"], widths=[2]), static=True)
 
     # 延时曲线样式
-    rr.log("performance/uart_latency",
+    rr.log("performance/link_latency",
            rr.SeriesLines(colors=[[230, 150, 50]],
-                          names=["UART Loop Period (ms)"],
+                          names=["Control Link Period (ms)"],
                           widths=[2]),
            static=True)
 
-    rr.log("performance/uart_cycle_hz",
+    rr.log("performance/link_cycle_hz",
            rr.SeriesLines(colors=[[230, 120, 40]],
-                          names=["UART Loop Rate (Hz)"],
+                          names=["Control Link Rate (Hz)"],
                           widths=[2]),
            static=True)
 
-    rr.log("performance/uart_transfer_kbps",
+    rr.log("performance/link_transfer_kbps",
            rr.SeriesLines(colors=[[230, 180, 80]],
-                          names=["UART Effective Throughput (kbps)"],
+                          names=["Control Link Throughput (kbps)"],
                           widths=[2]),
            static=True)
     
@@ -300,9 +300,9 @@ def setup_realtime_styles():
         rr.log(f"total_torque/J{i+1}/actual", rr.Scalars(0.0))
         rr.log(f"torque_gap/J{i+1}/delta", rr.Scalars(0.0))
     rr.log("performance/c_engine_time", rr.Scalars(0.0))
-    rr.log("performance/uart_latency", rr.Scalars(0.0))
-    rr.log("performance/uart_cycle_hz", rr.Scalars(0.0))
-    rr.log("performance/uart_transfer_kbps", rr.Scalars(0.0))
+    rr.log("performance/link_latency", rr.Scalars(0.0))
+    rr.log("performance/link_cycle_hz", rr.Scalars(0.0))
+    rr.log("performance/link_transfer_kbps", rr.Scalars(0.0))
     rr.log("performance/stm32_calc_time", rr.Scalars(0.0))
     rr.log("performance/stm32_calc_hz", rr.Scalars(0.0))
 
@@ -348,19 +348,19 @@ def setup_realtime_styles():
 
     joint_q_view = rrb.TimeSeriesView(name="Joint Positions (rad)", origin="/joint_state/q")
     joint_qd_view = rrb.TimeSeriesView(name="Joint Velocities (rad/s)", origin="/joint_state/qd")
-    
-    uart_log_view = rrb.TextLogView(name="UART Protocol Log", origin="/uart_log")
-    
+
+    link_log_view = rrb.TextLogView(name="Control Link Log", origin="/control_link_log")
+
     latency_view = rrb.TimeSeriesView(
-        name="UART Communication Latency (ms)", origin="/performance/uart_latency",
+        name="Control Link Period (ms)", origin="/performance/link_latency",
     )
 
-    uart_cycle_rate_view = rrb.TimeSeriesView(
-        name="UART Loop Rate (Hz)", origin="/performance/uart_cycle_hz",
+    link_cycle_rate_view = rrb.TimeSeriesView(
+        name="Control Link Rate (Hz)", origin="/performance/link_cycle_hz",
     )
 
-    uart_transfer_rate_view = rrb.TimeSeriesView(
-        name="UART Effective Throughput (kbps)", origin="/performance/uart_transfer_kbps",
+    link_transfer_rate_view = rrb.TimeSeriesView(
+        name="Control Link Throughput (kbps)", origin="/performance/link_transfer_kbps",
     )
     
     stm32_time_view = rrb.TimeSeriesView(
@@ -392,11 +392,11 @@ def setup_realtime_styles():
                 rrb.Vertical(joint_q_view, joint_qd_view, name="Joint States"),
                 rrb.Vertical(*total_torque_views, name="Total Torque (from STM32)"),
                 rrb.Vertical(*torque_gap_views, name="Total Torque Gap"),
-                rrb.Vertical(uart_log_view, latency_view, name="UART Protocol"),
+                rrb.Vertical(link_log_view, latency_view, name="Control Link"),
                 rrb.Vertical(
                     python_time_view,
-                    uart_cycle_rate_view,
-                    uart_transfer_rate_view,
+                    link_cycle_rate_view,
+                    link_transfer_rate_view,
                     stm32_time_view,
                     stm32_rate_view,
                     name="Performance Rates",
@@ -472,16 +472,16 @@ def log_realtime_step(
             
     # Text Log for Sent/Received Data (Throttled to 10Hz to prevent lag at 1kHz loop)
     if rx_str and tx_str:
-        rr.log("uart_log", rr.TextLog(f"[{step_count}] RX (Positions): {rx_str}\n[{step_count}] TX ({tx_label}): {tx_str}"))
+        rr.log("control_link_log", rr.TextLog(f"[{step_count}] RX (Positions): {rx_str}\n[{step_count}] TX ({tx_label}): {tx_str}"))
 
     # Performance
     rr.log("performance/c_engine_time", rr.Scalars(float(cycle_time)))
     if uart_latency_ms is not None:
-        rr.log("performance/uart_latency", rr.Scalars(float(uart_latency_ms)))
+        rr.log("performance/link_latency", rr.Scalars(float(uart_latency_ms)))
     if uart_cycle_hz is not None:
-        rr.log("performance/uart_cycle_hz", rr.Scalars(float(uart_cycle_hz)))
+        rr.log("performance/link_cycle_hz", rr.Scalars(float(uart_cycle_hz)))
     if uart_transfer_kbps is not None:
-        rr.log("performance/uart_transfer_kbps", rr.Scalars(float(uart_transfer_kbps)))
+        rr.log("performance/link_transfer_kbps", rr.Scalars(float(uart_transfer_kbps)))
     if stm32_calc_time_ms is not None:
         rr.log("performance/stm32_calc_time", rr.Scalars(float(stm32_calc_time_ms)))
     if stm32_calc_hz is not None:

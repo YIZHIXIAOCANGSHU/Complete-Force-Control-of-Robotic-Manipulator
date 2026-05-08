@@ -81,7 +81,7 @@ def _add_mocap_marker(
 
 def _attach_tcp_body(worldbody: ET.Element, tcp_offset: np.ndarray) -> None:
     for body in worldbody.iter("body"):
-        if body.get("name") != "ArmLseventh_Link":
+        if body.get("name") != "ArmL07Output_Link":
             continue
 
         tcp_body = ET.SubElement(body, "body")
@@ -98,7 +98,18 @@ def _attach_tcp_body(worldbody: ET.Element, tcp_offset: np.ndarray) -> None:
         _add_axis_geom(tcp_body, axis="z", radius=0.003, half_length=0.06, color="0 0 1 1")
         return
 
-    raise ValueError("未找到新模型末端 body 'ArmLseventh_Link'，无法挂载 TCP")
+    raise ValueError("未找到新模型末端 body 'ArmL07Output_Link'，无法挂载 TCP")
+
+
+def _deduplicate_joint_names(root: ET.Element) -> None:
+    seen: dict[str, int] = {}
+    for joint in root.findall(".//joint"):
+        name = joint.get("name")
+        if not name:
+            continue
+        seen[name] = seen.get(name, 0) + 1
+        if seen[name] > 1:
+            joint.set("name", f"{name}_duplicate_{seen[name]}")
 
 
 def _normalize_mesh_paths(root: ET.Element) -> None:
@@ -197,6 +208,7 @@ def build_enhanced_model(urdf_filename: str, tcp_offset: np.ndarray) -> mujoco.M
     compiler = _ensure_child(mujoco_ext, "compiler")
     compiler.set("meshdir", "../meshes")
     _normalize_mesh_paths(root)
+    _deduplicate_joint_names(root)
 
     resolved_file = tempfile.NamedTemporaryFile(
         mode="wb",

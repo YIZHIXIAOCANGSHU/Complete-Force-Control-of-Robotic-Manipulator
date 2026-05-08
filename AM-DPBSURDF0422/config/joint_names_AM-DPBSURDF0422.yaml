@@ -1,0 +1,1 @@
+controller_joint_names: ['', 'Waist01_Joint', 'Waist02_Joint', 'Body0422_Joint', 'ArmL02_Joint', 'AM-D02-J14_Joint', 'ArmL04_Joint', 'ArmL05_Joint', 'ArmL06_Joint', 'ArmL07_Joint', 'ArmL07Output_Joint', 'ArmR01_Joint', 'AM-D02R-J03_Joint', 'ArmR04_Joint', 'ArmR05_Link', 'ArmR06_Link', 'ArmR07_Link', 'ArmR07Output_Link', ]
