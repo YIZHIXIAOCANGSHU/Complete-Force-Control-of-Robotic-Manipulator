@@ -28,7 +28,7 @@
 /* ================================================================
  *  基础运行参数
  * ================================================================ */
-#define CONTROL_DT 0.01  /* 控制步长 (秒) */
+#define CONTROL_DT 0.002  /* 控制步长 (秒) */
 #define NUM_JOINTS 7     /* 机器人关节数量 */
 /* Host bridge 仍使用该偏移量做 MuJoCo 坐标转换，保留兼容定义 */
 #define MUJOCO_Z_OFFSET 1.0 /* MuJoCo 仿真中机器人基座的高度偏移 */
@@ -51,9 +51,9 @@
 #define KP_CART_PITCH 5.0
 #define KP_CART_YAW 5.0
 
-#define KD_CART_X 25.0
-#define KD_CART_Y 25.0
-#define KD_CART_Z 25.0
+#define KD_CART_X 40.0
+#define KD_CART_Y 40.0
+#define KD_CART_Z 40.0
 #define KD_CART_ROLL 0.8
 #define KD_CART_PITCH 0.8
 #define KD_CART_YAW 0.8
@@ -101,8 +101,8 @@
 #define Q_PREF_7 0.0
 
 #define POSTURE_ALPHA 0.3
-#define W_CARTESIAN 0.8
-#define W_JOINT 0.2
+#define W_CARTESIAN 0.85
+#define W_JOINT 0.15
 
 /* ================================================================
  *  运动学与逆解参数
@@ -157,7 +157,7 @@
 /* ================================================================
  *  路径规划参数（末端笛卡尔直线路径）
  * ================================================================ */
-#define TRAJ_PLAN_SPEED 0.75    /* 末端运动速度 (m/s) */
+#define TRAJ_PLAN_SPEED 0.1    /* 末端运动速度 (m/s) */
 #define TRAJ_PLAN_ACCEL 1.25    /* 加速度 (m/s^2) */
 #define TRAJ_REACH_THRESH 0.005 /* 到达目标的位置阈值 (m) */
 

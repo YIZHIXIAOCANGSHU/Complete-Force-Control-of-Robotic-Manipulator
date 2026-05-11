@@ -1,10 +1,11 @@
 # AM-D02 真机启动与联合仿真说明
 
-这个仓库用于驱动一套 AM-D02 七轴机械臂控制链路，包含三种使用方式：
+这个仓库用于驱动一套 AM-D02 七轴机械臂控制链路，包含四种使用方式：
 
 - `sim` 模式：Python 侧启动 MuJoCo 仿真，C 侧运行实时控制回路，适合联调控制算法。
-- `mc` 模式：Python 侧启动 MuJoCo 模型，用蒙特卡罗随机采样检查末端位置和四元数的数值范围，并用 MuJoCo 窗口绘制末端可达空间凸包多面体。
+- `mc` 模式：Python 侧启动 MuJoCo 模型，用蒙特卡罗随机采样检查末端位置和四元数的数值范围，基于采样凸包求完全在内部的最大轴对齐长方体，并用 MuJoCo 窗口绘制可达空间和可输入 `pos` 范围。
 - `real` 模式：Python 侧连接真实硬件，可选择旧串口链路或 SocketCAN USB2FDCAN 链路，并调用本仓库内的 C 算法后端，适合真机测试和可视化观察。
+- `usbfdcan-sim` 模式：只通过 USB2FDCAN 接收 7 轴反馈来驱动 MuJoCo/Rerun，同时持续向 7 个电机高速发送全零 MIT 命令。
 
 如果你是第一次接触这个项目，最重要的入口只有一个：
 
@@ -18,6 +19,7 @@
 1) sim  - 软硬件联合仿真
 2) real - 真实硬件控制
 3) mc   - 蒙特卡罗范围检查 + MuJoCo 窗口
+4) usbfdcan-sim - USB2FDCAN 反馈驱动仿真 + 全零发送
 ```
 
 也可以继续直接指定模式：
@@ -38,6 +40,12 @@
 ./run.sh real
 ```
 
+或：
+
+```bash
+./run.sh usbfdcan-sim
+```
+
 ## 这个仓库里有什么
 
 根目录主要包含这些部分：
@@ -45,7 +53,9 @@
 - `run.sh`
   统一启动脚本。陌生人优先从这里开始，不需要先手动拼装命令。
 - `python/`
-  Python 侧逻辑，包括 MuJoCo 仿真、串口收发、Rerun 可视化、C 后端桥接。
+  Python 侧逻辑，包括 MuJoCo 仿真、串口收发、Rerun 可视化、C 后端桥接，并按状态逐步拆分到 `sim/`、`mc/`、`real/`、`usbfdcan_sim/` 和 `common/`。
+- `usb2fdcan_send/`
+  新增的独立 USB2FDCAN 达妙零命令发送与反馈解码包，运行时不依赖参考 `send/` 目录。
 - `c_interface/`
   宿主机上的 C 程序。`sim` 模式下负责实时控制回路，`real` 模式下负责重力补偿/控制计算。
 - `stm32_code/`
@@ -114,6 +124,12 @@ python3 -m pip install -r python/requirements.txt
 ./run.sh real usbfdcan
 ```
 
+USB2FDCAN 反馈驱动仿真 + 全零发送：
+
+```bash
+./run.sh usbfdcan-sim
+```
+
 蒙特卡罗范围检查：
 
 ```bash
@@ -124,8 +140,9 @@ python3 -m pip install -r python/requirements.txt
 
 - 按模式编译 `c_interface/` 里的 C 程序。
 - `sim` 模式下启动 Python UDP 仿真服务器，再启动前台 C 控制回路。
-- `mc` 模式下跳过 C 编译，直接随机采样关节空间，在终端刷新末端位置/四元数范围，并打开 MuJoCo 窗口显示末端可达空间凸包多面体。
+- `mc` 模式下编译并调用 C 后端做 FK，随机采样关节空间，在终端刷新末端位置/四元数范围，输出内部最大长方体对应的 `pos` x/y/z 可输入范围，并打开 MuJoCo 窗口显示末端可达空间凸包多面体和内部范围盒。
 - `real` 模式下默认检查 `/dev/ttyUSB0` 并启动串口控制；选择 `usbfdcan` 后端时检查 SocketCAN 接口并启动 MIT torque 控制。
+- `usbfdcan-sim` 模式下跳过 C 编译，检查 SocketCAN 接口并启动 USB2FDCAN 反馈镜像仿真和全零 MIT 高速发送。
 
 ## 三种模式分别在做什么
 
@@ -139,7 +156,7 @@ python3 -m pip install -r python/requirements.txt
 
 运行链路：
 
-1. 启动 `python/main_server.py`
+1. 启动 `python/sim/main_server.py`
 2. Python 侧创建 MuJoCo 仿真环境，并在 `9876/UDP` 上等待 C 客户端
 3. 启动 `c_interface/c_main`
 4. C 程序从仿真获取状态，调用 `stm32_code/` 中的控制算法
@@ -166,12 +183,13 @@ python3 -m pip install -r python/requirements.txt
 
 运行链路：
 
-1. 启动 `python/main_server.py --monte-carlo`
-2. Python 侧复用 `sim` 模式的 `MujocoSimEnv` 加载当前 MuJoCo 机械臂模型
+1. 启动 `python/mc/main.py`
+2. Python 侧复用 `sim` 模式的 `MujocoSimEnv` 读取当前关节限位和准备可视化
 3. 按 URDF 关节限位随机采样多组关节角
-4. 对每组关节角执行前向运动学
+4. 对每组关节角调用 `c_interface/serial_gravity_comp` 执行前向运动学
 5. 在终端刷新最后一组样本，并输出末端位置 `[x, y, z]` 和四元数 `[w, x, y, z]` 的最小值、最大值、跨度和均值
-6. 打开 MuJoCo viewer，用蓝色透明凸包多面体勾勒末端可达空间外轮廓，用黄色点显示采样到的末端位置
+6. 基于采样点云凸包求一个完全位于可达空间内部的最大轴对齐长方体，输出可直接作为 `pos` 输入约束的 x/y/z 范围
+7. 打开 MuJoCo viewer，用蓝色透明凸包多面体勾勒末端可达空间外轮廓，用绿色透明长方体显示内部安全 `pos` 范围，用黄色点显示采样到的末端位置
 
 常用参数：
 
@@ -215,7 +233,7 @@ AM_D02_MC_SAMPLES=50000 AM_D02_MC_SEED=42 AM_D02_MC_MAX_HULL_POINTS=12000 ./run.
 串口运行链路：
 
 1. 编译并启动 `c_interface/serial_gravity_comp`
-2. Python 侧运行 `python/serial_control.py`
+2. Python 侧运行 `python/real/serial_control.py`
 3. 打开串口 `/dev/ttyUSB0`
 4. 接收下位机反馈的关节状态
 5. 调用 C 后端计算力矩、末端位姿和相关数据
@@ -225,7 +243,7 @@ AM_D02_MC_SAMPLES=50000 AM_D02_MC_SEED=42 AM_D02_MC_MAX_HULL_POINTS=12000 ./run.
 SocketCAN USB2FDCAN 运行链路：
 
 1. 编译并启动 `c_interface/serial_gravity_comp`
-2. Python 侧运行 `python/real_can_control.py`
+2. Python 侧运行 `python/real/usb2fdcan_control.py`
 3. 打开 SocketCAN 接口，默认 `can0`
 4. 接收 7 个达妙电机反馈
 5. 调用 C 后端计算力矩、末端位姿和相关数据
@@ -238,6 +256,33 @@ SocketCAN USB2FDCAN 运行链路：
 - USB2FDCAN + SocketCAN 达妙电机联调
 - 本地算法与下位机反馈联合运行
 - 观察目标位姿、反馈位姿、力矩和时延
+
+### `usbfdcan-sim` 模式
+
+命令：
+
+```bash
+./run.sh usbfdcan-sim
+./run.sh usb2fdcan-sim   # 兼容别名
+```
+
+运行链路：
+
+1. 跳过 C 控制后端编译
+2. Python 侧运行 `python/usbfdcan_sim/main.py`
+3. 使用独立 `usb2fdcan_send/` 包打开 SocketCAN USB2FDCAN
+4. 启动时 clear error、enable，并给 7 个电机预置全零 MIT 命令
+5. TX 线程按 1..7 顺序连续发送全零 MIT 命令，不人为限频
+6. RX 线程接收 7 轴反馈，更新 MuJoCo 关节状态和 Rerun 数据
+7. 反馈超时、位置越界、速度超过硬限或退出时，发送最终全零命令、disable 并关闭 CAN
+
+全零 MIT 命令语义固定为：
+
+```text
+position=0, velocity=0, kp=0, kd=0, torque_ff=0
+```
+
+Rerun 会显示每个电机的位置、速度、反馈力矩、状态码、MOS 温度、转子温度，以及 TX/RX 速率、完整 7 轴反馈轮速率、缺失反馈 mask 和 backpressure/ENOBUFS 次数。
 
 ## 第一次使用时建议这样做
 
@@ -264,6 +309,7 @@ AM_D02_SERIAL_FORWARD_TARGET=0
 AM_D02_CAN_INTERFACE=can0
 AM_D02_CAN_FEEDBACK_TIMEOUT_S=0.10
 AM_D02_CAN_STARTUP_ENABLE=1
+AM_D02_USBFDCAN_SIM_VELOCITY_LIMIT=10.0
 ```
 
 例如：
@@ -293,15 +339,17 @@ AM_D02_SERIAL_FORWARD_TARGET=1 ./run.sh real
 - `AM_D02_SERIAL_FORWARD_TARGET`
   真机模式下是否把目标位姿继续下发到串口设备。
 - `AM_D02_CAN_INTERFACE`
-  `real usbfdcan` 后端使用的 SocketCAN 网卡，默认 `can0`。
+  `real usbfdcan` 和 `usbfdcan-sim` 使用的 SocketCAN 网卡，默认 `can0`。
 - `AM_D02_CAN_CONFIGURE_INTERFACE`
   是否由程序配置 CAN 网卡，默认 `0`。
 - `AM_D02_CAN_FORCE_FD`
   是否强制使用 CAN FD 帧，默认 `1`。
 - `AM_D02_CAN_FEEDBACK_TIMEOUT_S`
-  `real usbfdcan` 后端凑齐 7 轴反馈的超时时间，默认 `0.10` 秒。
+  USB2FDCAN 链路凑齐 7 轴反馈的超时时间，默认 `0.10` 秒。
 - `AM_D02_CAN_STARTUP_ENABLE`
-  `real usbfdcan` 启动时是否 clear error、enable 并发送 MIT 零力矩，默认 `1`。
+  USB2FDCAN 链路启动时是否 clear error、enable 并发送 MIT 零力矩，默认 `1`。
+- `AM_D02_USBFDCAN_SIM_VELOCITY_LIMIT`
+  `usbfdcan-sim` 的反馈速度硬限，默认 `10.0 rad/s`。
 
 ## 串口和真机注意事项
 
@@ -324,7 +372,7 @@ sudo chmod o+rw /dev/ttyUSB0
 - 下位机波特率是否匹配（当前代码里是 `115200`）
 - 是否存在别的程序占用了串口
 
-如果你的设备不是 `/dev/ttyUSB0`，需要修改 `python/serial_app.py` 里的 `SERIAL_PORT`。
+如果你的设备不是 `/dev/ttyUSB0`，需要修改 `python/real/serial_app.py` 里的 `SERIAL_PORT`。
 
 ## SocketCAN USB2FDCAN 注意事项
 
@@ -346,6 +394,7 @@ sudo ip link set can0 up
 
 ```bash
 AM_D02_CAN_INTERFACE=can1 ./run.sh real usbfdcan
+AM_D02_CAN_INTERFACE=can1 ./run.sh usbfdcan-sim
 ```
 
 ## 目录说明：应该先看哪些文件
@@ -354,14 +403,24 @@ AM_D02_CAN_INTERFACE=can1 ./run.sh real usbfdcan
 
 - `run.sh`
   看项目怎么被整体拉起来。
-- `python/main_server.py`
+- `python/sim/main_server.py`
   看仿真模式的 Python 入口。
-- `python/udp_server.py`
+- `python/sim/udp_server.py`
   看 Python MuJoCo 服务器如何和 C 程序通信。
-- `python/serial_control.py`
-  看真机模式的 Python 入口。
-- `python/serial_app.py`
+- `python/mc/main.py`
+  看蒙特卡罗模式入口。
+- `python/mc/workspace.py`
+  看 C 后端 FK 采样、工作空间范围和凸包计算。
+- `python/real/serial_control.py`
+  看真机串口模式的 Python 入口。
+- `python/real/serial_app.py`
   看串口收发、可视化、C 后端调用主流程。
+- `python/real/usb2fdcan_control.py`
+  看真机 SocketCAN USB2FDCAN 力矩控制主流程。
+- `python/usbfdcan_sim/main.py`
+  看 USB2FDCAN 反馈驱动仿真和全零发送入口。
+- `usb2fdcan_send/damiao.py`
+  看独立 USB2FDCAN 达妙协议打包、反馈解码和零命令发送。
 - `c_interface/main.c`
   看仿真模式下的 C 控制主循环。
 - `c_interface/serial_gravity_comp.c`

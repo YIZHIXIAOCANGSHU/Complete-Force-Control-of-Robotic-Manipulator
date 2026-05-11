@@ -31,6 +31,19 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_float_array(name: str, default: list[float] | tuple[float, ...]) -> np.ndarray:
+    value = os.getenv(name)
+    if value is None:
+        return np.array(default, dtype=np.float64)
+    try:
+        values = [float(part.strip()) for part in value.split(",")]
+    except ValueError:
+        return np.array(default, dtype=np.float64)
+    if len(values) != len(default):
+        return np.array(default, dtype=np.float64)
+    return np.array(values, dtype=np.float64)
+
+
 class Config:
     # === 路径配置 (Paths) ===
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -76,6 +89,10 @@ class Config:
     
     # === 仿真参数 ===
     DT = 0.01  # 仿真步长 (秒)，对应 100 Hz
+    MUJOCO_DOF_DAMPING = _env_float_array(
+        "AM_D02_MUJOCO_DOF_DAMPING",
+        [1.0, 1.0, 0.6, 0.6, 0.25, 0.25, 0.25],
+    )
     
     # === 初始位置 ===
     # 机械臂仿真实际起始关节角（全零，C端从这里出发）
@@ -87,4 +104,4 @@ class Config:
 
     # === 目标位置 (Target Posture) ===
     # 用于重力补偿与 PD 控制的目标位置 (rad)
-    TARGET_Q = np.array([-np.pi/6, 0, 0.0, np.pi/3, 0.0, 0.0, 0.0])
+    TARGET_Q = np.array([0, 0, 0.0, np.pi/3, 0.0, 0.0, 0.0])

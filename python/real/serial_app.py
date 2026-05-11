@@ -8,18 +8,18 @@ import time
 import serial
 
 from config import Config
-from coord_transforms import RobotMujocoTransformer
-from gravity_backend import GravityCompTool
-from mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
-from rerun_async import RerunLogger
-from serial_protocol import (
+from common.coord_transforms import RobotMujocoTransformer
+from common.gravity_backend import GravityCompTool
+from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
+from common.rerun_async import RerunLogger
+from real.serial_protocol import (
     RECV_FRAME_SIZE,
     SEND_FRAME_SIZE,
     TargetPoseFramePacker,
     SerialFrameReader,
 )
-from shared_state import SharedRobotState
-import rerun_viz
+from common.shared_state import SharedRobotState
+import common.rerun_viz as rerun_viz
 
 
 SERIAL_PORT = "/dev/ttyUSB0"
@@ -228,7 +228,7 @@ def main() -> None:
     transformer = None
     try:
         import mujoco
-        from sim_env import MujocoSimEnv
+        from sim.env import MujocoSimEnv
 
         if not VIEWER_AVAILABLE:
             raise RuntimeError("MuJoCo viewer is not available")

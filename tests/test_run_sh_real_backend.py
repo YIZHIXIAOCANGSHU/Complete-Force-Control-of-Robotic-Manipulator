@@ -65,14 +65,14 @@ def test_real_serial_backend_keeps_existing_entrypoint():
     completed = _run_script("real", "serial")
 
     assert completed.returncode == 0, completed.stderr
-    assert _fake_python_args(completed) == ["python/serial_control.py"]
+    assert _fake_python_args(completed) == ["python/real/serial_control.py"]
 
 
 def test_real_usbfdcan_backend_routes_to_can_entrypoint():
     completed = _run_script("real", "usbfdcan")
 
     assert completed.returncode == 0, completed.stderr
-    assert _fake_python_args(completed) == ["python/real_can_control.py"]
+    assert _fake_python_args(completed) == ["python/real/usb2fdcan_control.py"]
 
 
 def test_interactive_real_menu_can_select_usbfdcan_backend():
@@ -80,4 +80,26 @@ def test_interactive_real_menu_can_select_usbfdcan_backend():
 
     assert completed.returncode == 0, completed.stderr
     assert "Real 后端" in completed.stdout
-    assert _fake_python_args(completed) == ["python/real_can_control.py"]
+    assert _fake_python_args(completed) == ["python/real/usb2fdcan_control.py"]
+
+
+def test_usbfdcan_sim_mode_routes_to_feedback_mirror_entrypoint():
+    completed = _run_script("usbfdcan-sim")
+
+    assert completed.returncode == 0, completed.stderr
+    assert _fake_python_args(completed) == ["python/usbfdcan_sim/main.py"]
+
+
+def test_usb2fdcan_sim_alias_routes_to_feedback_mirror_entrypoint():
+    completed = _run_script("usb2fdcan-sim")
+
+    assert completed.returncode == 0, completed.stderr
+    assert _fake_python_args(completed) == ["python/usbfdcan_sim/main.py"]
+
+
+def test_interactive_menu_can_select_usbfdcan_sim_mode():
+    completed = _run_script(input_text="4\n")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "usbfdcan-sim" in completed.stdout
+    assert _fake_python_args(completed) == ["python/usbfdcan_sim/main.py"]

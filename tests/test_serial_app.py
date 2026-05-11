@@ -6,9 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import serial_app
-from serial_protocol import RECV_FRAME_STRUCT
-from shared_state import SharedRobotState
+from common.shared_state import SharedRobotState
+from real import serial_app
+from real.serial_protocol import RECV_FRAME_STRUCT
 
 
 def _feedback_frame(motor_id: int, pos: float, vel: float, tor: float) -> bytes:

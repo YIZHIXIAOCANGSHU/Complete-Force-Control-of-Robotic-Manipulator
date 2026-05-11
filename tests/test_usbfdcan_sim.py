@@ -1,0 +1,284 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "python"))
+
+from common.shared_state import SharedRobotState  # noqa: E402
+from usb2fdcan_send.damiao import DecodedFeedbackFrame  # noqa: E402
+from python.usbfdcan_sim import app  # noqa: E402
+from python.usbfdcan_sim import rerun_feedback  # noqa: E402
+
+
+class DummyRerun:
+    def __init__(self) -> None:
+        self.logs: list[tuple[str, object, bool]] = []
+        self.blueprint = None
+
+    def init(self, *_args, **_kwargs) -> None:
+        return None
+
+    def log(self, path: str, payload, static: bool = False) -> None:
+        self.logs.append((path, payload, static))
+
+    def send_blueprint(self, blueprint) -> None:
+        self.blueprint = blueprint
+
+    def SeriesLines(self, **kwargs):
+        return {"kind": "SeriesLines", **kwargs}
+
+
+class DummyBlueprint:
+    @staticmethod
+    def TimeSeriesView(name: str, origin: str, **kwargs):
+        return {"kind": "TimeSeriesView", "name": name, "origin": origin, **kwargs}
+
+    @staticmethod
+    def TextLogView(name: str, origin: str, **kwargs):
+        return {"kind": "TextLogView", "name": name, "origin": origin, **kwargs}
+
+    @staticmethod
+    def TextDocumentView(name: str, origin: str, **kwargs):
+        return {"kind": "TextDocumentView", "name": name, "origin": origin, **kwargs}
+
+    @staticmethod
+    def Horizontal(*children, name: str | None = None):
+        return {"kind": "Horizontal", "name": name, "children": list(children)}
+
+    @staticmethod
+    def Vertical(*children, name: str | None = None):
+        return {"kind": "Vertical", "name": name, "children": list(children)}
+
+    @staticmethod
+    def Tabs(*children, name: str | None = None):
+        return {"kind": "Tabs", "name": name, "children": list(children)}
+
+    @staticmethod
+    def Blueprint(root, collapse_panels: bool = False):
+        return {"kind": "Blueprint", "root": root, "collapse_panels": collapse_panels}
+
+
+def _iter_blueprint_nodes(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _iter_blueprint_nodes(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_blueprint_nodes(item)
+
+
+class FakeZeroTransport:
+    def __init__(self, frames=None) -> None:
+        self.frames = list(frames or [])
+        self.commands: list[tuple[str, int, float | None]] = []
+        self.stats = SimpleNamespace(backpressure_count=0, send_count=0)
+        self.closed = False
+
+    def read(self, size: int) -> bytes:
+        _ = size
+        return b""
+
+    def pop_feedback_frame(self):
+        if not self.frames:
+            return None
+        return self.frames.pop(0)
+
+    def reset_input_buffer(self) -> None:
+        self.commands.append(("reset", 0, None))
+
+    def clear_error(self, motor_id: int):
+        self.commands.append(("clear", int(motor_id), None))
+
+    def enable_motor(self, motor_id: int):
+        self.commands.append(("enable", int(motor_id), None))
+
+    def send_zero_mit(self, motor_id: int) -> bytes:
+        self.commands.append(("zero", int(motor_id), 0.0))
+        self.stats.send_count += 1
+        if self.stats.send_count == 1:
+            return b"zero-packet"
+        return b""
+
+    def disable_motor(self, motor_id: int):
+        self.commands.append(("disable", int(motor_id), None))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class StopAfterRoundRerun:
+    def __init__(self) -> None:
+        self.feedback_payloads: list[dict[str, object]] = []
+        self.perf_payloads: list[dict[str, object]] = []
+        self.abort_payloads: list[dict[str, object]] = []
+
+    def log_feedback_frame(self, **payload) -> None:
+        self.feedback_payloads.append(payload)
+
+    def log_performance(self, **payload) -> None:
+        self.perf_payloads.append(payload)
+
+    def log_abort(self, **payload) -> None:
+        self.abort_payloads.append(payload)
+
+    def close(self) -> None:
+        pass
+
+
+def _feedback_frame(motor_id: int, *, position: float | None = None, velocity: float | None = None):
+    return DecodedFeedbackFrame(
+        motor_id=motor_id,
+        can_id=motor_id,
+        mst_id=0x10 + motor_id,
+        state=1,
+        controller_id=motor_id,
+        position=0.1 * motor_id if position is None else position,
+        velocity=0.01 * motor_id if velocity is None else velocity,
+        torque=0.001 * motor_id,
+        mos_temperature=40.0 + motor_id,
+        rotor_temperature=50.0 + motor_id,
+    )
+
+
+def test_tx_loop_sends_all_seven_zero_commands_without_normal_sleep(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(app.time, "sleep", sleeps.append)
+
+    transport = FakeZeroTransport()
+    app.shutdown_event.clear()
+    try:
+        app.tx_zero_loop(transport, motor_ids=(1, 2, 3, 4, 5, 6, 7), max_rounds=1)
+    finally:
+        app.shutdown_event.clear()
+
+    assert transport.commands == [("zero", i, 0.0) for i in range(1, 8)]
+    assert sleeps == []
+
+
+def test_rerun_recorder_sends_motor_grouped_blueprint(monkeypatch):
+    dummy_rr = DummyRerun()
+    monkeypatch.setattr(rerun_feedback, "rr", dummy_rr)
+    monkeypatch.setattr(rerun_feedback, "rrb", DummyBlueprint)
+
+    rerun_feedback.UsbfdcanSimRerunRecorder(motor_ids=(1, 2, 3), spawn=False)
+
+    tab_names = {
+        node["name"]
+        for node in _iter_blueprint_nodes(dummy_rr.blueprint)
+        if node.get("kind") == "Vertical" and node.get("name")
+    }
+    assert {"Performance", "J1", "J2", "J3"}.issubset(tab_names)
+
+    origins_by_name = {
+        node["name"]: node["origin"]
+        for node in _iter_blueprint_nodes(dummy_rr.blueprint)
+        if node.get("kind") in {"TimeSeriesView", "TextLogView", "TextDocumentView"}
+    }
+
+    assert origins_by_name["J1 Position (rad)"] == "/usbfdcan_sim/motors/motor_01/position"
+    assert origins_by_name["J1 Velocity (rad/s)"] == "/usbfdcan_sim/motors/motor_01/velocity"
+    assert origins_by_name["J1 Feedback Torque (N*m)"] == "/usbfdcan_sim/motors/motor_01/torque"
+    assert origins_by_name["J1 MOS Temperature (C)"] == "/usbfdcan_sim/motors/motor_01/mos_temperature"
+    assert origins_by_name["J1 Rotor Temperature (C)"] == "/usbfdcan_sim/motors/motor_01/rotor_temperature"
+    assert origins_by_name["J1 State Code"] == "/usbfdcan_sim/motors/motor_01/state_code"
+    assert origins_by_name["J1 Quality Flags"] == "/usbfdcan_sim/motors/motor_01/quality"
+    assert origins_by_name["J1 Events"] == "/usbfdcan_sim/motors/motor_01/events"
+    assert origins_by_name["CAN Rates"] == "/usbfdcan_sim/performance/rates"
+    assert origins_by_name["Safety / Backpressure"] == "/usbfdcan_sim/performance/safety"
+    assert origins_by_name["Raw Zero MIT Packet"] == "/usbfdcan_sim/raw_zero_packet"
+    assert "/usbfdcan_sim" not in origins_by_name.values()
+
+    can_rates_view = next(
+        node
+        for node in _iter_blueprint_nodes(dummy_rr.blueprint)
+        if node.get("kind") == "TimeSeriesView" and node.get("name") == "CAN Rates"
+    )
+    assert can_rates_view["contents"] == [
+        "/usbfdcan_sim/performance/tx_send_rate_hz",
+        "/usbfdcan_sim/performance/rx_feedback_rate_hz",
+        "/usbfdcan_sim/performance/complete_round_rate_hz",
+    ]
+
+    static_line_names = {
+        path: payload["names"]
+        for path, payload, static in dummy_rr.logs
+        if static and payload.get("kind") == "SeriesLines"
+    }
+    assert static_line_names["usbfdcan_sim/motors/motor_01/quality/state_ok"] == ["J1 state_ok"]
+    assert static_line_names["usbfdcan_sim/motors/motor_01/quality/safety_ok"] == ["J1 safety_ok"]
+
+
+def test_rx_loop_updates_shared_state_and_logs_feedback_round():
+    transport = FakeZeroTransport(_feedback_frame(i + 1) for i in range(app.Config.NUM_JOINTS))
+    shared_state = SharedRobotState()
+    rerun = StopAfterRoundRerun()
+
+    app.shutdown_event.clear()
+    try:
+        app.rx_feedback_loop(
+            transport,
+            shared_state,
+            rerun,
+            startup_enable=False,
+            feedback_timeout_s=1.0,
+            max_complete_rounds=1,
+        )
+    finally:
+        app.shutdown_event.clear()
+
+    q, qd, tau, _, _ = shared_state.snapshot_control_inputs()
+    assert q == [0.1, 0.2, 0.30000000000000004, 0.4, 0.5, 0.6000000000000001, 0.7000000000000001]
+    assert qd == [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
+    assert tau == [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007]
+    assert len(rerun.feedback_payloads) == 7
+    assert rerun.perf_payloads[-1]["complete_round_rate_hz"] >= 0.0
+
+
+def test_rx_loop_triggers_safe_stop_on_velocity_limit_violation():
+    frames = [_feedback_frame(i + 1) for i in range(app.Config.NUM_JOINTS)]
+    frames[-1] = _feedback_frame(7, velocity=11.0)
+    transport = FakeZeroTransport(frames)
+    rerun = StopAfterRoundRerun()
+
+    app.shutdown_event.clear()
+    try:
+        app.rx_feedback_loop(
+            transport,
+            SharedRobotState(),
+            rerun,
+            startup_enable=False,
+            feedback_timeout_s=1.0,
+            max_complete_rounds=1,
+        )
+    finally:
+        app.shutdown_event.clear()
+
+    assert app.shutdown_event.is_set() is False
+    assert rerun.abort_payloads
+    assert "velocity" in str(rerun.abort_payloads[-1]["reason"])
+
+
+def test_run_mirror_session_safe_stop_zeroes_disables_and_closes_on_timeout(monkeypatch):
+    transport = FakeZeroTransport([])
+    monkeypatch.setattr(app, "open_zero_transport", lambda: transport)
+    monkeypatch.setattr(app, "UsbfdcanSimRerunRecorder", lambda *args, **kwargs: StopAfterRoundRerun())
+    monkeypatch.setattr(app, "run_viewer_loop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app.Config, "ENABLE_RERUN", False)
+
+    app.shutdown_event.clear()
+    try:
+        app.run_mirror_session(start_viewer=False, feedback_timeout_s=0.001, startup_enable=False)
+    finally:
+        app.shutdown_event.clear()
+
+    assert ("zero", 1, 0.0) in transport.commands
+    assert ("disable", 7, None) in transport.commands
+    assert transport.closed is True

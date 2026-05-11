@@ -3,10 +3,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import mujoco_viewer
+from common import mujoco_viewer
 
 
 class DummyViewerModule:
@@ -35,3 +38,17 @@ def test_launch_passive_viewer_hides_both_side_panels(monkeypatch):
             },
         )
     ]
+
+
+def test_mujoco_sim_env_applies_sim_joint_dynamics():
+    pytest.importorskip("mujoco")
+
+    from config import Config
+    from sim.env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+
+    np.testing.assert_allclose(
+        env.model.dof_damping[env.dof_ids],
+        Config.MUJOCO_DOF_DAMPING,
+    )

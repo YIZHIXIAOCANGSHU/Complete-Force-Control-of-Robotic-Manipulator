@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import real_can_control
-from shared_state import SharedRobotState
+from common.shared_state import SharedRobotState
+from real import usb2fdcan_control as real_can_control
 
 
 class FakeCanTransport:
@@ -47,6 +47,20 @@ class FakeCanTransport:
 
     def close(self) -> None:
         self.closed = True
+
+
+class DelayedFeedbackTransport(FakeCanTransport):
+    def __init__(self, delayed_frames) -> None:
+        super().__init__([])
+        self.delayed_frames = list(delayed_frames)
+        self.read_count = 0
+
+    def read(self, size: int) -> bytes:
+        _ = size
+        self.read_count += 1
+        if self.read_count == 2:
+            self.frames.extend(self.delayed_frames)
+        return b""
 
 
 class FakeCompTool:
@@ -116,6 +130,45 @@ def test_can_thread_computes_and_sends_mit_torque_after_complete_feedback(monkey
     assert len(rerun_logger.payloads) == 1
     assert rerun_logger.payloads[0]["tau_total"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
     assert transport.closed is True
+
+
+def test_can_thread_sends_zero_keepalive_while_waiting_for_first_feedback(monkeypatch):
+    monkeypatch.setattr(real_can_control.Config, "ENABLE_RERUN", True)
+    monkeypatch.setattr(real_can_control.Config, "RERUN_LOG_STRIDE", 1)
+    monkeypatch.setattr(real_can_control.Config, "UART_TEXT_LOG_INTERVAL", 1)
+
+    transport = DelayedFeedbackTransport(
+        _feedback_frame(i + 1) for i in range(real_can_control.Config.NUM_JOINTS)
+    )
+    comp_tool = FakeCompTool(status=0)
+    rerun_logger = StopAfterLogRerunLogger()
+
+    real_can_control.shutdown_event.clear()
+    try:
+        real_can_control.can_thread_func(
+            transport,
+            comp_tool,
+            SharedRobotState(),
+            rerun_logger,
+            startup_enable=False,
+            feedback_timeout_s=1.0,
+            control_period_s=0.0,
+        )
+    finally:
+        real_can_control.shutdown_event.clear()
+
+    assert len(comp_tool.compute_calls) == 1
+    assert transport.read_count >= 2
+    assert transport.commands[: real_can_control.Config.NUM_JOINTS] == [
+        ("torque", motor_id, 0.0)
+        for motor_id in range(1, real_can_control.Config.NUM_JOINTS + 1)
+    ]
+
+
+def test_missing_feedback_ids_reports_unseen_motors():
+    feedback_mask = (1 << 0) | (1 << 3) | (1 << 6)
+
+    assert real_can_control._missing_feedback_ids(feedback_mask) == (2, 3, 5, 6)
 
 
 def test_can_thread_zeroes_and_disables_when_stm_reports_safety_error():

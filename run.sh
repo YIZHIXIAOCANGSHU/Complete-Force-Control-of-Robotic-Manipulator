@@ -59,6 +59,7 @@ show_main_menu() {
     echo "  1) sim  - 软硬件联合仿真"
     echo "  2) real - 真实硬件控制"
     echo "  3) mc   - 蒙特卡罗范围检查 + MuJoCo 窗口"
+    echo "  4) usbfdcan-sim - USB2FDCAN 反馈驱动仿真 + 全零发送"
     echo "  q) 退出"
     echo "----------------------------------------------------------"
 }
@@ -96,6 +97,11 @@ select_mode_from_menu() {
                 EXTRA_ARGS=()
                 break
                 ;;
+            4)
+                MODE="usbfdcan-sim"
+                EXTRA_ARGS=()
+                break
+                ;;
             q|Q)
                 echo "已退出。"
                 exit 0
@@ -117,6 +123,12 @@ resolve_numeric_mode() {
             ;;
         3)
             MODE="mc"
+            ;;
+        4)
+            MODE="usbfdcan-sim"
+            ;;
+        usb2fdcan-sim)
+            MODE="usbfdcan-sim"
             ;;
     esac
 }
@@ -179,6 +191,9 @@ else
         esac
     fi
 fi
+if [ "$MODE" == "usb2fdcan-sim" ]; then
+    MODE="usbfdcan-sim"
+fi
 if [ "$MODE" == "real" ]; then
     normalize_real_backend
 fi
@@ -190,6 +205,8 @@ if [ "$MODE" == "sim" ]; then
     echo "    AM-D02 软硬件联合仿真启动系统 (SITL 模式)       "
 elif [ "$MODE" == "mc" ] || [ "$MODE" == "monte-carlo" ]; then
     echo "    AM-D02 蒙特卡罗末端位姿范围检查 (Monte Carlo)  "
+elif [ "$MODE" == "usbfdcan-sim" ]; then
+    echo "    AM-D02 USB2FDCAN 反馈驱动仿真 + 全零发送      "
 elif [ "$MODE" == "real" ]; then
     if [ "$REAL_BACKEND" == "usbfdcan" ]; then
         echo "    AM-D02 机械臂 SocketCAN USB2FDCAN 控制系统 (Real) "
@@ -197,7 +214,7 @@ elif [ "$MODE" == "real" ]; then
         echo "    AM-D02 机械臂真实硬件串口控制系统 (Real 模式)     "
     fi
 else
-    PRINT_RED "错误: 未知模式 '$MODE'。请使用 'sim'、'mc' 或 'real'。"
+    PRINT_RED "错误: 未知模式 '$MODE'。请使用 'sim'、'mc'、'real' 或 'usbfdcan-sim'。"
     exit 1
 fi
 echo "=========================================================="
@@ -208,7 +225,9 @@ PRINT_BLUE "[1/3] 正在编译底层 C 语言组件..."
 if [ "$MODE" == "sim" ]; then
     make -C c_interface clean && make -C c_interface c_main serial_gravity_comp
 elif [ "$MODE" == "mc" ] || [ "$MODE" == "monte-carlo" ]; then
-    PRINT_BLUE "[1/3] Monte Carlo 模式不需要编译 C 控制回路，跳过。"
+    make -C c_interface serial_gravity_comp
+elif [ "$MODE" == "usbfdcan-sim" ]; then
+    PRINT_BLUE "[1/3] USB2FDCAN 反馈镜像模式不需要编译 C 控制回路，跳过。"
 else
     make -C c_interface serial_gravity_comp
 fi
@@ -218,7 +237,7 @@ if [ "$MODE" == "sim" ]; then
     # --- 模式 A: 纯仿真 (SITL) ---
     PRINT_BLUE "[2/3] 启动后台 Python MuJoCo 物理仿真服务器..."
     READY_FILE=$(mktemp /tmp/am_d02_server_ready.XXXXXX)
-    "$PYTHON_BIN" python/main_server.py --ready-file "$READY_FILE" "${APP_ARGS[@]}" &
+    "$PYTHON_BIN" python/sim/main_server.py --ready-file "$READY_FILE" "${APP_ARGS[@]}" &
     SERVER_PID=$!
 
     cleanup() {
@@ -275,7 +294,32 @@ elif [ "$MODE" == "mc" ] || [ "$MODE" == "monte-carlo" ]; then
     PRINT_BLUE "[2/3] 启动 MuJoCo 模型并随机采样关节空间..."
     PRINT_GREEN "[3/3] 刷新并输出末端位置和四元数数值范围..."
     echo "----------------------------------------------------------"
-    "$PYTHON_BIN" python/main_server.py --monte-carlo "${APP_ARGS[@]}"
+    "$PYTHON_BIN" python/mc/main.py "${APP_ARGS[@]}"
+
+elif [ "$MODE" == "usbfdcan-sim" ]; then
+    # --- 模式 D: USB2FDCAN 反馈驱动仿真 + 全零高速发送 ---
+    : "${AM_D02_CAN_INTERFACE:=can0}"
+    : "${AM_D02_RERUN_LOG_STRIDE:=1}"
+    : "${AM_D02_REAL_VIEWER_FPS:=30}"
+    : "${AM_D02_RERUN_QUEUE_SIZE:=512}"
+    export AM_D02_CAN_INTERFACE
+    export AM_D02_RERUN_LOG_STRIDE
+    export AM_D02_REAL_VIEWER_FPS
+    export AM_D02_RERUN_QUEUE_SIZE
+
+    PRINT_BLUE "[2/3] 检查 SocketCAN 接口 ${AM_D02_CAN_INTERFACE}..."
+    if [ -e "/sys/class/net/${AM_D02_CAN_INTERFACE}" ]; then
+        CAN_STATE=$(cat "/sys/class/net/${AM_D02_CAN_INTERFACE}/operstate" 2>/dev/null || true)
+        if [ "$CAN_STATE" != "up" ]; then
+            PRINT_RED "警告: ${AM_D02_CAN_INTERFACE} 当前状态为 '${CAN_STATE:-unknown}'，请确认已配置并 up。"
+        fi
+    else
+        PRINT_RED "警告: 未检测到 SocketCAN 接口 ${AM_D02_CAN_INTERFACE}，请确保 USB2FDCAN 已枚举。"
+    fi
+
+    PRINT_GREEN "[3/3] 启动 USB2FDCAN 反馈镜像仿真和全零 MIT 高速发送..."
+    echo "----------------------------------------------------------"
+    "$PYTHON_BIN" python/usbfdcan_sim/main.py "${APP_ARGS[@]}"
 
 else
     # --- 模式 B: 真实硬件 (Real) ---
@@ -319,8 +363,8 @@ else
     fi
     echo "----------------------------------------------------------"
     if [ "$REAL_BACKEND" == "usbfdcan" ]; then
-        "$PYTHON_BIN" python/real_can_control.py "${APP_ARGS[@]}"
+        "$PYTHON_BIN" python/real/usb2fdcan_control.py "${APP_ARGS[@]}"
     else
-        "$PYTHON_BIN" python/serial_control.py "${APP_ARGS[@]}"
+        "$PYTHON_BIN" python/real/serial_control.py "${APP_ARGS[@]}"
     fi
 fi

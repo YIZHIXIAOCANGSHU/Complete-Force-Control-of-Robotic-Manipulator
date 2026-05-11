@@ -9,21 +9,20 @@ import threading
 import time
 from dataclasses import dataclass
 
+PYTHON_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(PYTHON_ROOT)
+for path in (PYTHON_ROOT, PROJECT_ROOT):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
 from config import Config, _env_bool, _env_float, _env_int
-from coord_transforms import RobotMujocoTransformer
-from gravity_backend import GravityCompTool
-from mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
-from rerun_async import RerunLogger
-from shared_state import SharedRobotState
-import rerun_viz
-
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-USBFDCAN_ROOT = os.path.join(PROJECT_ROOT, "usbfdcan")
-if USBFDCAN_ROOT not in sys.path:
-    sys.path.insert(0, USBFDCAN_ROOT)
-
-from send.damiao import DamiaoSocketCanTransport  # noqa: E402
+from common.coord_transforms import RobotMujocoTransformer
+from common.gravity_backend import GravityCompTool
+from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
+from common.rerun_async import RerunLogger
+from common.shared_state import SharedRobotState
+from usb2fdcan_send.damiao import Usb2FdcanConfig, Usb2FdcanTransport
+import common.rerun_viz as rerun_viz
 
 
 CAN_INTERFACE = os.getenv("AM_D02_CAN_INTERFACE", "can0")
@@ -40,33 +39,26 @@ shutdown_event = threading.Event()
 
 
 @dataclass(frozen=True)
-class CanTransportConfig:
-    read_timeout: float = CAN_READ_TIMEOUT_S
-    read_chunk_size: int = CAN_READ_CHUNK_SIZE
-    flush_input_before_round: bool = True
-    sync_timeout: float = 2.0
-    interface: str = CAN_INTERFACE
-    nominal_bitrate: int = CAN_NOMINAL_BITRATE
-    data_bitrate: int = CAN_DATA_BITRATE
-    configure_interface: bool = CAN_CONFIGURE_INTERFACE
-    force_fd: bool = CAN_FORCE_FD
-    motor_can_ids: tuple[int, ...] = (0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07)
-    motor_mst_ids: tuple[int, ...] = (0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17)
-    motor_types: tuple[str, ...] = ("DM8009", "DM8009", "DM4340", "DM4340", "DM4310", "DM4310", "DM4310")
-
-
-@dataclass(frozen=True)
 class CanRuntimeConfig:
-    transport: CanTransportConfig
+    transport: Usb2FdcanConfig
     motor_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
 
 
 def build_can_runtime_config() -> CanRuntimeConfig:
-    return CanRuntimeConfig(transport=CanTransportConfig())
+    return CanRuntimeConfig(
+        transport=Usb2FdcanConfig(
+            interface=CAN_INTERFACE,
+            nominal_bitrate=CAN_NOMINAL_BITRATE,
+            data_bitrate=CAN_DATA_BITRATE,
+            configure_interface=CAN_CONFIGURE_INTERFACE,
+            force_fd=CAN_FORCE_FD,
+            read_timeout=CAN_READ_TIMEOUT_S,
+        )
+    )
 
 
 def open_can_transport():
-    return DamiaoSocketCanTransport(build_can_runtime_config())
+    return Usb2FdcanTransport(build_can_runtime_config().transport)
 
 
 def _safe_zero_and_disable(transport, motor_ids) -> None:
@@ -80,6 +72,11 @@ def _safe_zero_and_disable(transport, motor_ids) -> None:
             transport.disable_motor(int(motor_id))
         except Exception as exc:
             print(f"[CAN Warning] motor {motor_id} disable 失败: {exc}")
+
+
+def _send_zero_keepalive(transport, motor_ids) -> None:
+    for motor_id in motor_ids:
+        transport.send_mit_torque(int(motor_id), 0.0)
 
 
 def _startup_enable(transport, motor_ids) -> None:
@@ -99,6 +96,14 @@ def _feedback_state(frame) -> int:
 
 def _feedback_rotor_temperature(frame) -> float:
     return float(getattr(frame, "rotor_temperature", getattr(frame, "mos_temperature", 0.0)))
+
+
+def _missing_feedback_ids(feedback_mask: int) -> tuple[int, ...]:
+    return tuple(
+        joint_idx + 1
+        for joint_idx in range(Config.NUM_JOINTS)
+        if not (int(feedback_mask) & (1 << joint_idx))
+    )
 
 
 def can_thread_func(
@@ -158,8 +163,13 @@ def can_thread_func(
                 feedback_mask |= 1 << joint_idx
 
             if feedback_mask != complete_feedback_mask:
+                _send_zero_keepalive(transport, motor_ids)
                 if time.perf_counter() - feedback_round_start > feedback_timeout_s:
-                    print(f"[CAN Error] {feedback_timeout_s:.3f}s 内未凑齐 7 轴反馈，进入安全停机。")
+                    missing_ids = _missing_feedback_ids(feedback_mask)
+                    print(
+                        f"[CAN Error] {feedback_timeout_s:.3f}s 内未凑齐 7 轴反馈，"
+                        f"缺失电机={missing_ids}，进入安全停机。"
+                    )
                     shutdown_event.set()
                     break
                 continue
@@ -329,7 +339,7 @@ def main() -> None:
     transformer = None
     try:
         import mujoco  # noqa: F401
-        from sim_env import MujocoSimEnv
+        from sim.env import MujocoSimEnv
 
         if not VIEWER_AVAILABLE:
             raise RuntimeError("MuJoCo viewer is not available")

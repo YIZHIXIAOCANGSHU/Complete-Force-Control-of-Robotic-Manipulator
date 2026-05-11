@@ -11,7 +11,7 @@ import mujoco
 import numpy as np
 
 from config import Config
-from sim_scene import build_enhanced_model
+from sim.scene import build_enhanced_model
 
 
 class MujocoSimEnv:
@@ -35,6 +35,7 @@ class MujocoSimEnv:
         self.model.opt.timestep = Config.DT
 
         self.joint_ids, self.dof_ids = self._resolve_joint_ids()
+        self._apply_sim_joint_dynamics()
         self.joint_lower, self.joint_upper = self._resolve_joint_limits()
         self.ee_body_id = self._resolve_required_body_id(Config.END_EFFECTOR_BODY)
         self.target_mocap_id = self._get_mocap_id("target_pose")
@@ -49,6 +50,13 @@ class MujocoSimEnv:
             self.model.geom_conaffinity[i] = 0
 
         self.reset()
+
+    def _apply_sim_joint_dynamics(self) -> None:
+        damping = np.asarray(Config.MUJOCO_DOF_DAMPING, dtype=np.float64)
+        expected_shape = (Config.NUM_JOINTS,)
+        if damping.shape != expected_shape:
+            raise ValueError(f"MUJOCO_DOF_DAMPING must have shape {expected_shape}, got {damping.shape}")
+        self.model.dof_damping[self.dof_ids] = damping
 
     def _resolve_joint_ids(self) -> tuple[np.ndarray, np.ndarray]:
         joint_ids = []

@@ -5,7 +5,7 @@ from __future__ import annotations
 import queue
 import threading
 
-import rerun_viz
+from common import rerun_viz
 from config import Config
 
 
