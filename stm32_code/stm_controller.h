@@ -16,10 +16,15 @@ typedef struct {
 
 typedef struct {
   double tau[NUM_JOINTS];
+  double q_ref[NUM_JOINTS];
+  double qd_ref[NUM_JOINTS];
+  double kp[NUM_JOINTS];
+  double kd[NUM_JOINTS];
+  double tau_ff[NUM_JOINTS];
   int status;
   double ee_pos[3];
   double ee_quat[4];
-  double traj_t;
+  double path_progress;
   int step_count;
   double calc_time_ms;
 } stm_output_t;

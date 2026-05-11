@@ -64,16 +64,17 @@ int main(void) {
       exit(1);
     }
 
-    /* -- 3e. 发送力矩，步进仿真 -- */
-    if (sim_apply_torque(stm_out.tau) < 0) {
+    /* -- 3e. 发送 MIT 命令字段，步进仿真 -- */
+    if (sim_apply_mit_command(stm_out.q_ref, stm_out.qd_ref, stm_out.kp,
+                              stm_out.kd, stm_out.tau_ff) < 0) {
       printf("[ERROR] Connection lost or simulation closed.\n");
       break;
     }
 
     /* -- 3f. 定期打印状态 -- */
     if (stm_out.step_count % 500 == 0) {
-      printf("[Step %6d] t=%.3fs | ee=[%.3f %.3f %.3f] | tau[0]=%.3f\n",
-             stm_out.step_count, stm_out.traj_t, 
+      printf("[Step %6d] path=%.4fm | ee=[%.3f %.3f %.3f] | tau[0]=%.3f\n",
+             stm_out.step_count, stm_out.path_progress,
              stm_out.ee_pos[0], stm_out.ee_pos[1], stm_out.ee_pos[2],
              stm_out.tau[0]);
     }

@@ -11,6 +11,20 @@ from real import serial_app
 from real.serial_protocol import RECV_FRAME_STRUCT
 
 
+def _fake_control_output():
+    return type(
+        "FakeControlOutput",
+        (),
+        {
+            "tau_total": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            "ee_pos": [0.4, 0.5, 0.6],
+            "ee_quat": [1.0, 0.0, 0.0, 0.0],
+            "status": 0,
+            "calc_time_ms": 0.75,
+        },
+    )()
+
+
 def _feedback_frame(motor_id: int, pos: float, vel: float, tor: float) -> bytes:
     return RECV_FRAME_STRUCT.pack(0xA5, motor_id, 0, pos, vel, tor, 0.0, 0.0)
 
@@ -49,7 +63,7 @@ class FakeCompTool:
 
     def compute(self, q, qd, target_pos, target_quat):
         self.compute_calls.append((list(q), list(qd), list(target_pos), list(target_quat)))
-        return [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [0.4, 0.5, 0.6], [1.0, 0.0, 0.0, 0.0], 0, 0.75
+        return _fake_control_output()
 
 
 class FakeRerunLogger:

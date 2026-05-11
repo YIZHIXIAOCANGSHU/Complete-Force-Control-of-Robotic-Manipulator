@@ -29,8 +29,15 @@ typedef struct {
     uint16_t magic;      // 0xAA55
     int32_t status;
     double tau[7];
+    double q_ref[7];
+    double qd_ref[7];
+    double kp[7];
+    double kd[7];
+    double tau_ff[7];
     double ee_pos[3];    // 传回当前计算出的末端位置 (用于 Python 可视化)
     double ee_quat[4];   // 传回当前计算出的末端姿态
+    double path_progress;
+    int32_t step_count;
     double calc_time_ms; // stm_step 内部真实计算耗时
 } bin_output_t;
 #pragma pack(pop)
@@ -63,7 +70,14 @@ int main() {
             control_get_fk_with_offset(bin_in.q, bin_out.ee_pos, bin_out.ee_quat);
             bin_out.status = 0;
             bin_out.calc_time_ms = 0.0;
+            bin_out.path_progress = 0.0;
+            bin_out.step_count = 0;
             memset(bin_out.tau, 0, sizeof(double) * 7);
+            memset(bin_out.q_ref, 0, sizeof(double) * 7);
+            memset(bin_out.qd_ref, 0, sizeof(double) * 7);
+            memset(bin_out.kp, 0, sizeof(double) * 7);
+            memset(bin_out.kd, 0, sizeof(double) * 7);
+            memset(bin_out.tau_ff, 0, sizeof(double) * 7);
         } else {
             /* 模式 1: 执行完整的 stm_step (控制 + 轨迹 + 安全) */
             memcpy(stm_in.q, bin_in.q, sizeof(double) * 7);
@@ -75,8 +89,15 @@ int main() {
 
             bin_out.status = stm_out.status;
             memcpy(bin_out.tau, stm_out.tau, sizeof(double) * 7);
+            memcpy(bin_out.q_ref, stm_out.q_ref, sizeof(double) * 7);
+            memcpy(bin_out.qd_ref, stm_out.qd_ref, sizeof(double) * 7);
+            memcpy(bin_out.kp, stm_out.kp, sizeof(double) * 7);
+            memcpy(bin_out.kd, stm_out.kd, sizeof(double) * 7);
+            memcpy(bin_out.tau_ff, stm_out.tau_ff, sizeof(double) * 7);
             memcpy(bin_out.ee_pos, stm_out.ee_pos, sizeof(double) * 3);
             memcpy(bin_out.ee_quat, stm_out.ee_quat, sizeof(double) * 4);
+            bin_out.path_progress = stm_out.path_progress;
+            bin_out.step_count = stm_out.step_count;
             bin_out.calc_time_ms = stm_out.calc_time_ms;
             
             if (stm_out.status < 0) {

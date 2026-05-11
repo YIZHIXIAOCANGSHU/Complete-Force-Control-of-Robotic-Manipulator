@@ -107,6 +107,22 @@ class FakeZeroTransport:
             return b"zero-packet"
         return b""
 
+    def send_mit_command(
+        self,
+        motor_id: int,
+        *,
+        position: float,
+        velocity: float,
+        kp: float,
+        kd: float,
+        torque: float,
+    ) -> bytes:
+        self.commands.append(
+            ("mit", int(motor_id), float(position), float(velocity), float(kp), float(kd), float(torque))
+        )
+        self.stats.send_count += 1
+        return b"mit-packet"
+
     def disable_motor(self, motor_id: int):
         self.commands.append(("disable", int(motor_id), None))
 
@@ -131,6 +147,33 @@ class StopAfterRoundRerun:
 
     def close(self) -> None:
         pass
+
+
+class FakeCompTool:
+    def __init__(self, status: int = 0) -> None:
+        self.status = status
+        self.compute_calls: list[tuple[list[float], list[float], list[float], list[float]]] = []
+        self.closed = False
+
+    def compute_fk(self, q):
+        return [0.1, 0.2, 0.3], [1.0, 0.0, 0.0, 0.0]
+
+    def compute(self, q, qd, target_pos, target_quat):
+        self.compute_calls.append((list(q), list(qd), list(target_pos), list(target_quat)))
+        return SimpleNamespace(
+            tau_total=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            q_ref=[0.11, 0.22, 0.33, 0.44, 0.55, 0.66, 0.77],
+            qd_ref=[0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07],
+            kp=[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0],
+            kd=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+            tau_ff=[1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7],
+            ee_pos=[0.4, 0.5, 0.6],
+            ee_quat=[1.0, 0.0, 0.0, 0.0],
+            status=self.status,
+        )
+
+    def close(self):
+        self.closed = True
 
 
 def _feedback_frame(motor_id: int, *, position: float | None = None, velocity: float | None = None):
@@ -159,7 +202,7 @@ def test_tx_loop_sends_all_seven_zero_commands_without_normal_sleep(monkeypatch)
     finally:
         app.shutdown_event.clear()
 
-    assert transport.commands == [("zero", i, 0.0) for i in range(1, 8)]
+    assert transport.commands == [("mit", i, 0.0, 0.0, 0.0, 0.0, 0.0) for i in range(1, 8)]
     assert sleeps == []
 
 
@@ -226,6 +269,7 @@ def test_rx_loop_updates_shared_state_and_logs_feedback_round():
         app.rx_feedback_loop(
             transport,
             shared_state,
+            None,
             rerun,
             startup_enable=False,
             feedback_timeout_s=1.0,
@@ -242,6 +286,31 @@ def test_rx_loop_updates_shared_state_and_logs_feedback_round():
     assert rerun.perf_payloads[-1]["complete_round_rate_hz"] >= 0.0
 
 
+def test_rx_loop_sends_mit_command_after_complete_feedback_round():
+    transport = FakeZeroTransport(_feedback_frame(i + 1) for i in range(app.Config.NUM_JOINTS))
+    shared_state = SharedRobotState()
+    shared_state.set_target_pose([0.11, 0.22, 0.33], [1.0, 0.0, 0.0, 0.0])
+    comp_tool = FakeCompTool()
+
+    app.shutdown_event.clear()
+    try:
+        app.rx_feedback_loop(
+            transport,
+            shared_state,
+            comp_tool,
+            None,
+            startup_enable=False,
+            feedback_timeout_s=1.0,
+            max_complete_rounds=1,
+        )
+    finally:
+        app.shutdown_event.clear()
+
+    assert len(comp_tool.compute_calls) == 1
+    assert ("mit", 1, 0.11, 0.01, 10.0, 0.1, 1.1) in transport.commands
+    assert ("mit", 7, 0.77, 0.07, 70.0, 0.7, 1.7) in transport.commands
+
+
 def test_rx_loop_triggers_safe_stop_on_velocity_limit_violation():
     frames = [_feedback_frame(i + 1) for i in range(app.Config.NUM_JOINTS)]
     frames[-1] = _feedback_frame(7, velocity=11.0)
@@ -253,6 +322,7 @@ def test_rx_loop_triggers_safe_stop_on_velocity_limit_violation():
         app.rx_feedback_loop(
             transport,
             SharedRobotState(),
+            None,
             rerun,
             startup_enable=False,
             feedback_timeout_s=1.0,
@@ -271,6 +341,7 @@ def test_run_mirror_session_safe_stop_zeroes_disables_and_closes_on_timeout(monk
     monkeypatch.setattr(app, "open_zero_transport", lambda: transport)
     monkeypatch.setattr(app, "UsbfdcanSimRerunRecorder", lambda *args, **kwargs: StopAfterRoundRerun())
     monkeypatch.setattr(app, "run_viewer_loop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "GravityCompTool", lambda: FakeCompTool())
     monkeypatch.setattr(app.Config, "ENABLE_RERUN", False)
 
     app.shutdown_event.clear()
@@ -279,6 +350,6 @@ def test_run_mirror_session_safe_stop_zeroes_disables_and_closes_on_timeout(monk
     finally:
         app.shutdown_event.clear()
 
-    assert ("zero", 1, 0.0) in transport.commands
+    assert ("mit", 1, 0.0, 0.0, 0.0, 0.0, 0.0) in transport.commands
     assert ("disable", 7, None) in transport.commands
     assert transport.closed is True

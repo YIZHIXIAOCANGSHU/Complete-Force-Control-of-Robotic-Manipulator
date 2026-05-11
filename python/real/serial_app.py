@@ -80,12 +80,17 @@ def serial_thread_func(ser, comp_tool: GravityCompTool, shared_state: SharedRobo
                     # Even in target-forwarding mode, keep the local STM32 prediction
                     # running while Rerun is enabled so the RBDL-Lite torque curves
                     # continue to update.
-                    tau_total, ee_pos, ee_quat, stm_status, stm32_calc_ms = comp_tool.compute(
+                    control_output = comp_tool.compute(
                         current_q,
                         current_qd,
                         target_pos,
                         target_quat,
                     )
+                    tau_total = control_output.tau_total
+                    ee_pos = control_output.ee_pos
+                    ee_quat = control_output.ee_quat
+                    stm_status = control_output.status
+                    stm32_calc_ms = control_output.calc_time_ms
                 python_cycle_ms = (time.perf_counter() - python_t0) * 1000.0
 
                 set_reported_pose(ee_pos, ee_quat)

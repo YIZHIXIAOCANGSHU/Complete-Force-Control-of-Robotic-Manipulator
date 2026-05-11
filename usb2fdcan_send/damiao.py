@@ -463,6 +463,25 @@ class Usb2FdcanTransport:
         position: float = 0.0,
         velocity: float = 0.0,
     ) -> bytes:
+        return self.send_mit_command(
+            motor_id,
+            position=position,
+            velocity=velocity,
+            kp=kp,
+            kd=kd,
+            torque=torque,
+        )
+
+    def send_mit_command(
+        self,
+        motor_id: int,
+        *,
+        position: float,
+        velocity: float,
+        kp: float,
+        kd: float,
+        torque: float,
+    ) -> bytes:
         mapping = self._mapping_for_motor_id(motor_id)
         can_id, payload = build_mit_frame(
             int(mapping.can_id),

@@ -111,6 +111,30 @@ int sim_apply_torque(const double *tau) {
   return wait_for_state();
 }
 
+int sim_apply_mit_command(const double *q_ref, const double *qd_ref,
+                          const double *kp, const double *kd,
+                          const double *tau_ff) {
+  double command[35];
+  int n;
+
+  if (sock < 0)
+    return -1;
+
+  memcpy(command, q_ref, 7 * sizeof(double));
+  memcpy(command + 7, qd_ref, 7 * sizeof(double));
+  memcpy(command + 14, kp, 7 * sizeof(double));
+  memcpy(command + 21, kd, 7 * sizeof(double));
+  memcpy(command + 28, tau_ff, 7 * sizeof(double));
+
+  n = sendto(sock, command, 35 * sizeof(double), 0,
+             (const struct sockaddr *)&server_addr, addr_len);
+  if (n != 35 * sizeof(double)) {
+    return -1;
+  }
+
+  return wait_for_state();
+}
+
 void sim_close() {
   if (sock >= 0)
     close(sock);

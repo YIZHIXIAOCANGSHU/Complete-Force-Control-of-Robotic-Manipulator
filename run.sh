@@ -227,7 +227,7 @@ if [ "$MODE" == "sim" ]; then
 elif [ "$MODE" == "mc" ] || [ "$MODE" == "monte-carlo" ]; then
     make -C c_interface serial_gravity_comp
 elif [ "$MODE" == "usbfdcan-sim" ]; then
-    PRINT_BLUE "[1/3] USB2FDCAN 反馈镜像模式不需要编译 C 控制回路，跳过。"
+    make -C c_interface serial_gravity_comp
 else
     make -C c_interface serial_gravity_comp
 fi

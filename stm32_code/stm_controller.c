@@ -7,15 +7,16 @@
 #include <string.h>
 
 typedef struct {
-  double traj_t;
-  double path_t;
+  double path_s;
   int step_count;
   int initialized;
   int path_valid;
+  int have_last_q_ref;
   stm_platform_hooks_t hooks;
   LinearPathPlanner path;
   double latched_target_pos[3];
   double latched_target_quat[4];
+  double last_q_ref[NUM_JOINTS];
 } StmControllerState;
 
 static StmControllerState g_controller = {0};
@@ -24,6 +25,17 @@ static const double TORQUE_LIMIT_CHECK[NUM_JOINTS] = {
     JOINT_TORQUE_LIMIT_1, JOINT_TORQUE_LIMIT_2, JOINT_TORQUE_LIMIT_3,
     JOINT_TORQUE_LIMIT_4, JOINT_TORQUE_LIMIT_5, JOINT_TORQUE_LIMIT_6,
     JOINT_TORQUE_LIMIT_7};
+
+static const double JOINT_KP_DEFAULT[NUM_JOINTS] = {
+    KP_JOINT_1, KP_JOINT_2, KP_JOINT_3, KP_JOINT_4,
+    KP_JOINT_5, KP_JOINT_6, KP_JOINT_7};
+
+static const double JOINT_KD_DEFAULT[NUM_JOINTS] = {
+    KD_JOINT_1, KD_JOINT_2, KD_JOINT_3, KD_JOINT_4,
+    KD_JOINT_5, KD_JOINT_6, KD_JOINT_7};
+
+static KinematicsSolver g_stm_ik_solver;
+static RBDLModel g_stm_dynamics_model;
 
 static double stm_controller_now_ms(void) {
   if (g_controller.hooks.now_ms == NULL) {
@@ -113,7 +125,8 @@ static void stm_controller_start_path(const double current_pos[3],
                    target_quat, TRAJ_PLAN_SPEED, TRAJ_PLAN_ACCEL);
   memcpy(g_controller.latched_target_pos, target_pos, sizeof(double) * 3);
   memcpy(g_controller.latched_target_quat, target_quat, sizeof(double) * 4);
-  g_controller.path_t = 0.0;
+  g_controller.path_s = 0.0;
+  g_controller.have_last_q_ref = 0;
   g_controller.path_valid = 1;
 }
 
@@ -155,6 +168,189 @@ static int stm_controller_check_joint_safety(const double q[NUM_JOINTS],
   return 0;
 }
 
+static void stm_controller_fill_mit_gains(stm_output_t *out) {
+  memcpy(out->kp, JOINT_KP_DEFAULT, sizeof(out->kp));
+  memcpy(out->kd, JOINT_KD_DEFAULT, sizeof(out->kd));
+}
+
+static void stm_controller_fill_zero_mit(const double q[NUM_JOINTS],
+                                         stm_output_t *out) {
+  memcpy(out->q_ref, q, sizeof(out->q_ref));
+  memset(out->qd_ref, 0, sizeof(out->qd_ref));
+  memset(out->tau_ff, 0, sizeof(out->tau_ff));
+  memset(out->tau, 0, sizeof(out->tau));
+  stm_controller_fill_mit_gains(out);
+}
+
+static void stm_controller_pose_from_arrays(const double pos[3],
+                                            const double quat_wxyz[4],
+                                            Pose *pose) {
+  double R[9];
+  double tcp_offset[3] = {TCP_OFFSET_X, TCP_OFFSET_Y, TCP_OFFSET_Z};
+  double tcp_delta[3];
+  double qw = quat_wxyz[0], qx = quat_wxyz[1], qy = quat_wxyz[2],
+         qz = quat_wxyz[3];
+
+  R[0] = 1.0 - 2.0 * (qy * qy + qz * qz);
+  R[1] = 2.0 * (qx * qy - qz * qw);
+  R[2] = 2.0 * (qx * qz + qy * qw);
+  R[3] = 2.0 * (qx * qy + qz * qw);
+  R[4] = 1.0 - 2.0 * (qx * qx + qz * qz);
+  R[5] = 2.0 * (qy * qz - qx * qw);
+  R[6] = 2.0 * (qx * qz - qy * qw);
+  R[7] = 2.0 * (qy * qz + qx * qw);
+  R[8] = 1.0 - 2.0 * (qx * qx + qy * qy);
+  mat3_mul_vec3(R, tcp_offset, tcp_delta);
+
+  pose->position[0] = pos[0] - tcp_delta[0];
+  pose->position[1] = pos[1] - tcp_delta[1];
+  pose->position[2] = pos[2] - tcp_delta[2];
+  pose->orientation.w = quat_wxyz[0];
+  pose->orientation.x = quat_wxyz[1];
+  pose->orientation.y = quat_wxyz[2];
+  pose->orientation.z = quat_wxyz[3];
+}
+
+static void stm_controller_sample_path_at_s(double path_s, double ref_pos[3],
+                                            double ref_quat[4]) {
+  double ratio = 1.0;
+
+  if (!g_controller.path_valid || g_controller.path.L < 1e-9) {
+    memcpy(ref_pos, g_controller.latched_target_pos, sizeof(double) * 3);
+    memcpy(ref_quat, g_controller.latched_target_quat, sizeof(double) * 4);
+    return;
+  }
+
+  if (path_s < 0.0) {
+    path_s = 0.0;
+  }
+  if (path_s > g_controller.path.L) {
+    path_s = g_controller.path.L;
+  }
+
+  ref_pos[0] = g_controller.path.start_pos[0] +
+               path_s * g_controller.path.dir[0];
+  ref_pos[1] = g_controller.path.start_pos[1] +
+               path_s * g_controller.path.dir[1];
+  ref_pos[2] = g_controller.path.start_pos[2] +
+               path_s * g_controller.path.dir[2];
+
+  if (g_controller.path.L > 1e-9) {
+    ratio = path_s / g_controller.path.L;
+  }
+  if (ratio > 1.0) {
+    ratio = 1.0;
+  }
+  quat_slerp(g_controller.path.start_quat, g_controller.path.end_quat, ratio,
+             ref_quat);
+}
+
+static void stm_controller_evaluate_round_path(double ref_pos[3],
+                                               double ref_quat[4]) {
+  if (!g_controller.path_valid || g_controller.path.L < 1e-9) {
+    memcpy(ref_pos, g_controller.latched_target_pos, sizeof(double) * 3);
+    memcpy(ref_quat, g_controller.latched_target_quat, sizeof(double) * 4);
+    g_controller.path_s = g_controller.path.L;
+    return;
+  }
+
+  if (g_controller.path_s < g_controller.path.L) {
+    g_controller.path_s += TRAJ_PLAN_STEP_M;
+    if (g_controller.path_s > g_controller.path.L) {
+      g_controller.path_s = g_controller.path.L;
+    }
+  }
+
+  stm_controller_sample_path_at_s(g_controller.path_s, ref_pos, ref_quat);
+}
+
+static int stm_controller_compute_q_ref(const double current_q[NUM_JOINTS],
+                                        const double ref_pos[3],
+                                        const double ref_quat[4],
+                                        double q_ref[NUM_JOINTS]) {
+  Pose target_pose;
+  double initial_q[NUM_JOINTS];
+
+  stm_controller_pose_from_arrays(ref_pos, ref_quat, &target_pose);
+  if (g_controller.have_last_q_ref) {
+    memcpy(initial_q, g_controller.last_q_ref, sizeof(initial_q));
+  } else {
+    memcpy(initial_q, current_q, sizeof(initial_q));
+  }
+
+  return kinematics_compute_inverse_pose_dls(&g_stm_ik_solver, &target_pose,
+                                             initial_q, q_ref,
+                                             IK_MAX_ITERATIONS);
+}
+
+static int stm_controller_compute_q_ref_from_initial(
+    const double initial_q[NUM_JOINTS], const double ref_pos[3],
+    const double ref_quat[4], double q_ref[NUM_JOINTS]) {
+  Pose target_pose;
+
+  stm_controller_pose_from_arrays(ref_pos, ref_quat, &target_pose);
+  return kinematics_compute_inverse_pose_dls(&g_stm_ik_solver, &target_pose,
+                                             initial_q, q_ref,
+                                             IK_MAX_ITERATIONS);
+}
+
+static void stm_controller_compute_qd_ref(const double q_ref[NUM_JOINTS],
+                                          double qd_ref[NUM_JOINTS]) {
+  double next_s;
+  double ds;
+  double dt_segment;
+  double next_pos[3];
+  double next_quat[4];
+  double q_next_ref[NUM_JOINTS];
+
+  memset(qd_ref, 0, sizeof(double) * NUM_JOINTS);
+
+  if (!g_controller.path_valid || g_controller.path.L < 1e-9 ||
+      TRAJ_PLAN_SPEED <= 0.0) {
+    return;
+  }
+
+  next_s = g_controller.path_s + TRAJ_PLAN_STEP_M;
+  if (next_s > g_controller.path.L) {
+    next_s = g_controller.path.L;
+  }
+
+  ds = next_s - g_controller.path_s;
+  if (ds <= 1e-12) {
+    return;
+  }
+
+  dt_segment = ds / TRAJ_PLAN_SPEED;
+  if (dt_segment <= 1e-12 || !isfinite(dt_segment)) {
+    return;
+  }
+
+  stm_controller_sample_path_at_s(next_s, next_pos, next_quat);
+  if (!stm_controller_compute_q_ref_from_initial(q_ref, next_pos, next_quat,
+                                                 q_next_ref)) {
+    return;
+  }
+
+  for (int i = 0; i < NUM_JOINTS; ++i) {
+    qd_ref[i] = normalize_angle(q_next_ref[i] - q_ref[i]) / dt_segment;
+  }
+}
+
+static void stm_controller_compute_equivalent_tau(
+    const double current_q[NUM_JOINTS], const double current_qd[NUM_JOINTS],
+    stm_output_t *out) {
+  for (int i = 0; i < NUM_JOINTS; ++i) {
+    double pos_err = normalize_angle(out->q_ref[i] - current_q[i]);
+    double vel_err = out->qd_ref[i] - current_qd[i];
+    out->tau[i] = out->kp[i] * pos_err + out->kd[i] * vel_err + out->tau_ff[i];
+
+    if (out->tau[i] > TORQUE_LIMIT_CHECK[i])
+      out->tau[i] = TORQUE_LIMIT_CHECK[i];
+    if (out->tau[i] < -TORQUE_LIMIT_CHECK[i])
+      out->tau[i] = -TORQUE_LIMIT_CHECK[i];
+  }
+}
+
 void stm_controller_set_platform_hooks(const stm_platform_hooks_t *hooks) {
   if (hooks == NULL) {
     memset(&g_controller.hooks, 0, sizeof(g_controller.hooks));
@@ -165,13 +361,14 @@ void stm_controller_set_platform_hooks(const stm_platform_hooks_t *hooks) {
 }
 
 void stm_controller_reset(void) {
-  g_controller.traj_t = 0.0;
-  g_controller.path_t = 0.0;
+  g_controller.path_s = 0.0;
   g_controller.step_count = 0;
   g_controller.path_valid = 0;
+  g_controller.have_last_q_ref = 0;
   memset(&g_controller.path, 0, sizeof(g_controller.path));
   memset(g_controller.latched_target_pos, 0, sizeof(g_controller.latched_target_pos));
   memset(g_controller.latched_target_quat, 0, sizeof(g_controller.latched_target_quat));
+  memset(g_controller.last_q_ref, 0, sizeof(g_controller.last_q_ref));
 }
 
 void stm_controller_init(void) {
@@ -180,6 +377,8 @@ void stm_controller_init(void) {
   }
 
   control_init();
+  kinematics_init(&g_stm_ik_solver);
+  build_am_d02_model(&g_stm_dynamics_model);
   stm_controller_reset();
   g_controller.initialized = 1;
 }
@@ -192,6 +391,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   double ref_quat[4];
   double start_ms;
   double end_ms;
+  int ik_status;
 
   if (in == NULL || out == NULL) {
     return;
@@ -202,6 +402,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   }
 
   stm_controller_prepare_output(out);
+  stm_controller_fill_mit_gains(out);
   start_ms = stm_controller_now_ms();
 
   control_filter_velocities(in->qd, filtered_qd);
@@ -210,7 +411,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
                                       target_quat);
 
   if (control_check_safety(in->q, filtered_qd) < 0) {
-    memset(out->tau, 0, sizeof(out->tau));
+    stm_controller_fill_zero_mit(in->q, out);
     goto finalize_step;
   }
 
@@ -220,26 +421,39 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   }
 
   if (g_controller.path_valid) {
-    linear_path_evaluate(&g_controller.path, g_controller.path_t, ref_pos,
-                         ref_quat);
+    stm_controller_evaluate_round_path(ref_pos, ref_quat);
   } else {
     memcpy(ref_pos, target_pos, sizeof(ref_pos));
     memcpy(ref_quat, target_quat, sizeof(ref_quat));
   }
 
-  control_step_v2(ref_pos, ref_quat, in->q, filtered_qd, out->tau);
+  ik_status = stm_controller_compute_q_ref(in->q, ref_pos, ref_quat,
+                                           out->q_ref);
+  if (!ik_status) {
+    memcpy(out->q_ref, in->q, sizeof(out->q_ref));
+    memset(out->qd_ref, 0, sizeof(out->qd_ref));
+    out->status = 1;
+  } else {
+    stm_controller_compute_qd_ref(out->q_ref, out->qd_ref);
+  }
+
+  rbdl_calc_gc(&g_stm_dynamics_model, in->q, filtered_qd, out->tau_ff);
+  stm_controller_compute_equivalent_tau(in->q, filtered_qd, out);
 
   if (stm_controller_check_joint_safety(in->q, filtered_qd, out->tau) == 0) {
-    out->status = 0;
+    if (out->status != 1) {
+      out->status = 0;
+    }
+    memcpy(g_controller.last_q_ref, out->q_ref, sizeof(g_controller.last_q_ref));
+    g_controller.have_last_q_ref = 1;
   } else {
-    memset(out->tau, 0, sizeof(out->tau));
+    stm_controller_fill_zero_mit(in->q, out);
+    out->status = -1;
   }
 
 finalize_step:
-  g_controller.traj_t += CONTROL_DT;
-  g_controller.path_t += CONTROL_DT;
   g_controller.step_count++;
-  out->traj_t = g_controller.traj_t;
+  out->path_progress = g_controller.path_s;
   out->step_count = g_controller.step_count;
 
   end_ms = stm_controller_now_ms();

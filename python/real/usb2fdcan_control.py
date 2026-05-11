@@ -64,7 +64,14 @@ def open_can_transport():
 def _safe_zero_and_disable(transport, motor_ids) -> None:
     for motor_id in motor_ids:
         try:
-            transport.send_mit_torque(int(motor_id), 0.0)
+            transport.send_mit_command(
+                int(motor_id),
+                position=0.0,
+                velocity=0.0,
+                kp=0.0,
+                kd=0.0,
+                torque=0.0,
+            )
         except Exception as exc:
             print(f"[CAN Warning] motor {motor_id} 零力矩下发失败: {exc}")
     for motor_id in motor_ids:
@@ -76,7 +83,14 @@ def _safe_zero_and_disable(transport, motor_ids) -> None:
 
 def _send_zero_keepalive(transport, motor_ids) -> None:
     for motor_id in motor_ids:
-        transport.send_mit_torque(int(motor_id), 0.0)
+        transport.send_mit_command(
+            int(motor_id),
+            position=0.0,
+            velocity=0.0,
+            kp=0.0,
+            kd=0.0,
+            torque=0.0,
+        )
 
 
 def _startup_enable(transport, motor_ids) -> None:
@@ -87,7 +101,26 @@ def _startup_enable(transport, motor_ids) -> None:
     for motor_id in motor_ids:
         transport.clear_error(int(motor_id))
         transport.enable_motor(int(motor_id))
-        transport.send_mit_torque(int(motor_id), 0.0)
+        transport.send_mit_command(
+            int(motor_id),
+            position=0.0,
+            velocity=0.0,
+            kp=0.0,
+            kd=0.0,
+            torque=0.0,
+        )
+
+
+def _send_mit_round(transport, motor_ids, control_output) -> None:
+    for index, motor_id in enumerate(motor_ids):
+        transport.send_mit_command(
+            int(motor_id),
+            position=float(control_output.q_ref[index]),
+            velocity=float(control_output.qd_ref[index]),
+            kp=float(control_output.kp[index]),
+            kd=float(control_output.kd[index]),
+            torque=float(control_output.tau_ff[index]),
+        )
 
 
 def _feedback_state(frame) -> int:
@@ -114,7 +147,7 @@ def can_thread_func(
     *,
     startup_enable: bool = CAN_STARTUP_ENABLE,
     feedback_timeout_s: float = CAN_FEEDBACK_TIMEOUT_S,
-    control_period_s: float = Config.DT,
+    control_period_s: float = 0.0,
 ) -> None:
     print("[CAN] SocketCAN USB2FDCAN 控制线程启动...")
 
@@ -135,13 +168,8 @@ def can_thread_func(
             _startup_enable(transport, motor_ids)
             print("[CAN] 已完成 clear_error、enable 和 MIT 零力矩预置。")
 
-        next_tick = time.perf_counter()
         while not shutdown_event.is_set():
-            now = time.perf_counter()
-            if control_period_s > 0.0 and now < next_tick:
-                time.sleep(min(next_tick - now, 0.001))
-                continue
-            next_tick = max(next_tick + control_period_s, time.perf_counter())
+            _ = control_period_s
 
             try:
                 transport.read(CAN_READ_CHUNK_SIZE)
@@ -179,12 +207,17 @@ def can_thread_func(
             current_q, current_qd, tau_actual, target_pos, target_quat = snapshot_control_inputs()
 
             python_t0 = time.perf_counter()
-            tau_total, ee_pos, ee_quat, stm_status, stm32_calc_ms = comp_tool.compute(
+            control_output = comp_tool.compute(
                 current_q,
                 current_qd,
                 target_pos,
                 target_quat,
             )
+            tau_total = control_output.tau_total
+            ee_pos = control_output.ee_pos
+            ee_quat = control_output.ee_quat
+            stm_status = control_output.status
+            stm32_calc_ms = control_output.calc_time_ms
             python_cycle_ms = (time.perf_counter() - python_t0) * 1000.0
 
             set_reported_pose(ee_pos, ee_quat)
@@ -194,8 +227,7 @@ def can_thread_func(
                 shutdown_event.set()
                 break
 
-            for index, motor_id in enumerate(motor_ids):
-                transport.send_mit_torque(int(motor_id), float(tau_total[index]))
+            _send_mit_round(transport, motor_ids, control_output)
 
             cycle_end = time.perf_counter()
             can_latency_ms = 0.0
@@ -221,7 +253,12 @@ def can_thread_func(
                 tx_str = None
                 if step_count % Config.UART_TEXT_LOG_INTERVAL == 0:
                     rx_str = ", ".join(f"{x:.3f}" for x in current_q)
-                    tx_str = ", ".join(f"{x:.3f}" for x in tau_total)
+                    tx_str = ", ".join(
+                        f"p={control_output.q_ref[i]:.3f}/v={control_output.qd_ref[i]:.3f}/"
+                        f"kp={control_output.kp[i]:.1f}/kd={control_output.kd[i]:.1f}/"
+                        f"t={control_output.tau_ff[i]:.3f}"
+                        for i in range(Config.NUM_JOINTS)
+                    )
                 rerun_logger.log_step(
                     t=step_count * Config.DT,
                     pos_actual=ee_pos,

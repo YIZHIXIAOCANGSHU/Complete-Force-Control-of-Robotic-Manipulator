@@ -34,6 +34,22 @@ def _create_sim_env():
         raise
 
 
+def _sleep_until_next_step(next_step_time: float, dt: float, realtime: bool) -> float:
+    if not realtime:
+        return next_step_time
+
+    now = time.perf_counter()
+    if next_step_time <= 0.0:
+        return now + dt
+
+    sleep_s = next_step_time - now
+    if sleep_s > 0.0:
+        time.sleep(sleep_s)
+        return next_step_time + dt
+
+    return now + dt
+
+
 def run_udp_server(ready_file: str | None = None) -> None:
     print("=" * 60)
     print("      AM-D02 Python UDP 仿真服务                ")
@@ -72,6 +88,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
     _write_ready_file(ready_file)
 
     step_count = 0
+    next_step_time = 0.0
     state_packet = np.empty(STATE_PACKET_SIZE, dtype=np.float64)
     state_packet_view = memoryview(state_packet).cast("B")
 
@@ -90,12 +107,28 @@ def run_udp_server(ready_file: str | None = None) -> None:
                     sock.sendto(state_packet_view, addr)
                     continue
 
-                if len(data) != 56:
+                if len(data) == 35 * 8:
+                    mit_command = np.frombuffer(data, dtype="<f8", count=35)
+                    q_ref = mit_command[0:7]
+                    qd_ref = mit_command[7:14]
+                    kp = mit_command[14:21]
+                    kd = mit_command[21:28]
+                    tau_ff = mit_command[28:35]
+                    q = env.get_qpos()
+                    qd = env.get_qvel()
+                    tau = kp * (q_ref - q) + kd * (qd_ref - qd) + tau_ff
+                elif len(data) == 56:
+                    tau = np.frombuffer(data, dtype="<f8", count=Config.NUM_JOINTS)
+                else:
                     print(f"[UDP Server] 收到未知长度的数据: {len(data)} bytes")
                     continue
 
-                tau = np.frombuffer(data, dtype="<f8", count=Config.NUM_JOINTS)
                 clipped_tau = env.clip_torque(tau)
+                next_step_time = _sleep_until_next_step(
+                    next_step_time,
+                    Config.DT,
+                    Config.SIM_REALTIME,
+                )
                 t_start = time.perf_counter()
                 env.apply_torque(clipped_tau)
                 env.step()

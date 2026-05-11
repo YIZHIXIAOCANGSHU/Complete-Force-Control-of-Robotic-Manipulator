@@ -158,6 +158,30 @@ def test_transport_send_mit_torque_uses_root_usb2fdcan_package():
     assert feedback.torque == pytest.approx(2.5, abs=2e-2)
 
 
+def test_transport_send_mit_command_forwards_full_mit_fields():
+    fake = FakeSocketTransport()
+    transport = Usb2FdcanTransport(Usb2FdcanConfig(), socket_transport=fake)
+
+    packet = transport.send_mit_command(
+        3,
+        position=1.25,
+        velocity=-2.0,
+        kp=10.0,
+        kd=0.5,
+        torque=3.5,
+    )
+
+    assert fake.sent
+    can_id, payload = fake.sent[-1]
+    assert can_id == DEFAULT_MOTOR_CAN_IDS[2]
+    assert len(payload) == 8
+    assert packet
+    feedback = decode_feedback(_feedback_payload_from_mit_payload(0x13, payload), DM_Motor_Type.DM4340)
+    assert feedback.position == pytest.approx(1.25, abs=5e-4)
+    assert feedback.velocity == pytest.approx(-2.0, abs=2e-2)
+    assert feedback.torque == pytest.approx(3.5, abs=2e-2)
+
+
 def test_zero_transport_remains_compatible_alias():
     transport = Usb2FdcanZeroTransport(Usb2FdcanConfig(), socket_transport=FakeSocketTransport())
 

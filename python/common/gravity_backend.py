@@ -6,6 +6,26 @@ import os
 import struct
 import subprocess
 import sys
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class MitControlOutput:
+    tau_total: list[float]
+    q_ref: list[float]
+    qd_ref: list[float]
+    kp: list[float]
+    kd: list[float]
+    tau_ff: list[float]
+    ee_pos: list[float]
+    ee_quat: list[float]
+    status: int
+    path_progress: float
+    step_count: int
+    calc_time_ms: float
+
+    def legacy_tuple(self):
+        return self.tau_total, self.ee_pos, self.ee_quat, self.status, self.calc_time_ms
 
 
 class GravityCompTool:
@@ -24,7 +44,7 @@ class GravityCompTool:
             bufsize=0,
         )
         self.bin_struct_in = struct.Struct("<HB7d7d3d4d")
-        self.bin_struct_out = struct.Struct("<Hi7d3d4dd")
+        self.bin_struct_out = struct.Struct("<Hi7d7d7d7d7d7d3d4ddid")
         self.in_size = self.bin_struct_in.size
         self.out_size = self.bin_struct_out.size
         self._in_buffer = bytearray(self.in_size)
@@ -74,18 +94,38 @@ class GravityCompTool:
         parsed = self._exchange(2, q, self._zero_qd, self._zero_pos, self._unit_quat)
         if parsed is None:
             return [0.0] * 3, [1.0, 0.0, 0.0, 0.0]
-        return list(parsed[9:12]), list(parsed[12:16])
+        return list(parsed[44:47]), list(parsed[47:51])
 
     def compute(self, q, qd, target_pos, target_quat):
         parsed = self._exchange(1, q, qd, target_pos, target_quat)
         if parsed is None:
-            return [0.0] * 7, [0.0] * 3, [1.0, 0.0, 0.0, 0.0], -1, 0.0
-        return (
-            parsed[2:9],
-            parsed[9:12],
-            parsed[12:16],
-            parsed[1],
-            parsed[16],
+            return MitControlOutput(
+                tau_total=[0.0] * 7,
+                q_ref=[0.0] * 7,
+                qd_ref=[0.0] * 7,
+                kp=[0.0] * 7,
+                kd=[0.0] * 7,
+                tau_ff=[0.0] * 7,
+                ee_pos=[0.0] * 3,
+                ee_quat=[1.0, 0.0, 0.0, 0.0],
+                status=-1,
+                path_progress=0.0,
+                step_count=0,
+                calc_time_ms=0.0,
+            )
+        return MitControlOutput(
+            tau_total=list(parsed[2:9]),
+            q_ref=list(parsed[9:16]),
+            qd_ref=list(parsed[16:23]),
+            kp=list(parsed[23:30]),
+            kd=list(parsed[30:37]),
+            tau_ff=list(parsed[37:44]),
+            ee_pos=list(parsed[44:47]),
+            ee_quat=list(parsed[47:51]),
+            status=int(parsed[1]),
+            path_progress=float(parsed[51]),
+            step_count=int(parsed[52]),
+            calc_time_ms=float(parsed[53]),
         )
 
     def close(self) -> None:

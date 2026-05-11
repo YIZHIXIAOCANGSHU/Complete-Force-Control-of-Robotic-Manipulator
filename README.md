@@ -5,7 +5,7 @@
 - `sim` 模式：Python 侧启动 MuJoCo 仿真，C 侧运行实时控制回路，适合联调控制算法。
 - `mc` 模式：Python 侧启动 MuJoCo 模型，用蒙特卡罗随机采样检查末端位置和四元数的数值范围，基于采样凸包求完全在内部的最大轴对齐长方体，并用 MuJoCo 窗口绘制可达空间和可输入 `pos` 范围。
 - `real` 模式：Python 侧连接真实硬件，可选择旧串口链路或 SocketCAN USB2FDCAN 链路，并调用本仓库内的 C 算法后端，适合真机测试和可视化观察。
-- `usbfdcan-sim` 模式：只通过 USB2FDCAN 接收 7 轴反馈来驱动 MuJoCo/Rerun，同时持续向 7 个电机高速发送全零 MIT 命令。
+- `usbfdcan-sim` 模式：通过 USB2FDCAN 接收 7 轴反馈来驱动 MuJoCo/Rerun，并在完整反馈轮次后发送 MIT 控制命令；异常时回退到零 MIT 和 disable。
 
 如果你是第一次接触这个项目，最重要的入口只有一个：
 
@@ -19,7 +19,7 @@
 1) sim  - 软硬件联合仿真
 2) real - 真实硬件控制
 3) mc   - 蒙特卡罗范围检查 + MuJoCo 窗口
-4) usbfdcan-sim - USB2FDCAN 反馈驱动仿真 + 全零发送
+4) usbfdcan-sim - USB2FDCAN 反馈驱动仿真 + MIT 控制发送
 ```
 
 也可以继续直接指定模式：
@@ -124,7 +124,7 @@ python3 -m pip install -r python/requirements.txt
 ./run.sh real usbfdcan
 ```
 
-USB2FDCAN 反馈驱动仿真 + 全零发送：
+USB2FDCAN 反馈驱动仿真 + MIT 控制发送：
 
 ```bash
 ./run.sh usbfdcan-sim
@@ -142,7 +142,7 @@ USB2FDCAN 反馈驱动仿真 + 全零发送：
 - `sim` 模式下启动 Python UDP 仿真服务器，再启动前台 C 控制回路。
 - `mc` 模式下编译并调用 C 后端做 FK，随机采样关节空间，在终端刷新末端位置/四元数范围，输出内部最大长方体对应的 `pos` x/y/z 可输入范围，并打开 MuJoCo 窗口显示末端可达空间凸包多面体和内部范围盒。
 - `real` 模式下默认检查 `/dev/ttyUSB0` 并启动串口控制；选择 `usbfdcan` 后端时检查 SocketCAN 接口并启动 MIT torque 控制。
-- `usbfdcan-sim` 模式下跳过 C 编译，检查 SocketCAN 接口并启动 USB2FDCAN 反馈镜像仿真和全零 MIT 高速发送。
+- `usbfdcan-sim` 模式下编译 C 控制后端，检查 SocketCAN 接口并启动 USB2FDCAN 反馈驱动仿真和 MIT 命令发送。
 
 ## 三种模式分别在做什么
 
@@ -305,6 +305,7 @@ AM_D02_ENABLE_RERUN=1
 AM_D02_RERUN_LOG_STRIDE=25
 AM_D02_REAL_VIEWER_FPS=30
 AM_D02_RERUN_QUEUE_SIZE=512
+AM_D02_SIM_REALTIME=1
 AM_D02_SERIAL_FORWARD_TARGET=0
 AM_D02_CAN_INTERFACE=can0
 AM_D02_CAN_FEEDBACK_TIMEOUT_S=0.10
@@ -336,6 +337,8 @@ AM_D02_SERIAL_FORWARD_TARGET=1 ./run.sh real
   真机模式下 MuJoCo viewer 的刷新率。
 - `AM_D02_RERUN_QUEUE_SIZE`
   Rerun 异步队列大小。
+- `AM_D02_SIM_REALTIME`
+  `sim` 模式下是否按 MuJoCo 步长实时节拍运行，默认 `1`；离线压测可设为 `0`。
 - `AM_D02_SERIAL_FORWARD_TARGET`
   真机模式下是否把目标位姿继续下发到串口设备。
 - `AM_D02_CAN_INTERFACE`

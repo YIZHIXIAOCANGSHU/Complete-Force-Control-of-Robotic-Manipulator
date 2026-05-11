@@ -11,10 +11,25 @@ from common.shared_state import SharedRobotState
 from real import usb2fdcan_control as real_can_control
 
 
+def _fake_control_output(status: int = 0):
+    return SimpleNamespace(
+        tau_total=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+        q_ref=[0.11, 0.22, 0.33, 0.44, 0.55, 0.66, 0.77],
+        qd_ref=[0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07],
+        kp=[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0],
+        kd=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+        tau_ff=[1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7],
+        ee_pos=[0.4, 0.5, 0.6],
+        ee_quat=[1.0, 0.0, 0.0, 0.0],
+        status=status,
+        calc_time_ms=0.75,
+    )
+
+
 class FakeCanTransport:
     def __init__(self, frames=None) -> None:
         self.frames = list(frames or [])
-        self.commands: list[tuple[str, int, float | None]] = []
+        self.commands: list[tuple] = []
         self.closed = False
 
     def read(self, size: int) -> bytes:
@@ -37,9 +52,20 @@ class FakeCanTransport:
         self.commands.append(("enable", int(motor_id), None))
         return b"enable"
 
-    def send_mit_torque(self, motor_id: int, torque: float) -> bytes:
-        self.commands.append(("torque", int(motor_id), float(torque)))
-        return b"torque"
+    def send_mit_command(
+        self,
+        motor_id: int,
+        *,
+        position: float,
+        velocity: float,
+        kp: float,
+        kd: float,
+        torque: float,
+    ) -> bytes:
+        self.commands.append(
+            ("mit", int(motor_id), float(position), float(velocity), float(kp), float(kd), float(torque))
+        )
+        return b"mit"
 
     def disable_motor(self, motor_id: int) -> bytes:
         self.commands.append(("disable", int(motor_id), None))
@@ -70,7 +96,7 @@ class FakeCompTool:
 
     def compute(self, q, qd, target_pos, target_quat):
         self.compute_calls.append((list(q), list(qd), list(target_pos), list(target_quat)))
-        return [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [0.4, 0.5, 0.6], [1.0, 0.0, 0.0, 0.0], self.status, 0.75
+        return _fake_control_output(status=self.status)
 
 
 class StopAfterLogRerunLogger:
@@ -125,8 +151,8 @@ def test_can_thread_computes_and_sends_mit_torque_after_complete_feedback(monkey
     assert qd == [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
     assert target_pos == [0.11, 0.22, 0.33]
     assert target_quat == [1.0, 0.0, 0.0, 0.0]
-    assert ("torque", 1, 1.0) in transport.commands
-    assert ("torque", 7, 7.0) in transport.commands
+    assert ("mit", 1, 0.11, 0.01, 10.0, 0.1, 1.1) in transport.commands
+    assert ("mit", 7, 0.77, 0.07, 70.0, 0.7, 1.7) in transport.commands
     assert len(rerun_logger.payloads) == 1
     assert rerun_logger.payloads[0]["tau_total"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
     assert transport.closed is True
@@ -160,7 +186,7 @@ def test_can_thread_sends_zero_keepalive_while_waiting_for_first_feedback(monkey
     assert len(comp_tool.compute_calls) == 1
     assert transport.read_count >= 2
     assert transport.commands[: real_can_control.Config.NUM_JOINTS] == [
-        ("torque", motor_id, 0.0)
+        ("mit", motor_id, 0.0, 0.0, 0.0, 0.0, 0.0)
         for motor_id in range(1, real_can_control.Config.NUM_JOINTS + 1)
     ]
 
@@ -189,9 +215,9 @@ def test_can_thread_zeroes_and_disables_when_stm_reports_safety_error():
     finally:
         real_can_control.shutdown_event.clear()
 
-    nonzero_torques = [cmd for cmd in transport.commands if cmd[0] == "torque" and cmd[2] not in (0.0, None)]
+    nonzero_torques = [cmd for cmd in transport.commands if cmd[0] == "mit" and cmd[-1] not in (0.0, None)]
     assert nonzero_torques == []
-    assert ("torque", 1, 0.0) in transport.commands
+    assert ("mit", 1, 0.0, 0.0, 0.0, 0.0, 0.0) in transport.commands
     assert ("disable", 7, None) in transport.commands
     assert transport.closed is True
 
@@ -215,7 +241,7 @@ def test_can_thread_stops_on_feedback_timeout_without_computing():
         real_can_control.shutdown_event.clear()
 
     assert comp_tool.compute_calls == []
-    assert ("torque", 1, 0.0) in transport.commands
+    assert ("mit", 1, 0.0, 0.0, 0.0, 0.0, 0.0) in transport.commands
     assert ("disable", 7, None) in transport.commands
     assert transport.closed is True
 
@@ -239,7 +265,7 @@ def test_can_thread_stops_when_feedback_round_never_completes():
         real_can_control.shutdown_event.clear()
 
     assert comp_tool.compute_calls == []
-    nonzero_torques = [cmd for cmd in transport.commands if cmd[0] == "torque" and cmd[2] not in (0.0, None)]
+    nonzero_torques = [cmd for cmd in transport.commands if cmd[0] == "mit" and cmd[-1] not in (0.0, None)]
     assert nonzero_torques == []
-    assert ("torque", 1, 0.0) in transport.commands
+    assert ("mit", 1, 0.0, 0.0, 0.0, 0.0, 0.0) in transport.commands
     assert ("disable", 7, None) in transport.commands

@@ -19,6 +19,7 @@ if PROJECT_ROOT not in sys.path:
 
 from config import Config, _env_bool, _env_float, _env_int
 from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
+from common.gravity_backend import GravityCompTool
 from common.shared_state import SharedRobotState
 from usb2fdcan_send.damiao import Usb2FdcanConfig, Usb2FdcanZeroTransport
 from .rerun_feedback import MotorQuality, STATE_CODE_LABELS, UsbfdcanSimRerunRecorder
@@ -83,13 +84,13 @@ def _startup_enable_zero(transport, motor_ids: tuple[int, ...]) -> None:
     for motor_id in motor_ids:
         transport.clear_error(int(motor_id))
         transport.enable_motor(int(motor_id))
-        transport.send_zero_mit(int(motor_id))
+        _send_mit_zero(transport, int(motor_id))
 
 
 def _safe_zero_and_disable(transport, motor_ids: tuple[int, ...]) -> None:
     for motor_id in motor_ids:
         try:
-            transport.send_zero_mit(int(motor_id))
+            _send_mit_zero(transport, int(motor_id))
         except Exception as exc:
             print(f"[USB2FDCAN Warning] motor {motor_id} 全零下发失败: {exc}")
     for motor_id in motor_ids:
@@ -97,6 +98,31 @@ def _safe_zero_and_disable(transport, motor_ids: tuple[int, ...]) -> None:
             transport.disable_motor(int(motor_id))
         except Exception as exc:
             print(f"[USB2FDCAN Warning] motor {motor_id} disable 失败: {exc}")
+
+
+def _send_mit_zero(transport, motor_id: int) -> bytes:
+    if hasattr(transport, "send_mit_command"):
+        return transport.send_mit_command(
+            int(motor_id),
+            position=0.0,
+            velocity=0.0,
+            kp=0.0,
+            kd=0.0,
+            torque=0.0,
+        )
+    return transport.send_zero_mit(int(motor_id))
+
+
+def _send_mit_round(transport, motor_ids: tuple[int, ...], control_output) -> None:
+    for index, motor_id in enumerate(motor_ids):
+        transport.send_mit_command(
+            int(motor_id),
+            position=float(control_output.q_ref[index]),
+            velocity=float(control_output.qd_ref[index]),
+            kp=float(control_output.kp[index]),
+            kd=float(control_output.kd[index]),
+            torque=float(control_output.tau_ff[index]),
+        )
 
 
 def check_feedback_frame_safety(frame) -> FeedbackSafetyResult:
@@ -151,7 +177,7 @@ def tx_zero_loop(
         for motor_id in motor_ids:
             if shutdown_event.is_set():
                 break
-            transport.send_zero_mit(int(motor_id))
+            _send_mit_zero(transport, int(motor_id))
         round_count += 1
         if max_rounds is not None and round_count >= int(max_rounds):
             break
@@ -160,6 +186,7 @@ def tx_zero_loop(
 def rx_feedback_loop(
     transport,
     shared_state: SharedRobotState,
+    comp_tool: GravityCompTool | None = None,
     rerun_recorder=None,
     *,
     startup_enable: bool = CAN_STARTUP_ENABLE,
@@ -220,6 +247,20 @@ def rx_feedback_loop(
         now = time.perf_counter()
         if feedback_mask == complete_feedback_mask:
             complete_rounds += 1
+            current_q, current_qd, _tau_actual, target_pos, target_quat = shared_state.snapshot_control_inputs()
+            if comp_tool is not None:
+                control_output = comp_tool.compute(current_q, current_qd, target_pos, target_quat)
+                if control_output.status < 0:
+                    reason = f"stm control status={control_output.status}"
+                    if rerun_recorder is not None:
+                        rerun_recorder.log_abort(reason=reason, missing_feedback_mask=missing_feedback_mask)
+                    print(f"[USB2FDCAN Safety] {reason}")
+                    _safe_zero_and_disable(transport, motor_ids)
+                    shutdown_event.set()
+                    break
+                shared_state.set_reported_pose(control_output.ee_pos, control_output.ee_quat)
+                _send_mit_round(transport, motor_ids, control_output)
+
             feedback_mask = 0
             missing_feedback_mask = 0
             feedback_round_start = now
@@ -254,6 +295,7 @@ def rx_feedback_loop(
             if rerun_recorder is not None:
                 rerun_recorder.log_abort(reason=reason, missing_feedback_mask=missing_feedback_mask)
             print(f"[USB2FDCAN Error] {reason}，进入安全停机。")
+            _safe_zero_and_disable(transport, motor_ids)
             shutdown_event.set()
             break
 
@@ -273,7 +315,7 @@ def run_viewer_loop(shared_state: SharedRobotState) -> None:
     env.forward()
     model = env.model
     data = env.data
-    print("\n[Running] USB2FDCAN 反馈驱动 MuJoCo 仿真，全零 MIT 命令高速发送中。按 Ctrl+C 停止。")
+    print("\n[Running] USB2FDCAN 反馈驱动 MuJoCo 仿真，完整反馈轮次后发送 MIT 控制命令。按 Ctrl+C 停止。")
     with launch_passive_viewer(model, data) as viewer:
         while viewer.is_running() and not shutdown_event.is_set():
             q, _, _ = shared_state.snapshot_viewer_state()
@@ -294,25 +336,33 @@ def run_mirror_session(
     shared_state = SharedRobotState()
     rerun_recorder = None
     transport = open_zero_transport()
+    comp_tool = None
     if Config.ENABLE_RERUN:
         rerun_recorder = UsbfdcanSimRerunRecorder(motor_ids=motor_ids)
 
+    try:
+        comp_tool = GravityCompTool()
+        initial_target_pos, initial_target_quat = comp_tool.compute_fk(Config.TARGET_Q.tolist())
+        shared_state.set_target_pose(initial_target_pos, initial_target_quat)
+        print("[USB2FDCAN] C 控制后端已就绪，完整反馈轮次后发送 MIT 控制命令。")
+    except Exception as exc:
+        try:
+            transport.close()
+        except Exception:
+            pass
+        if rerun_recorder is not None:
+            rerun_recorder.close()
+        raise RuntimeError(f"启动 C 控制后端失败: {exc}") from exc
+
     rx_thread = threading.Thread(
         target=rx_feedback_loop,
-        args=(transport, shared_state, rerun_recorder),
+        args=(transport, shared_state, comp_tool, rerun_recorder),
         kwargs={"startup_enable": startup_enable, "feedback_timeout_s": feedback_timeout_s},
-        daemon=True,
-    )
-    tx_thread = threading.Thread(
-        target=tx_zero_loop,
-        args=(transport,),
-        kwargs={"motor_ids": motor_ids},
         daemon=True,
     )
 
     try:
         rx_thread.start()
-        tx_thread.start()
         if start_viewer:
             run_viewer_loop(shared_state)
         else:
@@ -322,20 +372,21 @@ def run_mirror_session(
         pass
     finally:
         shutdown_event.set()
-        tx_thread.join(timeout=1.0)
         rx_thread.join(timeout=1.0)
         _safe_zero_and_disable(transport, motor_ids)
         try:
             transport.close()
         finally:
+            if comp_tool is not None:
+                comp_tool.close()
             if rerun_recorder is not None:
                 rerun_recorder.close()
-        print("[USB2FDCAN] 已安全退出，完成全零下发、disable 和 CAN 关闭。")
+        print("[USB2FDCAN] 已安全退出，完成零 MIT、disable 和 CAN 关闭。")
 
 
 def main() -> None:
     print("=" * 60)
-    print("      AM-D02 USB2FDCAN Feedback Mirror Simulation       ")
+    print("      AM-D02 USB2FDCAN Feedback-Driven MIT Simulation   ")
     print("=" * 60)
     print(
         "[System] SocketCAN: "

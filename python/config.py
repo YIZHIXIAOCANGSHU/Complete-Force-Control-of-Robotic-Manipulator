@@ -88,7 +88,8 @@ class Config:
     TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0])
     
     # === 仿真参数 ===
-    DT = 0.01  # 仿真步长 (秒)，对应 100 Hz
+    DT = 0.002  # MuJoCo 仿真步长 (秒)
+    SIM_REALTIME = _env_bool("AM_D02_SIM_REALTIME", True)
     MUJOCO_DOF_DAMPING = _env_float_array(
         "AM_D02_MUJOCO_DOF_DAMPING",
         [1.0, 1.0, 0.6, 0.6, 0.25, 0.25, 0.25],

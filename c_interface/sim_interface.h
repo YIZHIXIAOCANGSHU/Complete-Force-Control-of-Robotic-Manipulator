@@ -37,6 +37,14 @@ void sim_get_state(double *qpos, double *qvel, double *ee_pos, double *ee_quat,
 int sim_apply_torque(const double *tau);
 
 /**
+ * 发送 MIT 命令字段到仿真环境，并步进仿真。
+ * Python 端按 tau = kp*(q_ref-q) + kd*(qd_ref-qd) + tau_ff 计算等效力矩。
+ */
+int sim_apply_mit_command(const double *q_ref, const double *qd_ref,
+                          const double *kp, const double *kd,
+                          const double *tau_ff);
+
+/**
  * 关闭连接
  */
 void sim_close();
