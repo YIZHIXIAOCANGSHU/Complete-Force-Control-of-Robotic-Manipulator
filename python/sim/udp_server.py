@@ -58,7 +58,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
 
     if Config.ENABLE_RERUN:
         rerun_viz.init_rerun()
-        rerun_viz.setup_realtime_styles()
+        rerun_viz.setup_sim_realtime_styles()
         time.sleep(0.5)
 
     env = _create_sim_env()
@@ -142,16 +142,18 @@ def run_udp_server(ready_file: str | None = None) -> None:
 
                 if Config.ENABLE_RERUN:
                     q, qd, pos_current, quat_current, pos_desired, quat_desired = env.get_state_snapshot()
-                    rerun_viz.log_realtime_step(
+                    rerun_viz.log_sim_realtime_step(
                         t=step_count * Config.DT,
                         pos_actual=pos_current,
                         pos_desired=pos_desired,
                         quat_actual=quat_current,
                         quat_desired=quat_desired,
-                        tau_total=clipped_tau,
+                        tau_received=tau,
+                        tau_applied=clipped_tau,
                         cycle_time=cycle_time_ms,
                         q=q,
                         qd=qd,
+                        step_count=step_count,
                     )
 
                 env.write_state_packet(state_packet)

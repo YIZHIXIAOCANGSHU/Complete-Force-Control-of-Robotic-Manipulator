@@ -143,6 +143,21 @@ def test_send_zero_mit_retries_enobufs_and_counts_backpressure(monkeypatch):
     assert sleeps and sleeps[0] > 0.0
 
 
+def test_enable_motor_primes_and_refreshes_zero_mit(monkeypatch):
+    fake = FakeSocketTransport()
+    monkeypatch.setattr("usb2fdcan_send.damiao.time.sleep", lambda _seconds: None)
+    transport = Usb2FdcanTransport(Usb2FdcanConfig(), socket_transport=fake)
+
+    transport.enable_motor(1)
+
+    sent_ids = [can_id for can_id, _payload in fake.sent]
+    assert sent_ids[0] == 0x7FF
+    assert sent_ids[1] == DEFAULT_MOTOR_CAN_IDS[0]
+    assert sent_ids[2:7] == [DEFAULT_MOTOR_CAN_IDS[0]] * 5
+    assert sent_ids[7] == DEFAULT_MOTOR_CAN_IDS[0]
+    assert fake.sent[2][1][-1] == 0xFC
+
+
 def test_transport_send_mit_torque_uses_root_usb2fdcan_package():
     fake = FakeSocketTransport()
     transport = Usb2FdcanTransport(Usb2FdcanConfig(), socket_transport=fake)

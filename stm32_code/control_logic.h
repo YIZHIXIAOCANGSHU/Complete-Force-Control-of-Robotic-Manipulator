@@ -6,9 +6,9 @@
 
 /**
  * @file control_logic.h
- * @brief STM32 机械臂双空间阻抗控制逻辑封装
+ * @brief STM32 机械臂主控制辅助逻辑封装
  *
- * 提供基础的运动学封装、动力学补偿以及核心的控制步进函数 (control_step_v2)。
+ * 提供基础运动学封装、动力学补偿、速度滤波和安全检查。
  */
 #ifndef CONTROL_LOGIC_H
 #define CONTROL_LOGIC_H
@@ -23,33 +23,11 @@ extern "C" {
 /* 初始化控制器和底层模型 */
 void control_init(void);
 
-/* 步进 V2: 规划 + 双空间阻抗控制
- * 注意: 传入的 target_pos 和 target_quat 必须位于 URDF Base 坐标系下。
- */
-/**
- * @brief 核心控制逻辑: 双空间阻抗控制 (基于位置姿态误差计算各关节输出力矩)
- *
- * 将当前机械臂末端与目标末端的差异投射到关节空间，同时在零空间(Null-space)维护首选姿态，
- * 最终输出经过重力与科氏力补偿的控制力矩 tau_out。
- *
- * @param target_pos 目标笛卡尔空间位置 [x, y, z] (相对于基座)
- * @param target_quat 目标姿态四元数 [w, x, y, z] (相对于基座)
- * @param current_q 当前各关节角度 [q1..q7]
- * @param current_qd 当前各关节角速度 [qd1..qd7]
- * @param tau_out 传出计算得到的关节期望力矩 [tau1..tau7]
- */
-void control_step_v2(const double target_pos[3], const double target_quat[4],
-                     const double current_q[7], const double current_qd[7],
-                     double tau_out[7]);
-
 /* 显式暴露的补偿函数 */
 void control_calc_gravity_compensation(const double q[7], double G[7]);
 void control_calc_gravity_pd_compensation(const double q[7], const double qd[7],
                                           const double q_target[7],
                                           double tau_out[7]);
-void control_calc_cartesian_joint_pd_compensation(
-    const double q[7], const double qd[7], const double q_target[7],
-    const double target_pos[3], const double target_quat[4], double tau_out[7]);
 void control_calc_coriolis_compensation(const double q[7], const double qd[7],
                                         double tau_c[7]);
 

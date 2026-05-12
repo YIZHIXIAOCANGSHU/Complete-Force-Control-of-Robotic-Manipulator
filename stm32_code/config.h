@@ -41,40 +41,23 @@
 #define TCP_OFFSET_Z -0.03
 
 /* ================================================================
- *  笛卡尔空间 PD 增益
- * ================================================================ */
-#define KP_CART_X 120.0
-#define KP_CART_Y 120.0
-#define KP_CART_Z 120.0
-#define KP_CART_ROLL 5.0
-#define KP_CART_PITCH 5.0
-#define KP_CART_YAW 5.0
-
-#define KD_CART_X 40.0
-#define KD_CART_Y 40.0
-#define KD_CART_Z 40.0
-#define KD_CART_ROLL 0.8
-#define KD_CART_PITCH 0.8
-#define KD_CART_YAW 0.8
-
-/* ================================================================
  *  关节空间 PD 增益
  * ================================================================ */
-#define KP_JOINT_1 115.0
-#define KP_JOINT_2 100.0
-#define KP_JOINT_3 30.0
-#define KP_JOINT_4 40.0
-#define KP_JOINT_5 20.0
-#define KP_JOINT_6 20.0
-#define KP_JOINT_7 20.0
+#define KP_JOINT_1 10.0
+#define KP_JOINT_2 10.0
+#define KP_JOINT_3 5.0
+#define KP_JOINT_4 5.0
+#define KP_JOINT_5 0.2
+#define KP_JOINT_6 0.2
+#define KP_JOINT_7 0.2
 
-#define KD_JOINT_1 5
-#define KD_JOINT_2 5
-#define KD_JOINT_3 2
-#define KD_JOINT_4 2
-#define KD_JOINT_5 1
-#define KD_JOINT_6 1
-#define KD_JOINT_7 1
+#define KD_JOINT_1 0.316
+#define KD_JOINT_2 0.316
+#define KD_JOINT_3 0.158
+#define KD_JOINT_4 0.158
+#define KD_JOINT_5 0.032
+#define KD_JOINT_6 0.032
+#define KD_JOINT_7 0.032
 
 /* ================================================================
  *  力矩限制
@@ -89,25 +72,10 @@
 #define JOINT_TORQUE_LIMIT_7 9.0
 
 /* ================================================================
- *  偏好姿态与双空间权重 (control_step_v2)
- * ================================================================ */
-#define Q_PREF_1 0.0
-#define Q_PREF_2 0.0
-#define Q_PREF_3 0.0
-#define Q_PREF_4 DEG2RAD(60.0)
-#define Q_PREF_5 0.0
-#define Q_PREF_6 0.0
-#define Q_PREF_7 0.0
-
-#define POSTURE_ALPHA 0.3
-#define W_CARTESIAN 0.85
-#define W_JOINT 0.15
-
-/* ================================================================
  *  运动学与逆解参数
  * ================================================================ */
-#define IK_MAX_ITERATIONS 50
-#define IK_TOL_POS 0.005 /* 5mm 容差 */
+#define IK_MAX_ITERATIONS 80
+#define IK_TOL_POS 0.002 /* 2mm 容差 */
 #define IK_T_ORI 0.01    /* ~0.57 度容差 */
 #define IK_MAX_STEP 0.2  /* 每次迭代最大关节步进 (弧度) */
 #define IK_DAMPING 0.1   /* DLS 阻尼因子 lambda */

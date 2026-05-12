@@ -18,6 +18,7 @@ def test_simulation_default_timestep_is_python_owned():
     assert not hasattr(Config, "CONTROL_DT")
     assert Config.DT == 0.002
     assert Config.SIM_REALTIME is True
+    assert not hasattr(Config, "MUJOCO_DOF_DAMPING")
 
 
 def test_sleep_until_next_step_paces_realtime_loop(monkeypatch):
@@ -88,4 +89,23 @@ def test_c_backend_qd_ref_goes_zero_at_path_end():
 
     assert output.status in (0, 1)
     assert output.path_progress == pytest.approx(path_length, abs=1e-4)
+    assert np.linalg.norm(np.array(output.ee_pos) - np.array(target_pos)) < 0.003
+    assert max(abs(value) for value in output.qd_ref) == pytest.approx(0.0)
+
+
+def test_c_backend_uses_best_effort_ik_result_when_orientation_does_not_converge():
+    if not (Path.cwd() / "c_interface" / "serial_gravity_comp").exists():
+        pytest.skip("serial_gravity_comp is not built")
+
+    tool = GravityCompTool()
+    try:
+        q = Config.HOME_QPOS.tolist()
+        target_pos, _target_quat = tool.compute_fk(q)
+        output = tool.compute(q, [0.0] * Config.NUM_JOINTS, target_pos, [0.0, 1.0, 0.0, 0.0])
+    finally:
+        tool.close()
+
+    assert output.status == 1
+    assert np.all(np.isfinite(output.q_ref))
+    assert np.linalg.norm(np.array(output.q_ref) - np.array(q)) > 0.01
     assert max(abs(value) for value in output.qd_ref) == pytest.approx(0.0)
