@@ -48,10 +48,7 @@ class Config:
     ENABLE_RERUN = _env_bool("AM_D02_ENABLE_RERUN", True)
     RERUN_LOG_STRIDE = max(1, _env_int("AM_D02_RERUN_LOG_STRIDE", 10))
     REAL_VIEWER_FPS = max(1.0, _env_float("AM_D02_REAL_VIEWER_FPS", 60.0))
-    SERIAL_IDLE_SLEEP_S = max(0.0, _env_float("AM_D02_SERIAL_IDLE_SLEEP_S", 0.00005))
     RERUN_QUEUE_SIZE = max(8, _env_int("AM_D02_RERUN_QUEUE_SIZE", 256))
-    UART_TEXT_LOG_INTERVAL = max(1, _env_int("AM_D02_UART_TEXT_LOG_INTERVAL", 100))
-    SERIAL_FORWARD_TARGET = _env_bool("AM_D02_SERIAL_FORWARD_TARGET", True)
     
     # === 关节配置 (Joints) ===
     NUM_JOINTS = 7
@@ -79,12 +76,38 @@ class Config:
     SIM_REALTIME = _env_bool("AM_D02_SIM_REALTIME", True)
     
     # === 初始位置 ===
-    # 机械臂仿真实际起始关节角（全零，C端从这里出发）
+    # 机械臂仿真实际起始关节角
     HOME_QPOS = np.array([0.0, 0.0, 0.0, np.pi/3, 0.0, 0.0, 0.0])
 
     # 用户希望机械臂最终到达的构型（用于FK计算方块的初始摆放位置）
     # 修改此参数来改变方块的初始位置
     INIT_QPOS = np.array([np.pi/9, -np.pi/9, np.pi/9, np.pi/9, np.pi/9, np.pi/9, np.pi/9])
+
+    # === 参数辨识配置 ===
+    PARAM_ID_JOINT_PRIORS = [
+        {"fc": 0.306, "k": 28.417, "fv": 0.063, "fo": 0.088},
+        {"fc": 0.306, "k": 28.417, "fv": 0.063, "fo": 0.088},
+        {"fc": 0.400, "k": 29.065, "fv": 0.604, "fo": 0.008},
+        {"fc": 0.166, "k": 130.038, "fv": 0.813, "fo": -0.058},
+        {"fc": 0.050, "k": 151.771, "fv": 0.029, "fo": 0.005},
+        {"fc": 0.083, "k": 242.287, "fv": 0.072, "fo": 0.009},
+        {"fc": 0.172, "k": 7.888, "fv": 0.084, "fo": -0.059},
+    ]
+    PARAM_ID_MAX_EE_SPEED = 3.0
+    PARAM_ID_REALTIME = _env_bool("AM_D02_PARAM_ID_REALTIME", True)
+    PARAM_ID_COULOMB_EPS = 0.02
+    PARAM_ID_TRAJECTORY_CANDIDATES = max(1, _env_int("AM_D02_PARAM_ID_TRAJECTORY_CANDIDATES", 4))
+    PARAM_ID_TRAJECTORY_SEEDS = os.getenv("AM_D02_PARAM_ID_TRAJECTORY_SEEDS", "42,43,44,45")
+    PARAM_ID_TRAJECTORY_PROFILES = max(1, _env_int("AM_D02_PARAM_ID_TRAJECTORY_PROFILES", 3))
+    PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS = _env_bool("AM_D02_PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS", True)
+    PARAM_ID_PRIOR_LAMBDA_INERTIAL = max(0.0, _env_float("AM_D02_PARAM_ID_PRIOR_LAMBDA_INERTIAL", 1e-1))
+    PARAM_ID_PRIOR_LAMBDA_JOINT = max(0.0, _env_float("AM_D02_PARAM_ID_PRIOR_LAMBDA_JOINT", 1e-1))
+    PARAM_ID_RCOND = max(0.0, _env_float("AM_D02_PARAM_ID_RCOND", 1e-8))
+    PARAM_ID_RIDGE = max(0.0, _env_float("AM_D02_PARAM_ID_RIDGE", 1e-8))
+    PARAM_ID_DISTAL_WEIGHT = max(0.0, _env_float("AM_D02_PARAM_ID_DISTAL_WEIGHT", 2.0))
+    PARAM_ID_DISTAL_LINK_START = min(7, max(1, _env_int("AM_D02_PARAM_ID_DISTAL_LINK_START", 5)))
+    PARAM_ID_FREEZE_JOINT_TERMS_SIM = _env_bool("AM_D02_PARAM_ID_FREEZE_JOINT_TERMS_SIM", False)
+    PARAM_ID_MAX_SAMPLES = max(50, _env_int("AM_D02_PARAM_ID_MAX_SAMPLES", 700))
 
     # === 目标位置 (Target Posture) ===
     # 用于重力补偿与 PD 控制的目标位置 (rad)

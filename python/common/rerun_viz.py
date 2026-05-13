@@ -202,7 +202,7 @@ def _setup_trajectory_styles():
 
         rr.log(f"torque_gap/J{i+1}/delta",
                rr.SeriesLines(colors=[_JOINT_COLORS[i]],
-                              names=["STM32 Total - Actual Sensor"],
+                              names=["Total Torque - Actual Sensor"],
                               widths=[2]),
                static=True)
 
@@ -247,16 +247,15 @@ def _setup_trajectory_styles():
                           widths=[2]),
            static=True)
     
-    # STM32 计算耗时样式
-    rr.log("performance/stm32_calc_time",
+    rr.log("performance/calc_time",
            rr.SeriesLines(colors=[[100, 200, 100]],
-                          names=["STM32 Algorithm Calc Time (ms)"],
+                          names=["Control Algorithm Calc Time (ms)"],
                           widths=[2]),
            static=True)
 
-    rr.log("performance/stm32_calc_hz",
+    rr.log("performance/calc_hz",
            rr.SeriesLines(colors=[[80, 180, 220]],
-                          names=["STM32 Calc Rate (Hz)"],
+                          names=["Control Calc Rate (Hz)"],
                           widths=[2]),
            static=True)
 
@@ -309,8 +308,8 @@ def setup_realtime_styles():
     rr.log("performance/uart_latency", rr.Scalars(0.0))
     rr.log("performance/uart_cycle_hz", rr.Scalars(0.0))
     rr.log("performance/uart_transfer_kbps", rr.Scalars(0.0))
-    rr.log("performance/stm32_calc_time", rr.Scalars(0.0))
-    rr.log("performance/stm32_calc_hz", rr.Scalars(0.0))
+    rr.log("performance/calc_time", rr.Scalars(0.0))
+    rr.log("performance/calc_hz", rr.Scalars(0.0))
 
     # Note: TimeseriesView origin should be the parent entity to show multiple children as series
 
@@ -369,12 +368,12 @@ def setup_realtime_styles():
         name="UART Effective Throughput (kbps)", origin="/performance/uart_transfer_kbps",
     )
     
-    stm32_time_view = rrb.TimeSeriesView(
-        name="STM32 Calculation Time (ms)", origin="/performance/stm32_calc_time",
+    calc_time_view = rrb.TimeSeriesView(
+        name="Control Calculation Time (ms)", origin="/performance/calc_time",
     )
 
-    stm32_rate_view = rrb.TimeSeriesView(
-        name="STM32 Calculation Rate (Hz)", origin="/performance/stm32_calc_hz",
+    calc_rate_view = rrb.TimeSeriesView(
+        name="Control Calculation Rate (Hz)", origin="/performance/calc_hz",
     )
 
     python_time_view = rrb.TimeSeriesView(
@@ -397,15 +396,15 @@ def setup_realtime_styles():
                     name="EE Tracking Error"
                 ),
                 rrb.Vertical(joint_q_view, joint_target_q_view, joint_qd_view, name="Joint States"),
-                rrb.Vertical(*total_torque_views, name="Total Torque (from STM32)"),
+                rrb.Vertical(*total_torque_views, name="Total Torque"),
                 rrb.Vertical(*torque_gap_views, name="Total Torque Gap"),
                 rrb.Vertical(uart_log_view, latency_view, name="UART Protocol"),
                 rrb.Vertical(
                     python_time_view,
                     uart_cycle_rate_view,
                     uart_transfer_rate_view,
-                    stm32_time_view,
-                    stm32_rate_view,
+                    calc_time_view,
+                    calc_rate_view,
                     name="Performance Rates",
                 ),
             )
@@ -567,8 +566,8 @@ def log_realtime_step(
     uart_latency_ms: float = None,
     uart_cycle_hz: float = None,
     uart_transfer_kbps: float = None,
-    stm32_calc_time_ms: float = None,
-    stm32_calc_hz: float = None,
+    calc_time_ms: float = None,
+    calc_hz: float = None,
 ):
     """单步记录交互式仿真数据"""
     if not RERUN_AVAILABLE: return
@@ -627,10 +626,10 @@ def log_realtime_step(
         rr.log("performance/uart_cycle_hz", rr.Scalars(float(uart_cycle_hz)))
     if uart_transfer_kbps is not None:
         rr.log("performance/uart_transfer_kbps", rr.Scalars(float(uart_transfer_kbps)))
-    if stm32_calc_time_ms is not None:
-        rr.log("performance/stm32_calc_time", rr.Scalars(float(stm32_calc_time_ms)))
-    if stm32_calc_hz is not None:
-        rr.log("performance/stm32_calc_hz", rr.Scalars(float(stm32_calc_hz)))
+    if calc_time_ms is not None:
+        rr.log("performance/calc_time", rr.Scalars(float(calc_time_ms)))
+    if calc_hz is not None:
+        rr.log("performance/calc_hz", rr.Scalars(float(calc_hz)))
     
     # 3D
     rr.log("trajectory_3d/actual_ee", 

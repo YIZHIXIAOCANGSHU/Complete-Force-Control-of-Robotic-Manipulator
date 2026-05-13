@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from config import Config
-from common.gravity_backend import GravityCompTool
+from core.gravity_backend import GravityCompTool
 from sim import udp_server
 
 
@@ -44,10 +44,7 @@ def test_sleep_until_next_step_can_run_unpaced_for_batch_tests(monkeypatch):
     assert next_step_time == 10.002
 
 
-def test_c_backend_qd_ref_uses_path_speed_without_control_dt():
-    if not (Path.cwd() / "c_interface" / "serial_gravity_comp").exists():
-        pytest.skip("serial_gravity_comp is not built")
-
+def test_backend_qd_ref_uses_path_speed_without_control_dt():
     tool = GravityCompTool()
     try:
         target_pos, target_quat = tool.compute_fk(Config.INIT_QPOS.tolist())
@@ -67,10 +64,7 @@ def test_c_backend_qd_ref_uses_path_speed_without_control_dt():
     assert max(abs(value) for value in output.qd_ref) < 10.0
 
 
-def test_c_backend_qd_ref_goes_zero_at_path_end():
-    if not (Path.cwd() / "c_interface" / "serial_gravity_comp").exists():
-        pytest.skip("serial_gravity_comp is not built")
-
+def test_backend_qd_ref_goes_zero_at_path_end():
     tool = GravityCompTool()
     try:
         home_pos, _home_quat = tool.compute_fk(Config.HOME_QPOS.tolist())
@@ -93,10 +87,7 @@ def test_c_backend_qd_ref_goes_zero_at_path_end():
     assert max(abs(value) for value in output.qd_ref) == pytest.approx(0.0)
 
 
-def test_c_backend_uses_best_effort_ik_result_when_orientation_does_not_converge():
-    if not (Path.cwd() / "c_interface" / "serial_gravity_comp").exists():
-        pytest.skip("serial_gravity_comp is not built")
-
+def test_backend_uses_best_effort_ik_result_when_orientation_does_not_converge():
     tool = GravityCompTool()
     try:
         q = Config.HOME_QPOS.tolist()

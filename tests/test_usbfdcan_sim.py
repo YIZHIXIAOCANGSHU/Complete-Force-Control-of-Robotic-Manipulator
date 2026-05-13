@@ -13,8 +13,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "python"))
 
 from common.shared_state import SharedRobotState  # noqa: E402
 from usb2fdcan_send.damiao import DecodedFeedbackFrame  # noqa: E402
-from python.usbfdcan_sim import app  # noqa: E402
-from python.usbfdcan_sim import rerun_feedback  # noqa: E402
+from mirror import app  # noqa: E402
+from mirror import rerun_feedback  # noqa: E402
 
 
 class DummyRerun:
@@ -246,17 +246,17 @@ def test_rerun_recorder_sends_motor_grouped_blueprint(monkeypatch):
         if node.get("kind") in {"TimeSeriesView", "TextLogView", "TextDocumentView"}
     }
 
-    assert origins_by_name["J1 Position (rad)"] == "/usbfdcan_sim/motors/motor_01/position"
-    assert origins_by_name["J1 Velocity (rad/s)"] == "/usbfdcan_sim/motors/motor_01/velocity"
-    assert origins_by_name["J1 Feedback Torque (N*m)"] == "/usbfdcan_sim/motors/motor_01/torque"
-    assert origins_by_name["J1 MOS Temperature (C)"] == "/usbfdcan_sim/motors/motor_01/mos_temperature"
-    assert origins_by_name["J1 Rotor Temperature (C)"] == "/usbfdcan_sim/motors/motor_01/rotor_temperature"
-    assert origins_by_name["J1 State Code"] == "/usbfdcan_sim/motors/motor_01/state_code"
-    assert origins_by_name["J1 Quality Flags"] == "/usbfdcan_sim/motors/motor_01/quality"
-    assert origins_by_name["J1 Events"] == "/usbfdcan_sim/motors/motor_01/events"
-    assert origins_by_name["CAN Rates"] == "/usbfdcan_sim/performance/rates"
-    assert origins_by_name["Safety / Backpressure"] == "/usbfdcan_sim/performance/safety"
-    assert origins_by_name["Raw Zero MIT Packet"] == "/usbfdcan_sim/raw_zero_packet"
+    assert origins_by_name["J1 Position (rad)"] == "/mirror/motors/motor_01/position"
+    assert origins_by_name["J1 Velocity (rad/s)"] == "/mirror/motors/motor_01/velocity"
+    assert origins_by_name["J1 Feedback Torque (N*m)"] == "/mirror/motors/motor_01/torque"
+    assert origins_by_name["J1 MOS Temperature (C)"] == "/mirror/motors/motor_01/mos_temperature"
+    assert origins_by_name["J1 Rotor Temperature (C)"] == "/mirror/motors/motor_01/rotor_temperature"
+    assert origins_by_name["J1 State Code"] == "/mirror/motors/motor_01/state_code"
+    assert origins_by_name["J1 Quality Flags"] == "/mirror/motors/motor_01/quality"
+    assert origins_by_name["J1 Events"] == "/mirror/motors/motor_01/events"
+    assert origins_by_name["CAN Rates"] == "/mirror/performance/rates"
+    assert origins_by_name["Safety / Backpressure"] == "/mirror/performance/safety"
+    assert origins_by_name["Raw Zero MIT Packet"] == "/mirror/raw_zero_packet"
     assert "/usbfdcan_sim" not in origins_by_name.values()
 
     can_rates_view = next(
@@ -265,9 +265,9 @@ def test_rerun_recorder_sends_motor_grouped_blueprint(monkeypatch):
         if node.get("kind") == "TimeSeriesView" and node.get("name") == "CAN Rates"
     )
     assert can_rates_view["contents"] == [
-        "/usbfdcan_sim/performance/tx_send_rate_hz",
-        "/usbfdcan_sim/performance/rx_feedback_rate_hz",
-        "/usbfdcan_sim/performance/complete_round_rate_hz",
+        "/mirror/performance/tx_send_rate_hz",
+        "/mirror/performance/rx_feedback_rate_hz",
+        "/mirror/performance/complete_round_rate_hz",
     ]
 
     static_line_names = {
@@ -275,8 +275,8 @@ def test_rerun_recorder_sends_motor_grouped_blueprint(monkeypatch):
         for path, payload, static in dummy_rr.logs
         if static and payload.get("kind") == "SeriesLines"
     }
-    assert static_line_names["usbfdcan_sim/motors/motor_01/quality/state_ok"] == ["J1 state_ok"]
-    assert static_line_names["usbfdcan_sim/motors/motor_01/quality/safety_ok"] == ["J1 safety_ok"]
+    assert static_line_names["mirror/motors/motor_01/quality/state_ok"] == ["J1 state_ok"]
+    assert static_line_names["mirror/motors/motor_01/quality/safety_ok"] == ["J1 safety_ok"]
 
 
 def test_rx_loop_updates_shared_state_and_logs_feedback_round():

@@ -123,8 +123,6 @@ def _feedback_frame(motor_id: int):
 def test_can_thread_computes_and_sends_mit_torque_after_complete_feedback(monkeypatch):
     monkeypatch.setattr(real_can_control.Config, "ENABLE_RERUN", True)
     monkeypatch.setattr(real_can_control.Config, "RERUN_LOG_STRIDE", 1)
-    monkeypatch.setattr(real_can_control.Config, "UART_TEXT_LOG_INTERVAL", 1)
-
     transport = FakeCanTransport(_feedback_frame(i + 1) for i in range(real_can_control.Config.NUM_JOINTS))
     comp_tool = FakeCompTool(status=0)
     shared_state = SharedRobotState()
@@ -162,8 +160,6 @@ def test_can_thread_computes_and_sends_mit_torque_after_complete_feedback(monkey
 def test_can_thread_sends_zero_keepalive_while_waiting_for_first_feedback(monkeypatch):
     monkeypatch.setattr(real_can_control.Config, "ENABLE_RERUN", True)
     monkeypatch.setattr(real_can_control.Config, "RERUN_LOG_STRIDE", 1)
-    monkeypatch.setattr(real_can_control.Config, "UART_TEXT_LOG_INTERVAL", 1)
-
     transport = DelayedFeedbackTransport(
         _feedback_frame(i + 1) for i in range(real_can_control.Config.NUM_JOINTS)
     )

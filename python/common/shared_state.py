@@ -1,4 +1,4 @@
-"""Thread-safe shared state for serial control and visualization."""
+"""Thread-safe shared state for control and visualization."""
 
 from __future__ import annotations
 

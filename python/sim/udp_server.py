@@ -34,6 +34,9 @@ def _create_sim_env():
         raise
 
 
+_VIEWER_SYNC_INTERVAL = 1.0 / 30.0
+
+
 def _sleep_until_next_step(next_step_time: float, dt: float, realtime: bool) -> float:
     if not realtime:
         return next_step_time
@@ -53,7 +56,7 @@ def _sleep_until_next_step(next_step_time: float, dt: float, realtime: bool) -> 
 def run_udp_server(ready_file: str | None = None) -> None:
     print("=" * 60)
     print("      AM-D02 Python UDP 仿真服务                ")
-    print("   允许独立的外部 C 语言控制器通过 Socket 接入  ")
+    print("   允许外部 Pinocchio 控制器通过 Socket 接入    ")
     print("=" * 60)
 
     if Config.ENABLE_RERUN:
@@ -89,8 +92,16 @@ def run_udp_server(ready_file: str | None = None) -> None:
 
     step_count = 0
     next_step_time = 0.0
+    last_viewer_sync = 0.0
     state_packet = np.empty(STATE_PACKET_SIZE, dtype=np.float64)
     state_packet_view = memoryview(state_packet).cast("B")
+
+    def _throttled_viewer_sync(viewer, last_sync: float) -> float:
+        now = time.perf_counter()
+        if now - last_sync >= _VIEWER_SYNC_INTERVAL:
+            viewer.sync()
+            return now
+        return last_sync
 
     try:
         while True:
@@ -138,7 +149,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
                 if clipped:
                     env.forward()
                 if viewer:
-                    viewer.sync()
+                    last_viewer_sync = _throttled_viewer_sync(viewer, last_viewer_sync)
 
                 if Config.ENABLE_RERUN:
                     q, qd, pos_current, quat_current, pos_desired, quat_desired = env.get_state_snapshot()
@@ -162,7 +173,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
 
             except socket.timeout:
                 if viewer:
-                    viewer.sync()
+                    last_viewer_sync = _throttled_viewer_sync(viewer, last_viewer_sync)
                 continue
 
     except KeyboardInterrupt:

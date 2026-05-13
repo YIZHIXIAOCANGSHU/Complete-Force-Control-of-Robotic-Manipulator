@@ -17,7 +17,7 @@ for path in (PYTHON_ROOT, PROJECT_ROOT):
 
 from config import Config, _env_bool, _env_float, _env_int
 from common.coord_transforms import RobotMujocoTransformer
-from common.gravity_backend import GravityCompTool
+from core.gravity_backend import GravityCompTool
 from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
 from common.rerun_async import RerunLogger
 from common.shared_state import SharedRobotState
@@ -226,13 +226,13 @@ def can_thread_func(
             ee_pos = control_output.ee_pos
             ee_quat = control_output.ee_quat
             stm_status = control_output.status
-            stm32_calc_ms = control_output.calc_time_ms
+            calc_time_ms = control_output.calc_time_ms
             python_cycle_ms = (time.perf_counter() - python_t0) * 1000.0
 
             set_reported_pose(ee_pos, ee_quat)
 
             if stm_status < 0:
-                print(f"[CAN Safety] 本地 STM32 控制计算返回异常状态: {stm_status}，停止下发非零力矩。")
+                print(f"[CAN Safety] 控制计算返回异常状态: {stm_status}，停止下发非零力矩。")
                 shutdown_event.set()
                 break
 
@@ -248,7 +248,7 @@ def can_thread_func(
                     can_cycle_hz = 1.0 / cycle_dt
             last_cycle_end = cycle_end
 
-            stm32_calc_hz = 1000.0 / stm32_calc_ms if stm32_calc_ms > 1e-9 else 0.0
+            calc_hz = 1000.0 / calc_time_ms if calc_time_ms > 1e-9 else 0.0
             should_log_rerun = (
                 rerun_logger is not None
                 and Config.ENABLE_RERUN
@@ -260,7 +260,7 @@ def can_thread_func(
             if should_log_rerun:
                 rx_str = None
                 tx_str = None
-                if step_count % Config.UART_TEXT_LOG_INTERVAL == 0:
+                if step_count % 100 == 0:
                     rx_str = ", ".join(f"{x:.3f}" for x in current_q)
                     tx_str = ", ".join(
                         f"p={control_output.q_ref[i]:.3f}/v={control_output.qd_ref[i]:.3f}/"
@@ -287,11 +287,11 @@ def can_thread_func(
                     uart_latency_ms=can_latency_ms,
                     uart_cycle_hz=can_cycle_hz,
                     uart_transfer_kbps=0.0,
-                    stm32_calc_time_ms=stm32_calc_ms,
-                    stm32_calc_hz=stm32_calc_hz,
+                    calc_time_ms=calc_time_ms,
+                    calc_hz=calc_hz,
                 )
             if stm_status == 0 and last_stm_status < 0:
-                print("[CAN] 本地 STM32 控制计算已恢复正常。")
+                print("[CAN] 控制计算已恢复正常。")
             last_stm_status = stm_status
             step_count += 1
 
@@ -357,9 +357,9 @@ def main() -> None:
 
     try:
         comp_tool = GravityCompTool()
-        print("[System] C 语言计算后端已就绪。")
+        print("[System] Pinocchio 计算后端已就绪。")
     except Exception as exc:
-        print(f"[Error] 启动 C 计算后端失败: {exc}")
+        print(f"[Error] 启动 Pinocchio 计算后端失败: {exc}")
         if rerun_logger is not None:
             rerun_logger.close()
         return

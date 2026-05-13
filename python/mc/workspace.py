@@ -10,7 +10,7 @@ from contextlib import nullcontext
 import numpy as np
 
 from config import Config
-from common.gravity_backend import GravityCompTool
+from core.gravity_backend import GravityCompTool
 from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
 
 
@@ -805,7 +805,7 @@ def run_monte_carlo_range_check(
         raise ValueError("max_hull_points 必须为正数")
 
     print("=" * 60)
-    print("      AM-D02 C 后端蒙特卡洛末端位置/四元数范围检查  ")
+    print("      AM-D02 Pinocchio 蒙特卡洛末端位置/四元数范围检查  ")
     print("=" * 60)
     sys.stdout.flush()
 
@@ -828,7 +828,7 @@ def run_monte_carlo_range_check(
     comp_tool = GravityCompTool()
 
     print(f"[MC] 采样数量={samples}, 随机种子={'随机' if seed is None else seed}")
-    print("[MC] 使用 C 后端 serial_gravity_comp 做 FK 采样；MuJoCo 仅用于关节限位和结果可视化。")
+    print("[MC] 使用 Pinocchio 后端做 FK 采样；MuJoCo 用于关节限位和结果可视化。")
 
     try:
         for index in range(samples):
