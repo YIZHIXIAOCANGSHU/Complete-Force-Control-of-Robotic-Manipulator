@@ -44,6 +44,23 @@ _JOINT_COLORS = [
 
 _POSITION_DISPLAY_UNIT = "mm"
 _POSITION_DISPLAY_SCALE = 1000.0
+_MAX_TRAJECTORY_POINTS = 2000
+_sim_actual_path: list[np.ndarray] = []
+_sim_target_path: list[np.ndarray] = []
+
+
+def _append_trajectory_point(path: list[np.ndarray], point: np.ndarray) -> np.ndarray:
+    path.append(np.asarray(point, dtype=np.float64).copy())
+    if len(path) > _MAX_TRAJECTORY_POINTS:
+        del path[:len(path) - _MAX_TRAJECTORY_POINTS]
+    return np.asarray(path, dtype=np.float64)
+
+
+def _log_sim_status(step_count: int, pos_err: np.ndarray, rot_err: np.ndarray) -> None:
+    rr.log("sim/status/step", rr.Scalars(float(step_count)))
+    rr.log("sim/status/log_stride", rr.Scalars(float(Config.RERUN_LOG_STRIDE)))
+    rr.log("sim/status/max_position_error_mm", rr.Scalars(float(np.max(np.abs(pos_err)))))
+    rr.log("sim/status/max_rotation_error_deg", rr.Scalars(float(np.max(np.abs(rot_err)))))
 
 
 def _joint_short_name(index: int) -> str:
@@ -418,6 +435,8 @@ def setup_sim_realtime_styles():
     """设置 UDP/MuJoCo 仿真的精简 Rerun 蓝图。"""
     if not RERUN_AVAILABLE:
         return
+    _sim_actual_path.clear()
+    _sim_target_path.clear()
 
     # Position tracking
     for axis in ('X', 'Y', 'Z'):
@@ -589,10 +608,11 @@ def log_realtime_step(
     # Position Tracking & Error
     pos_actual_display = _position_to_display_units(pos_actual)
     pos_desired_display = _position_to_display_units(pos_desired)
+    pos_err = pos_actual_display - pos_desired_display
     for i, axis in enumerate(('X', 'Y', 'Z')):
         rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(float(pos_actual_display[i])))
         rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(float(pos_desired_display[i])))
-        rr.log(f"error/{axis}", rr.Scalars(float(pos_actual_display[i] - pos_desired_display[i])))
+        rr.log(f"error/{axis}", rr.Scalars(float(pos_err[i])))
         
     # Rotation Tracking & Error
     rot_actual = quat_to_euler(quat_actual)
@@ -670,10 +690,11 @@ def log_sim_realtime_step(
             rr.log(f"joint_state/qd/J{i+1}", rr.Scalars(float(qd[i])))
     pos_actual_display = _position_to_display_units(pos_actual)
     pos_desired_display = _position_to_display_units(pos_desired)
+    pos_err = pos_actual_display - pos_desired_display
     for i, axis in enumerate(('X', 'Y', 'Z')):
         rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(float(pos_actual_display[i])))
         rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(float(pos_desired_display[i])))
-        rr.log(f"error/{axis}", rr.Scalars(float(pos_actual_display[i] - pos_desired_display[i])))
+        rr.log(f"error/{axis}", rr.Scalars(float(pos_err[i])))
 
     rot_actual = quat_to_euler(quat_actual)
     rot_desired = quat_to_euler(quat_desired)
@@ -685,6 +706,7 @@ def log_sim_realtime_step(
         rr.log(f"tracking/rot/{axis}/actual", rr.Scalars(float(rot_actual_deg[i])))
         rr.log(f"tracking/rot/{axis}/desired", rr.Scalars(float(rot_desired_deg[i])))
         rr.log(f"error/{axis}", rr.Scalars(float(rot_err[i])))
+    _log_sim_status(step_count, pos_err, rot_err)
 
     for j in range(len(tau_applied)):
         rr.log(f"sim/control/torque/J{j+1}/applied", rr.Scalars(float(tau_applied[j])))
@@ -699,6 +721,14 @@ def log_sim_realtime_step(
            rr.Points3D([pos_desired], colors=[[80, 220, 80]], radii=0.015, labels=["Target"]))
     rr.log("trajectory_3d/error_line",
            rr.LineStrips3D([[pos_actual, pos_desired]], colors=[[255, 0, 0]], radii=0.002))
+    actual_path = _append_trajectory_point(_sim_actual_path, pos_actual)
+    target_path = _append_trajectory_point(_sim_target_path, pos_desired)
+    if len(actual_path) > 1:
+        rr.log("trajectory_3d/actual_path",
+               rr.LineStrips3D([actual_path], colors=[[230, 100, 50]], radii=0.002))
+    if len(target_path) > 1:
+        rr.log("trajectory_3d/target_path",
+               rr.LineStrips3D([target_path], colors=[[80, 220, 80]], radii=0.002))
 
 
 

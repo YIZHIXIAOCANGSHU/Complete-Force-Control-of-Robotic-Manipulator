@@ -86,14 +86,16 @@ select_param_id_mode() {
     while true; do
         echo "----------------------------------------------------------"
         echo "  参数辨识子模式："
-        echo "    1) sim  - MuJoCo 仿真环境辨识"
-        echo "    2) real - 实机 USB2FDCAN 辨识"
+        echo "    1) sim     - MuJoCo 开环逆动力学辨识"
+        echo "    2) sim-pd  - MuJoCo PD闭环辨识"
+        echo "    3) real    - 实机 USB2FDCAN 辨识"
         echo "    q) 返回"
         echo "----------------------------------------------------------"
         read -r -p "输入数字选择: " choice
         case "$choice" in
             1) PARAM_ID_MODE="sim"; break ;;
-            2) PARAM_ID_MODE="real"; break ;;
+            2) PARAM_ID_MODE="sim-pd"; break ;;
+            3) PARAM_ID_MODE="real"; break ;;
             q|Q) PARAM_ID_MODE=""; MODE=""; break ;;
             *) PRINT_RED "无效选择: $choice" ;;
         esac
@@ -120,8 +122,8 @@ else
             MODE="param_id"
             PARAM_ID_MODE="${1:-sim}"
             case "$PARAM_ID_MODE" in
-                sim|real) shift 2>/dev/null || true ;;
-                *) PRINT_RED "错误: param_id 子模式必须是 'sim' 或 'real'"; exit 1 ;;
+                sim|sim-pd|real) shift 2>/dev/null || true ;;
+                *) PRINT_RED "错误: param_id 子模式必须是 'sim', 'sim-pd' 或 'real'"; exit 1 ;;
             esac
             ;;
         *) PRINT_RED "错误: 未知模式 '$MODE'。可用: sim, real, mc, usbfdcan-sim, param_id"; exit 1 ;;
@@ -199,9 +201,16 @@ elif [ "$MODE" == "param_id" ]; then
         : "${AM_D02_ENABLE_VIEWER:=1}"
         : "${AM_D02_ENABLE_RERUN:=0}"
         export AM_D02_ENABLE_VIEWER AM_D02_ENABLE_RERUN
-        PRINT_BLUE "[1/1] 启动参数辨识仿真模式..."
+        PRINT_BLUE "[1/1] 启动参数辨识仿真模式（开环逆动力学）..."
         echo "----------------------------------------------------------"
         "$PYTHON_BIN" python/param_id/sim_main.py "${APP_ARGS[@]}"
+    elif [ "$PARAM_ID_MODE" == "sim-pd" ]; then
+        : "${AM_D02_ENABLE_VIEWER:=1}"
+        : "${AM_D02_ENABLE_RERUN:=0}"
+        export AM_D02_ENABLE_VIEWER AM_D02_ENABLE_RERUN
+        PRINT_BLUE "[1/1] 启动参数辨识 PD闭环仿真模式..."
+        echo "----------------------------------------------------------"
+        "$PYTHON_BIN" python/param_id/sim_main_pd.py "${APP_ARGS[@]}"
     else
         : "${AM_D02_ENABLE_VIEWER:=0}"
         : "${AM_D02_ENABLE_RERUN:=1}"

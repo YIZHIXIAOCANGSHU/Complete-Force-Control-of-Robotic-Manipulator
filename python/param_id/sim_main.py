@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import os
+import csv
+import json
 import sys
 import time
 from datetime import datetime
@@ -142,11 +144,14 @@ def _viewer_context(env):
 def _setup_rerun() -> bool:
     if not Config.ENABLE_RERUN:
         return False
+    if not rerun_viz.init_rerun("AM-D02 参数辨识 (Sim)"):
+        print("[辨识] Rerun 初始化失败，跳过可视化。")
+        return False
     try:
         import rerun as rr
         import rerun.blueprint as rrb
 
-        rr.init("AM-D02 参数辨识 (Sim)", spawn=True)
+        rerun_viz.setup_sim_realtime_styles()
         colors = [
             [230, 90, 70],
             [80, 170, 240],
@@ -206,13 +211,65 @@ def _setup_rerun() -> bool:
             rrb.TimeSeriesView(name="Identified Inertia Diagonal", origin="/param_id/result"),
             name="Identification Results",
         )
-        blueprint = rrb.Blueprint(
-            rrb.Tabs(overview, details, results, name="Param ID"),
+
+        sim_pos_views = [
+            rrb.TimeSeriesView(name=f"EE Position {axis} (mm)", origin=f"/tracking/pos/{axis}")
+            for axis in ("X", "Y", "Z")
+        ]
+        sim_rot_views = [
+            rrb.TimeSeriesView(name=f"EE Rotation {axis} (deg)", origin=f"/tracking/rot/{axis}")
+            for axis in ("Roll", "Pitch", "Yaw")
+        ]
+        sim_pos_err_views = [
+            rrb.TimeSeriesView(name=f"Position Error {axis} (mm)", origin=f"/error/{axis}")
+            for axis in ("X", "Y", "Z")
+        ]
+        sim_rot_err_views = [
+            rrb.TimeSeriesView(name=f"Rotation Error {axis} (deg)", origin=f"/error/{axis}")
+            for axis in ("Roll", "Pitch", "Yaw")
+        ]
+        sim_torque_views = [
+            rrb.TimeSeriesView(
+                name=f"J{i + 1} Received/Applied Torque (N*m)",
+                origin=f"/sim/control/torque/J{i + 1}",
+            )
+            for i in range(7)
+        ]
+        sim_tabs = [
+            rrb.Spatial3DView(name="3D Interactive", origin="/trajectory_3d"),
+            rrb.Vertical(
+                rrb.Horizontal(*sim_pos_views),
+                rrb.Horizontal(*sim_rot_views),
+                name="EE Tracking",
+            ),
+            rrb.Vertical(
+                rrb.Horizontal(*sim_pos_err_views),
+                rrb.Horizontal(*sim_rot_err_views),
+                name="EE Tracking Error",
+            ),
+            rrb.Vertical(
+                rrb.TimeSeriesView(name="Joint Positions (rad)", origin="/joint_state/q"),
+                rrb.TimeSeriesView(name="Joint Velocities (rad/s)", origin="/joint_state/qd"),
+                name="Joint States",
+            ),
+            rrb.Vertical(
+                rrb.Horizontal(*sim_torque_views[:4], name="J1-J4 Torque"),
+                rrb.Horizontal(*sim_torque_views[4:], name="J5-J7 Torque"),
+                name="Sim Joint Torque Input",
+            ),
+            rrb.Vertical(
+                rrb.TimeSeriesView(name="MuJoCo Step Time (ms)", origin="/sim/performance/step_time_ms"),
+                name="Sim Performance",
+            ),
+        ]
+        combined_blueprint = rrb.Blueprint(
+            rrb.Tabs(*sim_tabs, overview, details, results, name="Param ID + Sim"),
             collapse_panels=True,
         )
-        rr.send_blueprint(blueprint)
+        rr.send_blueprint(combined_blueprint)
         return True
-    except Exception:
+    except Exception as exc:
+        print(f"[辨识] Rerun 初始化失败，跳过可视化: {exc}")
         return False
 
 
@@ -228,6 +285,61 @@ def _log_rerun_step(rerun_ok: bool, t: float, q, qd, tau):
         rr.log("param_id/tau_nm/J%d" % (i + 1), rr.Scalars(float(tau[i])))
 
 
+def _log_sim_realtime_step_from_env(
+    rerun_ok: bool,
+    env,
+    t: float,
+    step: int,
+    q_actual,
+    qd_actual,
+    q_desired,
+    tau_received,
+    tau_applied,
+    cycle_time_ms: float,
+    pos_desired=None,
+    quat_desired=None,
+) -> None:
+    if not rerun_ok:
+        return
+
+    saved_qpos = env.data.qpos.copy()
+    saved_qvel = env.data.qvel.copy()
+    saved_qacc = env.data.qacc.copy()
+
+    try:
+        env.set_qpos(np.asarray(q_actual, dtype=np.float64))
+        env.set_qvel(np.asarray(qd_actual, dtype=np.float64))
+        env.forward()
+        pos_actual = env.get_ee_pos()
+        quat_actual = env.get_ee_quat()
+
+        if pos_desired is None or quat_desired is None:
+            env.set_qpos(np.asarray(q_desired, dtype=np.float64))
+            env.set_qvel(np.zeros(Config.NUM_JOINTS, dtype=np.float64))
+            env.forward()
+            pos_desired = env.get_ee_pos()
+            quat_desired = env.get_ee_quat()
+    finally:
+        env.data.qpos[:] = saved_qpos
+        env.data.qvel[:] = saved_qvel
+        env.data.qacc[:] = saved_qacc
+        env.forward()
+
+    rerun_viz.log_sim_realtime_step(
+        t=t,
+        pos_actual=pos_actual,
+        pos_desired=np.asarray(pos_desired, dtype=np.float64),
+        quat_actual=quat_actual,
+        quat_desired=np.asarray(quat_desired, dtype=np.float64),
+        tau_received=tau_received,
+        tau_applied=tau_applied,
+        cycle_time=cycle_time_ms,
+        q=q_actual,
+        qd=qd_actual,
+        step_count=step,
+    )
+
+
 def _fmt(value, digits=4):
     try:
         number = float(value)
@@ -240,6 +352,359 @@ def _fmt(value, digits=4):
     if np.isneginf(number):
         return "-inf"
     return f"{number:.{digits}f}"
+
+
+_TRAJECTORY_CSV_COLUMNS = [
+    "time",
+    "step",
+    "actual_x",
+    "actual_y",
+    "actual_z",
+    "expected_x",
+    "expected_y",
+    "expected_z",
+    "actual_roll",
+    "actual_pitch",
+    "actual_yaw",
+    "expected_roll",
+    "expected_pitch",
+    "expected_yaw",
+    "error_x_mm",
+    "error_y_mm",
+    "error_z_mm",
+    "error_roll_deg",
+    "error_pitch_deg",
+    "error_yaw_deg",
+    "cycle_time_ms",
+]
+
+_DOF_SPECS = [
+    ("X", "error_x_mm", "mm", "position"),
+    ("Y", "error_y_mm", "mm", "position"),
+    ("Z", "error_z_mm", "mm", "position"),
+    ("Roll", "error_roll_deg", "deg", "rotation"),
+    ("Pitch", "error_pitch_deg", "deg", "rotation"),
+    ("Yaw", "error_yaw_deg", "deg", "rotation"),
+]
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        return number if np.isfinite(number) else None
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    return value
+
+
+def _finite_float(value, default=float("nan")):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _case_final_loss(case):
+    validation_rms = _finite_float(case.get("validation_rms"))
+    if np.isfinite(validation_rms):
+        return validation_rms
+    return _finite_float(case.get("prediction_error"))
+
+
+def _format_csv_value(value, integer=False):
+    if value is None:
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(number):
+        return ""
+    if integer and abs(number - round(number)) < 1e-12 and abs(number) < 1e12:
+        return str(int(round(number)))
+    return f"{number:.6f}"
+
+
+def _trajectory_records_to_arrays(trajectory_records):
+    records = [dict(record) for record in (trajectory_records or [])]
+    arrays = {}
+    for column in _TRAJECTORY_CSV_COLUMNS:
+        values = [_finite_float(record.get(column)) for record in records]
+        arrays[column] = np.asarray(values, dtype=np.float64)
+    return records, arrays
+
+
+def _dof_error_stats(trajectory_records):
+    records, arrays = _trajectory_records_to_arrays(trajectory_records)
+    stats = {}
+    for name, column, unit, group in _DOF_SPECS:
+        values = arrays.get(column, np.array([], dtype=np.float64))
+        values = values[np.isfinite(values)]
+        if values.size:
+            stats[name] = {
+                "unit": unit,
+                "group": group,
+                "mean": float(np.mean(values)),
+                "rms": float(np.sqrt(np.mean(values**2))),
+                "max_abs": float(np.max(np.abs(values))),
+                "final": float(values[-1]),
+                "p95_abs": float(np.percentile(np.abs(values), 95)),
+            }
+        else:
+            stats[name] = {
+                "unit": unit,
+                "group": group,
+                "mean": None,
+                "rms": None,
+                "max_abs": None,
+                "final": None,
+                "p95_abs": None,
+            }
+
+    pos = np.column_stack([arrays[column] for _name, column, _unit, group in _DOF_SPECS if group == "position"]) if records else np.zeros((0, 3))
+    rot = np.column_stack([arrays[column] for _name, column, _unit, group in _DOF_SPECS if group == "rotation"]) if records else np.zeros((0, 3))
+    pos_norm = np.linalg.norm(pos, axis=1) if pos.size else np.array([], dtype=np.float64)
+    rot_norm = np.linalg.norm(rot, axis=1) if rot.size else np.array([], dtype=np.float64)
+
+    return {
+        "by_dof": stats,
+        "position_norm_rms": float(np.sqrt(np.mean(pos_norm**2))) if pos_norm.size else None,
+        "position_norm_max": float(np.max(pos_norm)) if pos_norm.size else None,
+        "rotation_norm_rms": float(np.sqrt(np.mean(rot_norm**2))) if rot_norm.size else None,
+        "rotation_norm_max": float(np.max(rot_norm)) if rot_norm.size else None,
+    }
+
+
+def _worst_dof_and_time(trajectory_records):
+    records, arrays = _trajectory_records_to_arrays(trajectory_records)
+    if not records:
+        return None, None
+    worst_name = None
+    worst_abs = -1.0
+    worst_index = None
+    for name, column, _unit, _group in _DOF_SPECS:
+        values = arrays.get(column, np.array([], dtype=np.float64))
+        if values.size == 0:
+            continue
+        finite_mask = np.isfinite(values)
+        if not np.any(finite_mask):
+            continue
+        abs_values = np.abs(values)
+        index = int(np.nanargmax(abs_values))
+        value = float(abs_values[index])
+        if value > worst_abs:
+            worst_abs = value
+            worst_name = name
+            worst_index = index
+    if worst_index is None:
+        return None, None
+    times = arrays.get("time", np.array([], dtype=np.float64))
+    max_time = float(times[worst_index]) if worst_index < times.size and np.isfinite(times[worst_index]) else None
+    return worst_name, max_time
+
+
+def _joint_param_records(case):
+    result = case.get("result", {})
+    records = []
+    for joint in range(1, 8):
+        prior = Config.PARAM_ID_JOINT_PRIORS[joint - 1]
+        for term in ("fc", "k", "fv", "fo"):
+            initial = float(prior.get(term, 0.0))
+            final = _finite_float(result.get(f"J{joint}_{term}", initial), initial)
+            delta = final - initial
+            pct = delta / abs(initial) * 100.0 if abs(initial) > 1e-12 else float("nan")
+            records.append(
+                {
+                    "parameter": f"J{joint}_{term}",
+                    "joint": f"J{joint}",
+                    "term": term,
+                    "initial": initial,
+                    "final": final,
+                    "delta": delta,
+                    "pct_change": pct,
+                    "bound_status": "n/a",
+                }
+            )
+    return records
+
+
+def _joint_param_table_records(case):
+    records = []
+    for row in _joint_param_records(case):
+        records.append(
+            {
+                "parameter": row["parameter"],
+                "initial": _fmt(row["initial"], 4),
+                "final": _fmt(row["final"], 4),
+                "delta": _fmt(row["delta"], 4),
+                "pct_change": _fmt(row["pct_change"], 2),
+                "bound_status": row["bound_status"],
+            }
+        )
+    return records
+
+
+def _error_summary_records(trajectory_records):
+    stats = _dof_error_stats(trajectory_records)["by_dof"]
+    records = []
+    for name, _column, unit, group in _DOF_SPECS:
+        item = stats[name]
+        status = _error_level(group, item["max_abs"])
+        records.append(
+            {
+                "group": "Position" if group == "position" else "Rotation",
+                "dof": name,
+                "unit": unit,
+                "status": status,
+                "rms": _fmt(item["rms"], 3) if item["rms"] is not None else "",
+                "max_abs": _fmt(item["max_abs"], 3) if item["max_abs"] is not None else "",
+                "final": _fmt(item["final"], 3) if item["final"] is not None else "",
+                "p95_abs": _fmt(item["p95_abs"], 3) if item["p95_abs"] is not None else "",
+            }
+        )
+    return records
+
+
+def _error_level(group, max_abs):
+    if max_abs is None:
+        return "unavailable"
+    if group == "position":
+        warning = getattr(Config, "PARAM_ID_REPORT_POSITION_WARNING_MM", 5.0)
+        danger = getattr(Config, "PARAM_ID_REPORT_POSITION_DANGER_MM", 10.0)
+    else:
+        warning = getattr(Config, "PARAM_ID_REPORT_ROTATION_WARNING_DEG", 2.0)
+        danger = getattr(Config, "PARAM_ID_REPORT_ROTATION_DANGER_DEG", 5.0)
+    if max_abs >= danger:
+        return "danger"
+    if max_abs >= warning:
+        return "warning"
+    return "ok"
+
+
+def _threshold_warnings(trajectory_records):
+    warnings = []
+    stats = _dof_error_stats(trajectory_records)["by_dof"]
+    for name, _column, unit, group in _DOF_SPECS:
+        max_abs = stats[name]["max_abs"]
+        if _error_level(group, max_abs) == "danger":
+            warnings.append(f"{name} error exceeds danger threshold: max={max_abs:.3f} {unit}.")
+    return warnings
+
+
+def _summary_cards(summary):
+    return [
+        {"label": "Status", "value": summary.get("status", "warning")},
+        {"label": "Final Loss", "value": _fmt(summary.get("final_loss"), 4)},
+        {"label": "RMS Pos Err", "value": f"{_fmt(summary.get('rms_position_error_mm'), 3)} mm"},
+        {"label": "RMS Rot Err", "value": f"{_fmt(summary.get('rms_rotation_error_deg'), 3)} deg"},
+        {"label": "Worst DOF", "value": summary.get("worst_dof") or "n/a"},
+        {"label": "Max Error Time", "value": f"{_fmt(summary.get('max_error_time'), 3)} s" if summary.get("max_error_time") is not None else "n/a"},
+    ]
+
+
+def _build_identification_summary(
+    case,
+    trajectory_records,
+    trajectory_metadata,
+    warnings,
+    generated_at,
+    run_id,
+):
+    error_stats = _dof_error_stats(trajectory_records)
+    worst_dof, max_error_time = _worst_dof_and_time(trajectory_records)
+    joint_records = _joint_param_records(case)
+    final_params = {row["parameter"]: row["final"] for row in joint_records}
+    initial_params = {row["parameter"]: row["initial"] for row in joint_records}
+    rms_by_dof = {name: stats["rms"] for name, stats in error_stats["by_dof"].items()}
+    max_by_dof = {name: stats["max_abs"] for name, stats in error_stats["by_dof"].items()}
+    final_by_dof = {name: stats["final"] for name, stats in error_stats["by_dof"].items()}
+    final_loss = _case_final_loss(case)
+    initial_loss = case.get("initial_loss")
+    if initial_loss is None:
+        initial_loss = case.get("baseline_loss")
+    initial_loss = _finite_float(initial_loss, float("nan"))
+    loss_drop_ratio = (
+        (initial_loss - final_loss) / initial_loss
+        if np.isfinite(initial_loss) and abs(initial_loss) > 1e-12 and np.isfinite(final_loss)
+        else None
+    )
+    status = "success"
+    if warnings:
+        status = "warning"
+    if trajectory_records and any(value is not None and value > 0.0 for value in max_by_dof.values()):
+        status = "warning" if warnings else "success"
+    elif not trajectory_records:
+        status = "warning"
+    start_time = _finite_float(trajectory_records[0].get("time")) if trajectory_records else float("nan")
+    end_time = _finite_float(trajectory_records[-1].get("time")) if trajectory_records else float("nan")
+    duration = end_time - start_time if np.isfinite(start_time) and np.isfinite(end_time) else 0.0
+    return _json_safe(
+        {
+            "run_id": run_id,
+            "generated_at": generated_at,
+            "status": status,
+            "start_time": start_time if np.isfinite(start_time) else None,
+            "end_time": end_time if np.isfinite(end_time) else None,
+            "duration": float(max(duration, 0.0)),
+            "sample_count": len(trajectory_records),
+            "initial_params": initial_params,
+            "final_params": final_params,
+            "param_bounds": {},
+            "final_loss": final_loss,
+            "initial_loss": initial_loss if np.isfinite(initial_loss) else None,
+            "loss_drop_ratio": loss_drop_ratio,
+            "rms_error_by_dof": rms_by_dof,
+            "max_error_by_dof": max_by_dof,
+            "final_error_by_dof": final_by_dof,
+            "rms_position_error_mm": error_stats["position_norm_rms"],
+            "max_position_error_mm": error_stats["position_norm_max"],
+            "rms_rotation_error_deg": error_stats["rotation_norm_rms"],
+            "max_rotation_error_deg": error_stats["rotation_norm_max"],
+            "worst_dof": worst_dof,
+            "max_error_time": max_error_time,
+            "before_after_metrics": case.get("before_after_metrics"),
+            "warnings": list(warnings),
+            "trajectory_metadata": dict(trajectory_metadata or {}),
+            "config": {
+                "dt": Config.DT,
+                "rerun_log_stride": Config.RERUN_LOG_STRIDE,
+                "param_id_max_samples": Config.PARAM_ID_MAX_SAMPLES,
+                "position_warning_mm": getattr(Config, "PARAM_ID_REPORT_POSITION_WARNING_MM", 5.0),
+                "position_danger_mm": getattr(Config, "PARAM_ID_REPORT_POSITION_DANGER_MM", 10.0),
+                "rotation_warning_deg": getattr(Config, "PARAM_ID_REPORT_ROTATION_WARNING_DEG", 2.0),
+                "rotation_danger_deg": getattr(Config, "PARAM_ID_REPORT_ROTATION_DANGER_DEG", 5.0),
+            },
+        }
+    )
+
+
+def _write_trajectory_csv(report_dir, trajectory_records):
+    path = Path(report_dir) / "trajectory_log.csv"
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_TRAJECTORY_CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for record in trajectory_records:
+            writer.writerow(
+                {
+                    column: _format_csv_value(record.get(column), integer=(column == "step"))
+                    for column in _TRAJECTORY_CSV_COLUMNS
+                }
+            )
+    return path
+
+
+def _write_summary_json(report_dir, summary):
+    path = Path(report_dir) / "identification_summary.json"
+    path.write_text(json.dumps(_json_safe(summary), ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 
 def _as_joint_matrix(values):
@@ -427,24 +892,348 @@ def _make_plotly_charts(t_arr, q_meas, qd_meas, tau_meas):
     return "\n".join(chart_parts), []
 
 
+def _notice_html(message):
+    return f'<div class="notice">{escape(str(message))}</div>'
+
+
+def _figure_block(title, html):
+    return f'<div class="figure-block"><h3>{escape(title)}</h3>{html}</div>'
+
+
+def _chart_placeholders(message):
+    position_titles = [
+        "X Error over Time (mm)",
+        "Y Error over Time (mm)",
+        "Z Error over Time (mm)",
+    ]
+    rotation_titles = [
+        "Roll Error over Time (deg)",
+        "Pitch Error over Time (deg)",
+        "Yaw Error over Time (deg)",
+    ]
+    detail_titles = [
+        "X Actual vs Expected (m)",
+        "Y Actual vs Expected (m)",
+        "Z Actual vs Expected (m)",
+        "Roll Actual vs Expected (deg)",
+        "Pitch Actual vs Expected (deg)",
+        "Yaw Actual vs Expected (deg)",
+    ]
+    return {
+        "parameter_charts_html": _notice_html(message),
+        "before_after_html": _notice_html(
+            "Before data not available. This report shows post-identification absolute tracking quality only."
+        ),
+        "trajectory_overview_html": _notice_html(message),
+        "position_error_charts_html": "\n".join(_figure_block(title, _notice_html(message)) for title in position_titles),
+        "rotation_error_charts_html": "\n".join(_figure_block(title, _notice_html(message)) for title in rotation_titles),
+        "actual_expected_html": "\n".join(_figure_block(title, _notice_html(message)) for title in detail_titles),
+        "diagnostic_charts_html": _notice_html(message),
+    }
+
+
+def _make_report_charts(case, t_arr, q_meas, qd_meas, tau_meas, trajectory_records):
+    try:
+        import plotly.graph_objects as go
+    except Exception:
+        return _chart_placeholders("plotly 未安装，已生成表格型 HTML 报告。"), ["plotly 未安装，图表已降级为表格。"]
+
+    include_plotlyjs = {"value": True}
+
+    def to_html(fig):
+        include = "inline" if include_plotlyjs["value"] else False
+        include_plotlyjs["value"] = False
+        return fig.to_html(
+            full_html=False,
+            include_plotlyjs=include,
+            config={"responsive": True, "displaylogo": False},
+        )
+
+    def style(fig, title, y_title, height=320):
+        fig.update_layout(
+            title=title,
+            template="plotly_white",
+            height=height,
+            margin={"l": 58, "r": 24, "t": 54, "b": 44},
+            xaxis_title="sim time (s)",
+            yaxis_title=y_title,
+            legend={"orientation": "h", "y": -0.25},
+        )
+        return fig
+
+    records, arrays = _trajectory_records_to_arrays(trajectory_records)
+    times = arrays["time"] if records else np.asarray(t_arr, dtype=np.float64)
+
+    joint_rows = _joint_param_records(case)
+    names = [row["parameter"] for row in joint_rows]
+    initial = [row["initial"] for row in joint_rows]
+    final = [row["final"] for row in joint_rows]
+    pct_change = [row["pct_change"] for row in joint_rows]
+    param_parts = []
+    if joint_rows:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(name="Initial", x=names, y=initial, marker_color="#6b7280"))
+        fig.add_trace(go.Bar(name="Identified", x=names, y=final, marker_color="#2563eb"))
+        fig.update_layout(
+            title="Initial vs Identified Friction Parameters",
+            template="plotly_white",
+            barmode="group",
+            height=420,
+            margin={"l": 58, "r": 24, "t": 54, "b": 120},
+            xaxis_tickangle=-60,
+            yaxis_title="parameter value",
+            legend={"orientation": "h", "y": -0.25},
+        )
+        param_parts.append(_figure_block("Initial vs Identified Friction Parameters", to_html(fig)))
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=names, y=pct_change, marker_color="#0f766e"))
+        fig.update_layout(
+            title="Parameter Change (%)",
+            template="plotly_white",
+            height=380,
+            margin={"l": 58, "r": 24, "t": 54, "b": 120},
+            xaxis_tickangle=-60,
+            yaxis_title="change (%)",
+        )
+        fig.add_hline(y=0, line_color="#9ca3af", line_width=1)
+        param_parts.append(_figure_block("Parameter Change (%)", to_html(fig)))
+    else:
+        param_parts.append(_notice_html("Friction parameter data unavailable."))
+
+    loss_values = case.get("loss_history") or case.get("diagnostics", {}).get("loss_history")
+    if loss_values:
+        y = np.asarray(loss_values, dtype=np.float64)
+        fig = go.Figure(go.Scatter(x=np.arange(y.size), y=y, mode="lines+markers", name="loss"))
+        fig.update_layout(
+            title="Loss Convergence",
+            template="plotly_white",
+            height=300,
+            margin={"l": 58, "r": 24, "t": 54, "b": 44},
+            xaxis_title="iteration",
+            yaxis_title="loss",
+        )
+        param_parts.append(_figure_block("Loss Convergence", to_html(fig)))
+    else:
+        param_parts.append(_notice_html("Loss convergence history unavailable."))
+    parameter_charts_html = "\n".join(param_parts)
+
+    before_after = case.get("before_after_metrics") or {}
+    if before_after:
+        metrics = list(before_after.keys())
+        values = [before_after[key] for key in metrics]
+        fig = go.Figure(go.Bar(x=metrics, y=values, marker_color="#059669"))
+        fig.update_layout(
+            title="Before / After Improvement Metrics",
+            template="plotly_white",
+            height=320,
+            margin={"l": 58, "r": 24, "t": 54, "b": 100},
+            xaxis_tickangle=-35,
+            yaxis_title="improvement (%)",
+        )
+        before_after_html = _figure_block("Before / After Improvement Metrics", to_html(fig))
+    else:
+        before_after_html = _notice_html(
+            "Before data not available. This report shows post-identification absolute tracking quality only."
+        )
+
+    if records:
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter3d(
+                x=arrays["actual_x"],
+                y=arrays["actual_y"],
+                z=arrays["actual_z"],
+                mode="lines",
+                name="actual",
+                line={"color": "#2563eb", "width": 5},
+            )
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                x=arrays["expected_x"],
+                y=arrays["expected_y"],
+                z=arrays["expected_z"],
+                mode="lines",
+                name="expected",
+                line={"color": "#16a34a", "width": 4, "dash": "dash"},
+            )
+        )
+        pos_errors = np.column_stack([arrays["error_x_mm"], arrays["error_y_mm"], arrays["error_z_mm"]])
+        pos_norm = np.linalg.norm(pos_errors, axis=1)
+        max_idx = int(np.nanargmax(pos_norm)) if pos_norm.size else 0
+        marker_indices = [0, len(records) - 1, max_idx]
+        marker_names = ["start", "end", "max position error"]
+        marker_colors = ["#111827", "#7c3aed", "#dc2626"]
+        for idx, label, color in zip(marker_indices, marker_names, marker_colors):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[arrays["actual_x"][idx]],
+                    y=[arrays["actual_y"][idx]],
+                    z=[arrays["actual_z"][idx]],
+                    mode="markers",
+                    name=label,
+                    marker={"size": 5, "color": color},
+                )
+            )
+        fig.update_layout(
+            title="3D Actual vs Expected End-Effector Trajectory",
+            template="plotly_white",
+            height=520,
+            margin={"l": 0, "r": 0, "t": 54, "b": 0},
+            scene={
+                "xaxis_title": "x (m)",
+                "yaxis_title": "y (m)",
+                "zaxis_title": "z (m)",
+                "aspectmode": "data",
+            },
+            legend={"orientation": "h", "y": -0.05},
+        )
+        trajectory_overview_html = _figure_block("3D Actual vs Expected End-Effector Trajectory", to_html(fig))
+    else:
+        trajectory_overview_html = _notice_html("Trajectory data unavailable.")
+
+    stats = _dof_error_stats(trajectory_records)["by_dof"]
+
+    def error_curve(title, column, unit, dof_name):
+        if not records:
+            return _figure_block(title, _notice_html("Trajectory data unavailable."))
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=times,
+                y=arrays[column],
+                mode="lines",
+                name=dof_name,
+                hovertemplate="time=%{x:.3f}s<br>error=%{y:.4f} " + unit + "<extra></extra>",
+            )
+        )
+        fig.add_hline(y=0, line_color="#9ca3af", line_width=1)
+        item = stats[dof_name]
+        if item["rms"] is not None:
+            fig.add_annotation(
+                xref="paper",
+                yref="paper",
+                x=0.99,
+                y=0.96,
+                xanchor="right",
+                showarrow=False,
+                text=f"RMS={item['rms']:.3f} {unit}<br>Max={item['max_abs']:.3f} {unit}",
+                bgcolor="rgba(255,255,255,0.82)",
+                bordercolor="#d1d5db",
+            )
+        style(fig, title, unit)
+        return _figure_block(title, to_html(fig))
+
+    position_error_charts_html = "\n".join(
+        error_curve(f"{name} Error over Time (mm)", column, "mm", name)
+        for name, column, _unit, group in _DOF_SPECS
+        if group == "position"
+    )
+    rotation_error_charts_html = "\n".join(
+        error_curve(f"{name} Error over Time (deg)", column, "deg", name)
+        for name, column, _unit, group in _DOF_SPECS
+        if group == "rotation"
+    )
+
+    detail_specs = [
+        ("X Actual vs Expected (m)", "actual_x", "expected_x", "m"),
+        ("Y Actual vs Expected (m)", "actual_y", "expected_y", "m"),
+        ("Z Actual vs Expected (m)", "actual_z", "expected_z", "m"),
+        ("Roll Actual vs Expected (deg)", "actual_roll", "expected_roll", "deg"),
+        ("Pitch Actual vs Expected (deg)", "actual_pitch", "expected_pitch", "deg"),
+        ("Yaw Actual vs Expected (deg)", "actual_yaw", "expected_yaw", "deg"),
+    ]
+    detail_parts = []
+    for title, actual_col, expected_col, unit in detail_specs:
+        if not records:
+            detail_parts.append(_figure_block(title, _notice_html("Trajectory data unavailable.")))
+            continue
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=times, y=arrays[actual_col], mode="lines", name="actual"))
+        fig.add_trace(go.Scatter(x=times, y=arrays[expected_col], mode="lines", name="expected"))
+        style(fig, title, unit)
+        detail_parts.append(_figure_block(title, to_html(fig)))
+    actual_expected_html = "\n".join(detail_parts)
+
+    diagnostic_parts = []
+    final_loss = _case_final_loss(case)
+    if np.isfinite(final_loss):
+        fig = go.Figure(go.Scatter(x=[0], y=[final_loss], mode="markers", name="final loss"))
+        fig.update_layout(
+            title="Final Loss Snapshot",
+            template="plotly_white",
+            height=260,
+            margin={"l": 58, "r": 24, "t": 54, "b": 44},
+            xaxis_title="sample",
+            yaxis_title="loss",
+        )
+        diagnostic_parts.append(_figure_block("Final Loss Snapshot", to_html(fig)))
+    t = np.asarray(t_arr, dtype=np.float64)
+    if t.size == 0:
+        t = np.arange(_as_joint_matrix(q_meas).shape[0], dtype=np.float64) * Config.DT
+    for title, unit, values in (
+        ("Joint Position Overview", "rad", _as_joint_matrix(q_meas)),
+        ("Joint Velocity Overview", "rad/s", _as_joint_matrix(qd_meas)),
+        ("Torque Overview", "N*m", _as_joint_matrix(tau_meas)),
+    ):
+        if not values.size:
+            continue
+        fig = go.Figure()
+        x = t[: values.shape[0]]
+        for joint in range(7):
+            fig.add_trace(go.Scatter(x=x, y=values[:, joint], mode="lines", name=f"J{joint + 1}"))
+        style(fig, title, unit)
+        diagnostic_parts.append(_figure_block(title, to_html(fig)))
+    diagnostic_charts_html = "\n".join(diagnostic_parts) if diagnostic_parts else _notice_html("Diagnostic chart data unavailable.")
+
+    return (
+        {
+            "parameter_charts_html": parameter_charts_html,
+            "before_after_html": before_after_html,
+            "trajectory_overview_html": trajectory_overview_html,
+            "position_error_charts_html": position_error_charts_html,
+            "rotation_error_charts_html": rotation_error_charts_html,
+            "actual_expected_html": actual_expected_html,
+            "diagnostic_charts_html": diagnostic_charts_html,
+        },
+        [],
+    )
+
+
 def _report_styles():
     return """
-body { margin: 0; font-family: Arial, "Noto Sans CJK SC", sans-serif; color: #202124; background: #f5f7fa; }
-main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 48px; }
-header { margin-bottom: 24px; }
-h1 { margin: 0 0 8px; font-size: 30px; font-weight: 700; }
-h2 { margin: 28px 0 12px; font-size: 20px; }
-.subtitle { margin: 0; color: #5f6368; }
-.section { background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; padding: 18px; margin: 16px 0; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+body { margin: 0; font-family: Arial, "Noto Sans CJK SC", sans-serif; color: #1f2937; background: #f6f7f9; }
+main { max-width: 1240px; margin: 0 auto; padding: 28px 22px 48px; }
+header { margin-bottom: 20px; }
+h1 { margin: 0 0 8px; font-size: 28px; font-weight: 700; letter-spacing: 0; }
+h2 { margin: 0 0 14px; font-size: 19px; letter-spacing: 0; }
+h3 { margin: 18px 0 10px; font-size: 15px; letter-spacing: 0; }
+.subtitle { margin: 0; color: #667085; }
+.section { background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; padding: 18px; margin: 14px 0; }
+.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.metric { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fbfcfe; min-height: 70px; }
+.metric-label { color: #667085; font-size: 12px; margin-bottom: 8px; }
+.metric-value { color: #111827; font-size: 20px; font-weight: 700; overflow-wrap: anywhere; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.figure-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 12px; }
+.figure-block { margin: 8px 0 16px; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .data-table th, .data-table td { padding: 8px 9px; border-bottom: 1px solid #e8eaed; text-align: right; white-space: nowrap; }
 .data-table th:first-child, .data-table td:first-child { text-align: left; }
 .data-table th { background: #eef2f6; color: #344054; font-weight: 700; }
-.notice { padding: 12px 14px; border: 1px solid #d7b46a; background: #fff6db; border-radius: 6px; color: #634500; }
+.notice { padding: 12px 14px; border: 1px solid #d7b46a; background: #fff7df; border-radius: 6px; color: #634500; }
 .warnings { color: #7a3500; }
-.table-wrap { overflow-x: auto; }
+.table-wrap { overflow-x: auto; margin: 8px 0 16px; }
 .empty { color: #6b7280; }
+.notes { color: #4b5563; line-height: 1.55; }
+details summary { cursor: pointer; font-weight: 700; margin-bottom: 10px; }
+@media (max-width: 760px) {
+  main { padding: 20px 12px 36px; }
+  h1 { font-size: 23px; }
+  .section { padding: 14px; }
+  .figure-grid { grid-template-columns: 1fr; }
+}
 """
 
 
@@ -462,6 +1251,17 @@ _PARAM_ID_HTML_TEMPLATE = """<!doctype html>
       <h1>{{ title }}</h1>
       <p class="subtitle">{{ subtitle }}</p>
     </header>
+    <section class="section">
+      <h2>Executive Summary</h2>
+      <div class="summary-grid">
+      {% for card in summary_cards %}
+        <div class="metric">
+          <div class="metric-label">{{ card.label }}</div>
+          <div class="metric-value">{{ card.value }}</div>
+        </div>
+      {% endfor %}
+      </div>
+    </section>
     {% if warnings %}
     <section class="section warnings">
       <h2>Warnings</h2>
@@ -473,24 +1273,54 @@ _PARAM_ID_HTML_TEMPLATE = """<!doctype html>
     </section>
     {% endif %}
     <section class="section">
-      <h2>轨迹图</h2>
-      {{ chart_html | safe }}
+      <h2>Identification Result</h2>
+      <div class="table-wrap">{{ joint_parameter_table | safe }}</div>
+      {{ parameter_charts_html | safe }}
     </section>
     <section class="section">
-      <h2>诊断摘要</h2>
+      <h2>Before / After Comparison</h2>
+      {{ before_after_html | safe }}
+    </section>
+    <section class="section">
+      <h2>Trajectory Overview</h2>
+      {{ trajectory_overview_html | safe }}
+    </section>
+    <section class="section">
+      <h2>6DoF Error Summary</h2>
+      <div class="table-wrap">{{ error_summary_table | safe }}</div>
+    </section>
+    <section class="section">
+      <h2>Position Error Curves</h2>
+      <div class="figure-grid">{{ position_error_charts_html | safe }}</div>
+    </section>
+    <section class="section">
+      <h2>Rotation Error Curves</h2>
+      <div class="figure-grid">{{ rotation_error_charts_html | safe }}</div>
+    </section>
+    <section class="section">
+      <h2>Actual vs Expected Detail</h2>
+      <details open>
+        <summary>Actual and expected component traces</summary>
+        <div class="figure-grid">{{ actual_expected_html | safe }}</div>
+      </details>
+    </section>
+    <section class="section">
+      <h2>Identification Diagnostics</h2>
+      {{ diagnostic_charts_html | safe }}
+      <h3>诊断摘要</h3>
       <div class="table-wrap">{{ diagnostics_table | safe }}</div>
-    </section>
-    <section class="section">
-      <h2>参数表</h2>
+      <h3>参数表</h3>
       <div class="table-wrap">{{ parameter_table | safe }}</div>
-    </section>
-    <section class="section">
-      <h2>真值对比</h2>
+      <h3>真值对比</h3>
       <div class="table-wrap">{{ comparison_table | safe }}</div>
-    </section>
-    <section class="section">
-      <h2>激励统计</h2>
+      <h3>激励统计</h3>
       <div class="table-wrap">{{ excitation_table | safe }}</div>
+    </section>
+    <section class="section notes">
+      <h2>Data Notes</h2>
+      <p>误差定义：actual - expected。位置误差显示单位为 mm，姿态误差显示单位为 degree。</p>
+      <p>姿态误差基于实际四元数和目标四元数的相对旋转，再转换为 Roll / Pitch / Yaw。</p>
+      <p>HTML 是摩擦辨识结束后的离线总结报告；Rerun 仍用于运行时实时观察。</p>
     </section>
   </main>
 </body>
@@ -505,10 +1335,15 @@ def _render_html_report(context):
         env = Environment(loader=BaseLoader(), autoescape=True)
         return env.from_string(_PARAM_ID_HTML_TEMPLATE).render(**context)
     except Exception:
-        warnings_html = "".join(f"<li>{escape(str(warning))}</li>" for warning in context["warnings"])
+        warnings_html = "".join(f"<li>{escape(str(warning))}</li>" for warning in context.get("warnings", []))
         warning_section = ""
         if warnings_html:
             warning_section = f'<section class="section warnings"><h2>Warnings</h2><ul>{warnings_html}</ul></section>'
+        cards = "".join(
+            f'<div class="metric"><div class="metric-label">{escape(str(card["label"]))}</div>'
+            f'<div class="metric-value">{escape(str(card["value"]))}</div></div>'
+            for card in context.get("summary_cards", [])
+        )
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -523,12 +1358,17 @@ def _render_html_report(context):
       <h1>{escape(context["title"])}</h1>
       <p class="subtitle">{escape(context["subtitle"])}</p>
     </header>
+    <section class="section"><h2>Executive Summary</h2><div class="summary-grid">{cards}</div></section>
     {warning_section}
-    <section class="section"><h2>轨迹图</h2>{context["chart_html"]}</section>
-    <section class="section"><h2>诊断摘要</h2><div class="table-wrap">{context["diagnostics_table"]}</div></section>
-    <section class="section"><h2>参数表</h2><div class="table-wrap">{context["parameter_table"]}</div></section>
-    <section class="section"><h2>真值对比</h2><div class="table-wrap">{context["comparison_table"]}</div></section>
-    <section class="section"><h2>激励统计</h2><div class="table-wrap">{context["excitation_table"]}</div></section>
+    <section class="section"><h2>Identification Result</h2><div class="table-wrap">{context["joint_parameter_table"]}</div>{context["parameter_charts_html"]}</section>
+    <section class="section"><h2>Before / After Comparison</h2>{context["before_after_html"]}</section>
+    <section class="section"><h2>Trajectory Overview</h2>{context["trajectory_overview_html"]}</section>
+    <section class="section"><h2>6DoF Error Summary</h2><div class="table-wrap">{context["error_summary_table"]}</div></section>
+    <section class="section"><h2>Position Error Curves</h2>{context["position_error_charts_html"]}</section>
+    <section class="section"><h2>Rotation Error Curves</h2>{context["rotation_error_charts_html"]}</section>
+    <section class="section"><h2>Actual vs Expected Detail</h2>{context["actual_expected_html"]}</section>
+    <section class="section"><h2>Identification Diagnostics</h2>{context["diagnostic_charts_html"]}<h3>诊断摘要</h3><div class="table-wrap">{context["diagnostics_table"]}</div><h3>参数表</h3><div class="table-wrap">{context["parameter_table"]}</div><h3>真值对比</h3><div class="table-wrap">{context["comparison_table"]}</div><h3>激励统计</h3><div class="table-wrap">{context["excitation_table"]}</div></section>
+    <section class="section notes"><h2>Data Notes</h2><p>误差定义：actual - expected。位置误差显示单位为 mm，姿态误差显示单位为 degree。</p><p>姿态误差基于实际四元数和目标四元数的相对旋转，再转换为 Roll / Pitch / Yaw。</p><p>HTML 是摩擦辨识结束后的离线总结报告；Rerun 仍用于运行时实时观察。</p></section>
   </main>
 </body>
 </html>
@@ -547,21 +1387,66 @@ def _write_html_report(
     rerun_ok,
     trajectory_metadata=None,
     warnings=None,
+    trajectory_records=None,
 ):
     if not getattr(Config, "PARAM_ID_ENABLE_HTML_REPORT", True):
         return None
     trajectory_metadata = dict(trajectory_metadata or {})
     warnings = list(warnings or [])
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    trajectory_records = [dict(record) for record in (trajectory_records or [])]
+    warnings.extend(_threshold_warnings(trajectory_records))
+    if not trajectory_records:
+        warnings.append("Trajectory data unavailable; trajectory plots and 6DoF error statistics are limited.")
+    if not case.get("before_after_metrics"):
+        warnings.append("Before data not available. This report shows post-identification absolute tracking quality only.")
     try:
-        chart_html, chart_warnings = _make_plotly_charts(t_arr, q_meas, qd_meas, tau_meas)
+        report_dir = Path(Config.RESULTS_DIR) / "friction_id" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        report_dir.mkdir(parents=True, exist_ok=True)
+        run_id = report_dir.name
+        summary = _build_identification_summary(
+            case,
+            trajectory_records,
+            trajectory_metadata,
+            warnings,
+            generated_at,
+            run_id,
+        )
+        chart_parts, chart_warnings = _make_report_charts(case, t_arr, q_meas, qd_meas, tau_meas, trajectory_records)
         warnings.extend(chart_warnings)
+        summary["warnings"] = list(warnings)
+        summary["status"] = "warning" if warnings else summary.get("status", "success")
         context = {
             "title": "参数辨识报告（仿真模式）",
             "subtitle": f"{case.get('name', '联合辨识结果')} · {generated_at}",
             "styles": _report_styles(),
             "warnings": warnings,
-            "chart_html": chart_html,
+            "summary_cards": _summary_cards(summary),
+            "joint_parameter_table": _records_to_html_table(
+                _joint_param_table_records(case),
+                [
+                    ("parameter", "摩擦参数"),
+                    ("initial", "初始值"),
+                    ("final", "辨识值"),
+                    ("delta", "变化量"),
+                    ("pct_change", "变化 %"),
+                    ("bound_status", "边界状态"),
+                ],
+            ),
+            "error_summary_table": _records_to_html_table(
+                _error_summary_records(trajectory_records),
+                [
+                    ("group", "类型"),
+                    ("dof", "自由度"),
+                    ("unit", "单位"),
+                    ("status", "状态"),
+                    ("rms", "RMS"),
+                    ("max_abs", "Max Abs"),
+                    ("final", "Final"),
+                    ("p95_abs", "P95 Abs"),
+                ],
+            ),
+            **chart_parts,
             "diagnostics_table": _records_to_html_table(
                 _diagnostic_records(case, t_arr, rerun_ok, trajectory_metadata, generated_at),
                 [("metric", "指标"), ("value", "值")],
@@ -610,8 +1495,8 @@ def _write_html_report(
                 ],
             ),
         }
-        report_dir = Path(Config.RESULTS_DIR) / "param_id" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        report_dir.mkdir(parents=True, exist_ok=True)
+        _write_trajectory_csv(report_dir, trajectory_records)
+        _write_summary_json(report_dir, summary)
         report_path = report_dir / "report.html"
         report_path.write_text(_render_html_report(context), encoding="utf-8")
         if getattr(Config, "PARAM_ID_HTML_OPEN_BROWSER", False):
@@ -1166,6 +2051,100 @@ def _candidate_score(overall, distal, inertial_overall, inertial_distal, group_o
         - condition_penalty * 0.2
         - speed_penalty * 12.0
     )
+
+
+def _build_trajectory_records_from_env(env, t_arr, q_actual, q_expected, cycle_time_ms=None):
+    t_arr = np.asarray(t_arr, dtype=np.float64)
+    q_actual = np.asarray(q_actual, dtype=np.float64)
+    q_expected = np.asarray(q_expected if q_expected is not None else q_actual, dtype=np.float64)
+    count = min(len(t_arr), len(q_actual), len(q_expected))
+    if count <= 0:
+        return []
+
+    if cycle_time_ms is None:
+        cycle = np.full(count, Config.DT * 1000.0, dtype=np.float64)
+    else:
+        cycle = np.asarray(cycle_time_ms, dtype=np.float64)
+        if cycle.ndim == 0:
+            cycle = np.full(count, float(cycle), dtype=np.float64)
+        else:
+            cycle = cycle[:count]
+
+    saved_qpos = env.data.qpos.copy()
+    saved_qvel = env.data.qvel.copy()
+    saved_qacc = env.data.qacc.copy()
+
+    def pose_for(q):
+        env.set_qpos(q)
+        env.set_qvel(np.zeros(Config.NUM_JOINTS, dtype=np.float64))
+        env.forward()
+        return env.get_ee_pos(), env.get_ee_quat()
+
+    records = []
+    try:
+        for step in range(count):
+            actual_pos, actual_quat = pose_for(q_actual[step])
+            expected_pos, expected_quat = pose_for(q_expected[step])
+            actual_rpy = np.rad2deg(rerun_viz.quat_to_euler(actual_quat))
+            expected_rpy = np.rad2deg(rerun_viz.quat_to_euler(expected_quat))
+            pos_err_mm = rerun_viz._position_to_display_units(actual_pos - expected_pos)
+            rot_err_deg = rerun_viz.compute_rotation_error_single(actual_quat, expected_quat)
+            records.append(
+                {
+                    "time": float(t_arr[step]),
+                    "step": int(step),
+                    "actual_x": float(actual_pos[0]),
+                    "actual_y": float(actual_pos[1]),
+                    "actual_z": float(actual_pos[2]),
+                    "expected_x": float(expected_pos[0]),
+                    "expected_y": float(expected_pos[1]),
+                    "expected_z": float(expected_pos[2]),
+                    "actual_roll": float(actual_rpy[0]),
+                    "actual_pitch": float(actual_rpy[1]),
+                    "actual_yaw": float(actual_rpy[2]),
+                    "expected_roll": float(expected_rpy[0]),
+                    "expected_pitch": float(expected_rpy[1]),
+                    "expected_yaw": float(expected_rpy[2]),
+                    "error_x_mm": float(pos_err_mm[0]),
+                    "error_y_mm": float(pos_err_mm[1]),
+                    "error_z_mm": float(pos_err_mm[2]),
+                    "error_roll_deg": float(rot_err_deg[0]),
+                    "error_pitch_deg": float(rot_err_deg[1]),
+                    "error_yaw_deg": float(rot_err_deg[2]),
+                    "cycle_time_ms": float(cycle[min(step, len(cycle) - 1)]),
+                }
+            )
+    finally:
+        env.data.qpos[:] = saved_qpos
+        env.data.qvel[:] = saved_qvel
+        env.data.qacc[:] = saved_qacc
+        env.forward()
+    return records
+
+
+def _compute_ee_poses_for_q_traj(env, q_traj):
+    q_traj = np.asarray(q_traj, dtype=np.float64)
+    count = len(q_traj)
+    positions = np.zeros((count, 3), dtype=np.float64)
+    quats = np.zeros((count, 4), dtype=np.float64)
+
+    saved_qpos = env.data.qpos.copy()
+    saved_qvel = env.data.qvel.copy()
+    saved_qacc = env.data.qacc.copy()
+    try:
+        for step, q in enumerate(q_traj):
+            env.set_qpos(q)
+            env.set_qvel(np.zeros(Config.NUM_JOINTS, dtype=np.float64))
+            env.forward()
+            positions[step] = env.get_ee_pos()
+            quats[step] = env.get_ee_quat()
+    finally:
+        env.data.qpos[:] = saved_qpos
+        env.data.qvel[:] = saved_qvel
+        env.data.qacc[:] = saved_qacc
+        env.forward()
+
+    return positions, quats
 
 
 def _simulate_identification_samples(env, q_traj, qd_traj, qdd_traj, q_ref):
@@ -1850,6 +2829,8 @@ def _print_identification_case(case, true_masses, true_inertias):
 
 def main() -> None:
     # ---- 初始化 ----
+    rerun_ok = _setup_rerun()
+
     backend = PinocchioGravityBackend(
         urdf_path=Config.URDF_PATH,
         ee_frame_name="ArmLseventh_Link",
@@ -1894,9 +2875,6 @@ def main() -> None:
     print(f"[辨识] 轨迹: {n_steps} 步 @ {Config.DT*1000:.0f}ms, 共 {t_arr[-1]:.1f}s")
     print(f"[辨识] TCP 最大速度: {max_ee_speed:.3f} m/s (缩放系数 {speed_scale:.3f})")
 
-    # ---- Rerun ----
-    rerun_ok = _setup_rerun()
-
     # ---- MuJoCo 窗口 + 轨迹执行 ----
     print("[辨识] 启动 MuJoCo 窗口，执行激励轨迹...")
     q_ref = Config.HOME_QPOS.copy()
@@ -1904,6 +2882,7 @@ def main() -> None:
     q_meas, qd_meas, tau_meas, _tau_joint = _simulate_identification_samples(
         env, q_traj, qd_traj, qdd_traj, q_ref,
     )
+    ee_pos_desired_all, ee_quat_desired_all = _compute_ee_poses_for_q_traj(env, q_traj)
 
     with _viewer_context(env) as viewer:
         t0 = time.perf_counter()
@@ -1927,6 +2906,20 @@ def main() -> None:
                     q_meas[step],
                     qd_meas[step],
                     tau_meas[step],
+                )
+                _log_sim_realtime_step_from_env(
+                    rerun_ok=rerun_ok,
+                    env=env,
+                    t=t_arr[step],
+                    step=step,
+                    q_actual=q_meas[step],
+                    qd_actual=qd_meas[step],
+                    q_desired=q_traj[step],
+                    tau_received=tau_meas[step],
+                    tau_applied=tau_meas[step],
+                    cycle_time_ms=Config.DT * 1000.0,
+                    pos_desired=ee_pos_desired_all[step],
+                    quat_desired=ee_quat_desired_all[step],
                 )
             _sync_realtime(t0, t_arr[step])
 
@@ -1961,6 +2954,13 @@ def main() -> None:
         "max_ee_speed": max_ee_speed,
         "speed_scale": speed_scale,
     }
+    trajectory_records = _build_trajectory_records_from_env(
+        env,
+        t_arr,
+        q_meas,
+        q_traj,
+        cycle_time_ms=Config.DT * 1000.0,
+    )
     report_path = _write_html_report(
         identified_case,
         true_masses,
@@ -1972,6 +2972,7 @@ def main() -> None:
         tau_meas,
         rerun_ok,
         report_metadata,
+        trajectory_records=trajectory_records,
     )
     if report_path:
         print(f"HTML 报告已保存: {report_path}")

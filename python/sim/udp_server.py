@@ -154,7 +154,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
                 if Config.ENABLE_RERUN:
                     q, qd, pos_current, quat_current, pos_desired, quat_desired = env.get_state_snapshot()
                     rerun_viz.log_sim_realtime_step(
-                        t=step_count * Config.DT,
+                        t=env.get_time(),
                         pos_actual=pos_current,
                         pos_desired=pos_desired,
                         quat_actual=quat_current,
