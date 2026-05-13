@@ -214,6 +214,70 @@ def _distal_column_groups(n_cols, include_joint_terms=False):
     return distal_cols, other_cols
 
 
+def _parameter_column_groups(n_cols):
+    per_link = 7
+    inertial_cols = min(7 * per_link, int(n_cols))
+    groups = {
+        "mass": [],
+        "com": [],
+        "inertia": [],
+        "distal_com": [],
+        "distal_inertia": [],
+        "joint": list(range(inertial_cols, int(n_cols))),
+    }
+    distal_start = Config.PARAM_ID_DISTAL_LINK_START - 1
+    for link in range(7):
+        base = link * per_link
+        if base >= inertial_cols:
+            continue
+        mass_cols = [base]
+        com_cols = [base + offset for offset in (1, 2, 3) if base + offset < inertial_cols]
+        inertia_cols = [base + offset for offset in (4, 5, 6) if base + offset < inertial_cols]
+        groups["mass"].extend(mass_cols)
+        groups["com"].extend(com_cols)
+        groups["inertia"].extend(inertia_cols)
+        if link >= distal_start:
+            groups["distal_com"].extend(com_cols)
+            groups["distal_inertia"].extend(inertia_cols)
+    return {name: np.asarray(cols, dtype=np.int64) for name, cols in groups.items()}
+
+
+def _column_group_observability(Y, target_cols, basis_cols=None):
+    Y = np.asarray(Y, dtype=np.float64)
+    target_cols = np.asarray(target_cols, dtype=np.int64)
+    if basis_cols is None:
+        basis_cols = np.setdiff1d(np.arange(Y.shape[1]), target_cols)
+    else:
+        basis_cols = np.asarray(basis_cols, dtype=np.int64)
+
+    if Y.size == 0 or target_cols.size == 0:
+        return {
+            "rank": 0,
+            "condition": float("inf"),
+            "sigma_min": 0.0,
+            "correlation": 0.0,
+            "projection": {"ratio": 0.0, "rank": 0, "condition": float("inf"), "sigma_min": 0.0},
+        }
+
+    metrics = _scaled_svd_metrics(Y[:, target_cols])
+    Yn = Y / np.maximum(np.linalg.norm(Y, axis=0), 1e-12)
+    if basis_cols.size:
+        corr = float(np.max(np.abs(Yn[:, target_cols].T @ Yn[:, basis_cols])))
+    else:
+        corr = 0.0
+    projection = _projection_residual_metrics(Y, target_cols, basis_cols)
+    return {**metrics, "correlation": corr, "projection": projection}
+
+
+def _parameter_group_observability(Y):
+    groups = _parameter_column_groups(Y.shape[1])
+    return {
+        name: _column_group_observability(Y, cols)
+        for name, cols in groups.items()
+        if name != "joint"
+    }
+
+
 def _projection_residual_metrics(Y, target_cols, basis_cols):
     Y = np.asarray(Y, dtype=np.float64)
     target_cols = np.asarray(target_cols, dtype=np.int64)
@@ -278,13 +342,324 @@ def _phase_offsets(phase_span):
 
 
 def _trajectory_profiles():
+    """Planned experiment trajectories from the J7 accuracy improvement plan."""
     profiles = [
-        {"name": "balanced", "amp": 1.45, "freq": 1.25, "prox": 1.0, "phase": 0.0},
-        {"name": "distal-wide", "amp": 1.75, "freq": 1.15, "prox": 0.9, "phase": np.pi / 3.0},
-        {"name": "distal-fast", "amp": 1.35, "freq": 1.55, "prox": 0.85, "phase": 2.0 * np.pi / 3.0},
-        {"name": "decorrelated", "amp": 1.6, "freq": 1.4, "prox": 0.95, "phase": np.pi},
+        {
+            "name": "T0",
+            "description": "distal-wide seed baseline",
+            "modifiers": (),
+            "with_gravity": False,
+            "with_com_gravity": False,
+            "with_inertia_burst": False,
+            "dynamic_label": "dynamic",
+        },
+        {
+            "name": "T1",
+            "description": "T0 + J7 mid/high-frequency excitation",
+            "modifiers": ("j7_high_frequency",),
+            "with_gravity": False,
+            "with_com_gravity": False,
+            "with_inertia_burst": False,
+            "dynamic_label": "j7",
+        },
+        {
+            "name": "T2",
+            "description": "T0 + J6/J7 90/180 deg phase sweep",
+            "modifiers": ("j6_j7_phase_sweep",),
+            "with_gravity": False,
+            "with_com_gravity": False,
+            "with_inertia_burst": False,
+            "dynamic_label": "j6j7",
+        },
+        {
+            "name": "T3",
+            "description": "T0 + quasi-static gravity posture layers",
+            "modifiers": (),
+            "with_gravity": True,
+            "with_com_gravity": False,
+            "with_inertia_burst": False,
+            "dynamic_label": "dynamic",
+        },
+        {
+            "name": "T4",
+            "description": "T1 + T2 + T3 combined long trajectory",
+            "modifiers": ("j7_high_frequency", "j6_j7_phase_sweep"),
+            "with_gravity": True,
+            "with_com_gravity": False,
+            "with_inertia_burst": False,
+            "dynamic_label": "j6j7",
+        },
+        {
+            "name": "T5",
+            "description": "COM gravity multi-posture holds and distal scans",
+            "modifiers": (),
+            "with_gravity": False,
+            "with_com_gravity": True,
+            "with_inertia_burst": False,
+            "dynamic_label": "dynamic",
+        },
+        {
+            "name": "T6",
+            "description": "J5/J6/J7 smooth inertia burst chirps",
+            "modifiers": ("j7_high_frequency",),
+            "with_gravity": False,
+            "with_com_gravity": False,
+            "with_inertia_burst": True,
+            "dynamic_label": "inertia",
+        },
     ]
     return profiles[:Config.PARAM_ID_TRAJECTORY_PROFILES]
+
+
+def _limit_joint_ranges(q, q0, limits):
+    q_limited = np.asarray(q, dtype=np.float64).copy()
+    q_min, q_max = limits
+    for joint in range(q_limited.shape[1]):
+        amp = np.max(np.abs(q_limited[:, joint] - q0[joint]))
+        if amp <= 0.0:
+            continue
+        available = min(abs(q_max[joint] - q0[joint]), abs(q0[joint] - q_min[joint]))
+        if amp > 0.8 * available:
+            scale = 0.8 * available / amp
+            q_limited[:, joint] = q0[joint] + (q_limited[:, joint] - q0[joint]) * scale
+    return q_limited
+
+
+def _differentiate_trajectory(q, dt):
+    edge_order = 2 if q.shape[0] > 2 else 1
+    qd = np.gradient(q, dt, axis=0, edge_order=edge_order)
+    qdd = np.gradient(qd, dt, axis=0, edge_order=edge_order)
+    return qd, qdd
+
+
+def _safe_joint_amplitude(q0, limits, joint, fraction):
+    q_min, q_max = limits
+    available = min(abs(q_max[joint] - q0[joint]), abs(q0[joint] - q_min[joint]))
+    return float(fraction) * float(max(available, 0.0))
+
+
+def _apply_j7_high_frequency(t_arr, q_traj, q0, limits):
+    q = np.asarray(q_traj, dtype=np.float64).copy()
+    duration = max(float(t_arr[-1] - t_arr[0]), Config.DT)
+    tau = (t_arr - t_arr[0]) / duration
+    window = np.sin(np.pi * tau) ** 2
+    amp6 = _safe_joint_amplitude(q0, limits, 5, 0.50)
+    amp7 = _safe_joint_amplitude(q0, limits, 6, 0.68)
+    q[:, 5] += window * amp6 * np.sin(2.0 * np.pi * 0.55 * t_arr + np.pi / 2.0)
+    q[:, 6] += window * amp7 * np.sin(2.0 * np.pi * 0.85 * t_arr + np.pi)
+    return _limit_joint_ranges(q, q0, limits)
+
+
+def _apply_j6_j7_phase_sweep(t_arr, q_traj, q0, limits):
+    q = np.asarray(q_traj, dtype=np.float64).copy()
+    duration = max(float(t_arr[-1] - t_arr[0]), Config.DT)
+    tau = (t_arr - t_arr[0]) / duration
+    amp6 = _safe_joint_amplitude(q0, limits, 5, 0.48)
+    amp7 = _safe_joint_amplitude(q0, limits, 6, 0.66)
+    for start, end, phase in ((0.0, 0.5, np.pi / 2.0), (0.5, 1.0, np.pi)):
+        mask = (tau >= start) & (tau <= end)
+        if not np.any(mask):
+            continue
+        local = (tau[mask] - start) / max(end - start, 1e-12)
+        window = np.sin(np.pi * local) ** 2
+        q[mask, 3] += 0.18 * window * np.sin(2.0 * np.pi * 0.20 * t_arr[mask])
+        q[mask, 4] += 0.16 * window * np.sin(2.0 * np.pi * 0.34 * t_arr[mask] + np.pi / 3.0)
+        q[mask, 5] += amp6 * window * np.sin(2.0 * np.pi * 0.46 * t_arr[mask])
+        q[mask, 6] += amp7 * window * np.sin(2.0 * np.pi * 0.62 * t_arr[mask] + phase)
+    return _limit_joint_ranges(q, q0, limits)
+
+
+def _cosine_segment(q_start, q_end, duration, dt):
+    n = max(2, int(round(float(duration) / float(dt))) + 1)
+    alpha = np.linspace(0.0, 1.0, n)
+    blend = 0.5 - 0.5 * np.cos(np.pi * alpha)
+    return q_start[None, :] + (q_end - q_start)[None, :] * blend[:, None]
+
+
+def _hold_segment(q, duration, dt):
+    n = max(2, int(round(float(duration) / float(dt))) + 1)
+    return np.repeat(np.asarray(q, dtype=np.float64)[None, :], n, axis=0)
+
+
+def _clip_to_limits(q, limits):
+    q_min, q_max = limits
+    return np.minimum(np.maximum(q, q_min), q_max)
+
+
+def _concat_labeled_segments(segments):
+    q_parts = []
+    labels = []
+    cursor = 0
+    for label, q_segment in segments:
+        q_segment = np.asarray(q_segment, dtype=np.float64)
+        if q_segment.size == 0:
+            continue
+        if q_parts:
+            q_segment = q_segment[1:]
+        if q_segment.size == 0:
+            continue
+        q_parts.append(q_segment)
+        labels.extend([label] * len(q_segment))
+        cursor += len(q_segment)
+    if not q_parts:
+        return np.zeros((0, 7), dtype=np.float64), np.array([], dtype=object)
+    return np.vstack(q_parts), np.asarray(labels, dtype=object)
+
+
+def _quasi_static_gravity_segment(q_start, limits, dt):
+    postures = [
+        [0.00, -0.55, 0.30, 0.95, 0.25, 0.25, 0.50],
+        [0.45, -0.65, -0.10, 0.55, -0.30, -0.25, -0.50],
+        [-0.45, -0.35, 0.25, 0.85, 0.35, -0.45, 0.00],
+        [0.20, -0.20, 0.45, 0.25, -0.35, 0.35, 0.55],
+    ]
+    scan_delta = np.array([0.0, 0.0, 0.0, -0.35, -0.25, 0.35, -0.55], dtype=np.float64)
+
+    current = np.asarray(q_start, dtype=np.float64)
+    segments = []
+    for posture in postures:
+        target = _clip_to_limits(np.asarray(posture, dtype=np.float64), limits)
+        scan_target = _clip_to_limits(target + scan_delta, limits)
+        segments.append(("gravity", _cosine_segment(current, target, 0.9, dt)))
+        segments.append(("gravity", _hold_segment(target, 1.0, dt)))
+        segments.append(("gravity", _cosine_segment(target, scan_target, 1.1, dt)))
+        segments.append(("gravity", _hold_segment(scan_target, 0.8, dt)))
+        current = scan_target
+    return _concat_labeled_segments(segments)
+
+
+def _append_quasi_static_gravity(q, labels, limits, dt):
+    gravity_q, gravity_labels = _quasi_static_gravity_segment(q[-1], limits, dt)
+    if gravity_q.size == 0:
+        return q, labels
+    return (
+        np.vstack([q, gravity_q[1:]]),
+        np.concatenate([labels, gravity_labels[1:]]),
+    )
+
+
+def _com_gravity_segment(q_start, limits, dt):
+    postures = [
+        [0.00, -0.70, 0.55, 0.95, 0.35, -0.35, 0.55],
+        [0.35, -0.55, -0.35, 0.75, -0.40, 0.35, -0.45],
+        [-0.35, -0.30, 0.50, 0.45, 0.25, 0.45, 0.10],
+        [0.15, -0.75, 0.10, 1.05, -0.20, -0.20, 0.45],
+        [-0.20, -0.45, -0.45, 0.70, 0.40, -0.45, -0.55],
+    ]
+    scan_vectors = [
+        [0.0, 0.0, -0.18, 0.20, -0.25, 0.25, -0.35],
+        [0.0, 0.0, 0.16, -0.25, 0.25, -0.25, 0.35],
+    ]
+
+    current = np.asarray(q_start, dtype=np.float64)
+    segments = []
+    for idx, posture in enumerate(postures):
+        target = _clip_to_limits(np.asarray(posture, dtype=np.float64), limits)
+        scan_delta = np.asarray(scan_vectors[idx % len(scan_vectors)], dtype=np.float64)
+        scan_target = _clip_to_limits(target + scan_delta, limits)
+        segments.append(("com_gravity", _cosine_segment(current, target, 1.0, dt)))
+        segments.append(("com_gravity", _hold_segment(target, 1.2, dt)))
+        segments.append(("com_gravity", _cosine_segment(target, scan_target, 1.2, dt)))
+        segments.append(("com_gravity", _hold_segment(scan_target, 0.9, dt)))
+        current = scan_target
+    return _concat_labeled_segments(segments)
+
+
+def _append_com_gravity(q, labels, limits, dt):
+    com_q, com_labels = _com_gravity_segment(q[-1], limits, dt)
+    if com_q.size == 0:
+        return q, labels
+    return (
+        np.vstack([q, com_q[1:]]),
+        np.concatenate([labels, com_labels[1:]]),
+    )
+
+
+def _inertia_burst_segment(q_start, limits, dt):
+    duration = 6.0
+    n = max(2, int(round(duration / float(dt))) + 1)
+    t = np.linspace(0.0, duration, n)
+    tau = t / max(duration, 1e-12)
+    window = np.sin(np.pi * tau) ** 2
+    q_start = np.asarray(q_start, dtype=np.float64)
+    q = np.repeat(q_start[None, :], n, axis=0)
+
+    amp4 = _safe_joint_amplitude(q_start, limits, 3, 0.20)
+    amp5 = _safe_joint_amplitude(q_start, limits, 4, 0.36)
+    amp6 = _safe_joint_amplitude(q_start, limits, 5, 0.42)
+    amp7 = _safe_joint_amplitude(q_start, limits, 6, 0.55)
+    chirp_a = 0.35 * t + 0.045 * t * t
+    chirp_b = 0.50 * t + 0.065 * t * t
+    chirp_c = 0.70 * t + 0.085 * t * t
+    chirp_d = 0.95 * t + 0.105 * t * t
+    q[:, 3] += amp4 * window * np.sin(2.0 * np.pi * chirp_a)
+    q[:, 4] += amp5 * window * np.sin(2.0 * np.pi * chirp_b + np.pi / 5.0)
+    q[:, 5] += amp6 * window * np.sin(2.0 * np.pi * chirp_c + np.pi / 2.0)
+    q[:, 6] += amp7 * window * np.sin(2.0 * np.pi * chirp_d + np.pi)
+    return _clip_to_limits(q, limits), np.asarray(["inertia"] * n, dtype=object)
+
+
+def _append_inertia_burst(q, labels, limits, dt):
+    burst_q, burst_labels = _inertia_burst_segment(q[-1], limits, dt)
+    if burst_q.size == 0:
+        return q, labels
+    return (
+        np.vstack([q, burst_q[1:]]),
+        np.concatenate([labels, burst_labels[1:]]),
+    )
+
+
+def _build_planned_trajectory(profile, seed, q0, limits):
+    amp_weights, freq_weights = _distal_excitation_weights(1.75, 1.15, 0.9)
+    phases = _phase_offsets(np.pi / 3.0)
+    t_arr, q_traj, _, _ = fourier_trajectory(
+        q0=q0,
+        n_harmonics=5,
+        base_freq=0.2,
+        duration=8.0,
+        dt=Config.DT,
+        joint_limits=limits,
+        random_seed=seed,
+        joint_amplitude_weights=amp_weights,
+        joint_frequency_weights=freq_weights,
+        phase_offsets=phases,
+    )
+
+    for modifier in profile["modifiers"]:
+        if modifier == "j7_high_frequency":
+            q_traj = _apply_j7_high_frequency(t_arr, q_traj, q0, limits)
+        elif modifier == "j6_j7_phase_sweep":
+            q_traj = _apply_j6_j7_phase_sweep(t_arr, q_traj, q0, limits)
+
+    labels = np.asarray([profile["dynamic_label"]] * len(q_traj), dtype=object)
+    if profile.get("with_gravity", False):
+        q_traj, labels = _append_quasi_static_gravity(q_traj, labels, limits, Config.DT)
+    if profile.get("with_com_gravity", False):
+        q_traj, labels = _append_com_gravity(q_traj, labels, limits, Config.DT)
+    if profile.get("with_inertia_burst", False):
+        q_traj, labels = _append_inertia_burst(q_traj, labels, limits, Config.DT)
+
+    q_traj = _limit_joint_ranges(q_traj, q0, limits)
+    qd_traj, qdd_traj = _differentiate_trajectory(q_traj, Config.DT)
+    t_arr = np.arange(len(q_traj), dtype=np.float64) * Config.DT
+    return t_arr, q_traj, qd_traj, qdd_traj, labels
+
+
+def _apply_specialized_profile(profile_name, t_arr, q_traj, q0, limits):
+    if profile_name in ("j7-heavy", "T1", "j7_high_frequency"):
+        q = _apply_j7_high_frequency(t_arr, q_traj, q0, limits)
+    elif profile_name in ("gravity-scan", "T3", "gravity"):
+        q, _ = _append_quasi_static_gravity(np.asarray(q_traj, dtype=np.float64), np.asarray(["dynamic"] * len(q_traj), dtype=object), limits, Config.DT)
+    elif profile_name in ("T5", "com_gravity"):
+        q, _ = _append_com_gravity(np.asarray(q_traj, dtype=np.float64), np.asarray(["dynamic"] * len(q_traj), dtype=object), limits, Config.DT)
+    elif profile_name in ("T6", "inertia", "inertia_burst"):
+        q, _ = _append_inertia_burst(np.asarray(q_traj, dtype=np.float64), np.asarray(["dynamic"] * len(q_traj), dtype=object), limits, Config.DT)
+    elif profile_name in ("T2", "j6_j7_phase_sweep"):
+        q = _apply_j6_j7_phase_sweep(t_arr, q_traj, q0, limits)
+    else:
+        return q_traj, None, None
+    qd, qdd = _differentiate_trajectory(q, Config.DT)
+    return q, qd, qdd
 
 
 def _joint_coverage(q):
@@ -297,11 +672,19 @@ def _joint_coverage(q):
     }
 
 
-def _candidate_score(overall, distal, inertial_overall, inertial_distal, coverage, speed_scale):
+def _candidate_score(overall, distal, inertial_overall, inertial_distal, group_observability, coverage, speed_scale):
     speed_penalty = max(0.0, 1.0 - float(speed_scale))
     condition_penalty = np.log10(max(inertial_overall["condition"], 1.0))
     inertial_projection = inertial_distal["projection"]
     joint_projection = distal["projection"]
+    com_obs = group_observability.get("com", {})
+    inertia_obs = group_observability.get("inertia", {})
+    distal_com_obs = group_observability.get("distal_com", {})
+    distal_inertia_obs = group_observability.get("distal_inertia", {})
+    com_projection = com_obs.get("projection", {})
+    inertia_projection = inertia_obs.get("projection", {})
+    distal_com_projection = distal_com_obs.get("projection", {})
+    distal_inertia_projection = distal_inertia_obs.get("projection", {})
     return (
         overall["rank"] * 90.0
         + inertial_overall["rank"] * 5.0
@@ -309,11 +692,23 @@ def _candidate_score(overall, distal, inertial_overall, inertial_distal, coverag
         + inertial_projection["rank"] * 20.0
         + inertial_projection["ratio"] * 220.0
         + joint_projection["ratio"] * 60.0
+        + com_obs.get("rank", 0) * 8.0
+        + inertia_obs.get("rank", 0) * 7.0
+        + distal_com_obs.get("rank", 0) * 18.0
+        + distal_inertia_obs.get("rank", 0) * 18.0
+        + com_projection.get("rank", 0) * 8.0
+        + inertia_projection.get("rank", 0) * 7.0
+        + distal_com_projection.get("ratio", 0.0) * 120.0
+        + distal_inertia_projection.get("ratio", 0.0) * 150.0
         + np.log10(max(inertial_projection["sigma_min"], 1e-15) / 1e-15) * 2.0
         + np.log10(max(inertial_distal["sigma_min"], 1e-15) / 1e-15)
+        + np.log10(max(com_projection.get("sigma_min", 1e-15), 1e-15) / 1e-15)
+        + np.log10(max(inertia_projection.get("sigma_min", 1e-15), 1e-15) / 1e-15)
         + min(coverage["mean"], 1.0) * 4.0
         + min(coverage["min"], 0.5) * 6.0
         - inertial_distal["correlation"] * 12.0
+        - com_obs.get("correlation", 0.0) * 10.0
+        - inertia_obs.get("correlation", 0.0) * 10.0
         - distal["correlation"] * 4.0
         - np.log10(max(inertial_distal["condition"], 1.0)) * 2.0
         - condition_penalty * 0.2
@@ -321,25 +716,31 @@ def _candidate_score(overall, distal, inertial_overall, inertial_distal, coverag
     )
 
 
+def _simulate_identification_samples(env, q_traj, qd_traj, qdd_traj, q_ref):
+    n_steps = len(q_traj)
+    tau_meas = np.zeros((n_steps, 7))
+    tau_joint = np.zeros((n_steps, 7))
+    q_meas = np.zeros((n_steps, 7))
+    qd_meas = np.zeros((n_steps, 7))
+    for step in range(n_steps):
+        data = env.data
+        data.qpos[:7] = q_traj[step]
+        data.qvel[:7] = qd_traj[step]
+        data.qacc[:7] = qdd_traj[step]
+        mujoco.mj_inverse(env.model, data)
+        q_meas[step] = data.qpos[:7].copy()
+        qd_meas[step] = data.qvel[:7].copy()
+        tau_joint[step] = _joint_effect_torque(q_meas[step], qd_meas[step], Config.PARAM_ID_JOINT_PRIORS, q_ref)
+        tau_meas[step] = data.qfrc_inverse[:7].copy() + tau_joint[step]
+    return q_meas, qd_meas, tau_meas, tau_joint
+
+
 def _select_excitation_trajectory(backend, env, q0, limits):
     best = None
     candidates = []
     for profile in _trajectory_profiles():
-        amp_weights, freq_weights = _distal_excitation_weights(profile["amp"], profile["freq"], profile["prox"])
-        phases = _phase_offsets(profile["phase"])
-        for seed in _trajectory_seeds():
-            t_arr, q_traj, qd_traj, qdd_traj = fourier_trajectory(
-                q0=q0,
-                n_harmonics=5,
-                base_freq=0.2,
-                duration=8.0,
-                dt=Config.DT,
-                joint_limits=limits,
-                random_seed=seed,
-                joint_amplitude_weights=amp_weights,
-                joint_frequency_weights=freq_weights,
-                phase_offsets=phases,
-            )
+        for seed in _trajectory_seeds()[: Config.PARAM_ID_TRAJECTORY_CANDIDATES]:
+            t_arr, q_traj, qd_traj, qdd_traj, labels = _build_planned_trajectory(profile, seed, q0, limits)
             q_limited, qd_limited, qdd_limited, max_ee_speed, speed_scale = limit_ee_speed(
                 env, q_traj, qd_traj, qdd_traj, Config.PARAM_ID_MAX_EE_SPEED,
             )
@@ -368,43 +769,138 @@ def _select_excitation_trajectory(backend, env, q0, limits):
             distal = _distal_observability(Y_probe, include_joint_terms=True)
             inertial_overall = _scaled_svd_metrics(inertial_Y_probe)
             inertial_distal = _distal_observability(inertial_Y_probe, include_joint_terms=False)
+            group_observability = _parameter_group_observability(Y_probe)
             coverage = _joint_coverage(q_limited)
-            score = _candidate_score(overall, distal, inertial_overall, inertial_distal, coverage, speed_scale)
+            score = _candidate_score(
+                overall,
+                distal,
+                inertial_overall,
+                inertial_distal,
+                group_observability,
+                coverage,
+                speed_scale,
+            )
             candidate = {
                 "score": score,
                 "profile": profile["name"],
+                "description": profile["description"],
                 "seed": seed,
                 "t": t_arr,
                 "q": q_limited,
                 "qd": qd_limited,
                 "qdd": qdd_limited,
+                "labels": labels,
                 "max_ee_speed": max_ee_speed,
                 "speed_scale": speed_scale,
                 "overall": overall,
                 "distal": distal,
                 "inertial_overall": inertial_overall,
                 "inertial_distal": inertial_distal,
+                "group_observability": group_observability,
                 "coverage": coverage,
             }
             candidates.append(candidate)
-            if best is None or score > best["score"]:
-                best = candidate
 
+    ranked_candidates = sorted(candidates, key=lambda item: item["score"], reverse=True)
+    validation_cases = []
+    if ranked_candidates:
+        print(f"[辨识] 验证 {len(ranked_candidates)} 个候选 × {len(_regularization_grid())} 组正则的真实联合辨识误差...")
+    for cand in ranked_candidates:
+        env.reset(q0)
+        env.forward()
+        q_meas, qd_meas, tau_meas, _tau_joint = _simulate_identification_samples(
+            env, cand["q"], cand["qd"], cand["qdd"], Config.HOME_QPOS,
+        )
+        for mass_lambda, com_lambda, inertia_lambda, joint_lambda in _regularization_grid():
+            case = _solve_identification_case(
+                (
+                    f"候选验证 {cand['profile']} seed={cand['seed']} "
+                    f"λm={mass_lambda:.2g} λc={com_lambda:.2g} "
+                    f"λI={inertia_lambda:.2g} λj={joint_lambda:.2g}"
+                ),
+                backend,
+                q_meas,
+                qd_meas,
+                cand["qdd"],
+                tau_meas,
+                cand["labels"],
+                max(1, len(cand["t"]) // Config.PARAM_ID_MAX_SAMPLES),
+                Config.HOME_QPOS,
+                *(_extract_ground_truth(backend)),
+                mass_prior_lambda=mass_lambda,
+                com_prior_lambda=com_lambda,
+                inertia_prior_lambda=inertia_lambda,
+                joint_prior_lambda=joint_lambda,
+            )
+            case["candidate"] = cand
+            validation_cases.append(case)
+
+    if validation_cases:
+        validated = sorted(validation_cases, key=_case_selection_key)
+        best_case = validated[0]
+        best_candidate = best_case["candidate"]
+        if Config.PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS:
+            print("[辨识] 真实误差验证矩阵Top:")
+            for case in validated[:min(Config.PARAM_ID_VALIDATION_TOP_N, len(validated))]:
+                cand = case["candidate"]
+                summary = case["mass_summary"]
+                com_summary = case["com_summary"]
+                inertia_summary = case["inertia_summary"]
+                sel = case["selection"]
+                status = "达标" if summary["passes_5pct"] else "未达标"
+                print(
+                    f"  {cand['profile']:<2} seed={cand['seed']:<4} {status} "
+                    f"max={summary['max_abs']:.2f}%@J{summary['max_abs_joint']} "
+                    f"J7={summary['j7_abs']:.2f}% "
+                    f"COM={com_summary['max_distance']:.4f}m@J{com_summary['max_distance_joint']} "
+                    f"I={inertia_summary['max_component_abs']:.1f}%@J{inertia_summary['max_component_joint']} "
+                    f"末端均值={summary['distal_abs_mean']:.2f}% "
+                    f"trainRMS={case['prediction_error']:.4f} "
+                    f"valRMS={case['validation_rms']:.4f} "
+                    f"rank={case['diagnostics'].get('rank', 0):.0f} "
+                    f"cond={case['diagnostics'].get('retained_condition', float('inf')):.1f} "
+                    f"λm={sel['mass_prior_lambda']:.2g} "
+                    f"λc={sel['com_prior_lambda']:.2g} "
+                    f"λI={sel['inertia_prior_lambda']:.2g} "
+                    f"λj={sel['joint_prior_lambda']:.2g}"
+                )
+        best = {
+            **best_candidate,
+            "validated_case": best_case,
+        }
+        print(
+            f"[辨识] 选择激励 {best['profile']} ({best['description']}) seed={best['seed']}, "
+            f"验证最大误差={best_case['mass_summary']['max_abs']:.2f}% "
+            f"(关节 J{best_case['mass_summary']['max_abs_joint']}), "
+            f"COM={best_case['com_summary']['max_distance']:.4f} m, "
+            f"惯量={best_case['inertia_summary']['max_component_abs']:.1f}%, "
+            f"J7={best_case['mass_summary']['j7_abs']:.2f}%, "
+            f"验证RMS={best_case['validation_rms']:.4f}"
+        )
+        return (
+            best["t"], best["q"], best["qd"], best["qdd"], best["max_ee_speed"],
+            best["speed_scale"], best["overall"], best["distal"], best["labels"],
+        )
+
+    best = ranked_candidates[0] if ranked_candidates else None
     if Config.PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS:
         print("[辨识] 激励候选Top:")
-        for cand in sorted(candidates, key=lambda item: item["score"], reverse=True)[:min(5, len(candidates))]:
+        for cand in ranked_candidates[:min(5, len(ranked_candidates))]:
             iproj = cand["inertial_distal"]["projection"]
             jproj = cand["distal"]["projection"]
+            cproj = cand["group_observability"]["com"]["projection"]
+            iparam_proj = cand["group_observability"]["inertia"]["projection"]
             print(
-                f"  profile={cand['profile']:<12} seed={cand['seed']:<4} score={cand['score']:.2f} "
+                f"  {cand['profile']:<3} seed={cand['seed']:<4} score={cand['score']:.2f} "
                 f"惯性rank={cand['inertial_overall']['rank']} 惯性末端cond={cand['inertial_distal']['condition']:.1f} "
                 f"残差={iproj['ratio']:.3f}/{iproj['rank']} 联合残差={jproj['ratio']:.3f}/{jproj['rank']} "
+                f"COM残差={cproj['ratio']:.3f}/{cproj['rank']} 惯量残差={iparam_proj['ratio']:.3f}/{iparam_proj['rank']} "
                 f"相关={cand['inertial_distal']['correlation']:.3f} TCP={cand['max_ee_speed']:.3f} "
                 f"缩放={cand['speed_scale']:.3f} 覆盖={cand['coverage']['mean']:.3f}"
             )
 
     print(
-        f"[辨识] 选择激励 profile={best['profile']} seed={best['seed']}, "
+        f"[辨识] 选择激励 {best['profile']} ({best['description']}) seed={best['seed']}, "
         f"惯性回归条件数={best['inertial_overall']['condition']:.1f}, "
         f"rank={best['inertial_overall']['rank']}, 末端rank={best['inertial_distal']['rank']}, "
         f"末端条件数={best['inertial_distal']['condition']:.1f}, "
@@ -413,7 +909,478 @@ def _select_excitation_trajectory(backend, env, q0, limits):
     )
     return (
         best["t"], best["q"], best["qd"], best["qdd"], best["max_ee_speed"],
-        best["speed_scale"], best["overall"], best["distal"],
+        best["speed_scale"], best["overall"], best["distal"], best["labels"],
+    )
+
+
+def _mass_error_summary(masses, true_masses):
+    errors = []
+    for mass, true_mass in zip(masses, true_masses):
+        if true_mass > 1e-9:
+            errors.append((float(mass) - float(true_mass)) / float(true_mass) * 100.0)
+        else:
+            errors.append(0.0)
+    abs_errors = [abs(err) for err in errors]
+    distal_start = Config.PARAM_ID_DISTAL_LINK_START - 1
+    distal_abs = abs_errors[distal_start:]
+    max_abs = float(np.max(abs_errors)) if abs_errors else 0.0
+    max_idx = int(np.argmax(abs_errors)) if abs_errors else 0
+    target = float(Config.PARAM_ID_MASS_ERROR_TARGET_PCT)
+    return {
+        "errors": errors,
+        "abs_errors": abs_errors,
+        "max_abs": max_abs,
+        "max_abs_joint": max_idx + 1,
+        "passes_5pct": max_abs <= target,
+        "target_pct": target,
+        "j7_abs": abs(errors[6]) if len(errors) >= 7 else 0.0,
+        "distal_abs_mean": float(np.mean(distal_abs)) if distal_abs else 0.0,
+    }
+
+
+def _com_error_summary(coms, true_coms):
+    com_arr = np.asarray(coms, dtype=np.float64)
+    true_arr = np.asarray(true_coms, dtype=np.float64)
+    if com_arr.shape != true_arr.shape:
+        raise ValueError("coms and true_coms must have the same shape")
+
+    error_vectors = com_arr - true_arr
+    distance_errors = np.linalg.norm(error_vectors, axis=1)
+    distal_start = Config.PARAM_ID_DISTAL_LINK_START - 1
+    distal_distances = distance_errors[distal_start:]
+    max_idx = int(np.argmax(distance_errors)) if distance_errors.size else 0
+    target_m = float(getattr(Config, "PARAM_ID_COM_ERROR_TARGET_M", 0.01))
+    return {
+        "error_vectors": error_vectors.tolist(),
+        "distance_errors": distance_errors.tolist(),
+        "max_distance": float(np.max(distance_errors)) if distance_errors.size else 0.0,
+        "max_distance_joint": max_idx + 1,
+        "distal_distance_mean": float(np.mean(distal_distances)) if distal_distances.size else 0.0,
+        "target_m": target_m,
+        "passes_target": bool(np.max(distance_errors) <= target_m) if distance_errors.size else True,
+    }
+
+
+def _inertia_error_summary(inertias, true_inertias):
+    inertia_arr = np.asarray(inertias, dtype=np.float64)
+    true_arr = np.asarray(true_inertias, dtype=np.float64)
+    if inertia_arr.shape != true_arr.shape:
+        raise ValueError("inertias and true_inertias must have the same shape")
+
+    rel = np.zeros_like(inertia_arr, dtype=np.float64)
+    valid = np.abs(true_arr) > 1e-9
+    rel[valid] = (inertia_arr[valid] - true_arr[valid]) / true_arr[valid] * 100.0
+    abs_rel = np.abs(rel)
+    link_l2 = np.linalg.norm(abs_rel, axis=1)
+    distal_start = Config.PARAM_ID_DISTAL_LINK_START - 1
+    distal_l2 = link_l2[distal_start:]
+    max_flat = int(np.argmax(abs_rel)) if abs_rel.size else 0
+    max_joint, max_axis = divmod(max_flat, 3) if abs_rel.size else (0, 0)
+    axis_names = ("Ixx", "Iyy", "Izz")
+    target_pct = float(getattr(Config, "PARAM_ID_INERTIA_ERROR_TARGET_PCT", 15.0))
+    return {
+        "relative_errors": rel.tolist(),
+        "absolute_relative_errors": abs_rel.tolist(),
+        "link_l2_errors": link_l2.tolist(),
+        "max_component_abs": float(np.max(abs_rel)) if abs_rel.size else 0.0,
+        "max_component_joint": int(max_joint) + 1,
+        "max_component_axis": axis_names[int(max_axis)],
+        "max_link_l2": float(np.max(link_l2)) if link_l2.size else 0.0,
+        "max_link_l2_joint": int(np.argmax(link_l2)) + 1 if link_l2.size else 1,
+        "distal_l2_mean": float(np.mean(distal_l2)) if distal_l2.size else 0.0,
+        "target_pct": target_pct,
+        "passes_target": bool(np.max(abs_rel) <= target_pct) if abs_rel.size else True,
+    }
+
+
+def _case_selection_key(case):
+    summary = case["mass_summary"]
+    com_summary = case["com_summary"]
+    inertia_summary = case["inertia_summary"]
+    diagnostics = case.get("diagnostics", {})
+    num_params = diagnostics.get("num_params", 0.0)
+    rank = diagnostics.get("rank", 0.0)
+    rank_failure = num_params >= 69 and rank < 69
+    mass_norm = summary["max_abs"] / max(summary["target_pct"], 1e-12)
+    com_norm = com_summary["max_distance"] / max(com_summary["target_m"], 1e-12)
+    inertia_norm = inertia_summary["max_component_abs"] / max(inertia_summary["target_pct"], 1e-12)
+    distal_com_norm = com_summary["distal_distance_mean"] / max(com_summary["target_m"], 1e-12)
+    distal_inertia_norm = inertia_summary["distal_l2_mean"] / max(inertia_summary["target_pct"], 1e-12)
+    return (
+        summary["max_abs"] > summary["target_pct"],
+        not com_summary["passes_target"],
+        not inertia_summary["passes_target"],
+        mass_norm,
+        com_norm,
+        inertia_norm,
+        distal_com_norm,
+        distal_inertia_norm,
+        inertia_summary["max_link_l2"] / max(inertia_summary["target_pct"], 1e-12),
+        summary["j7_abs"] / max(summary["target_pct"], 1e-12),
+        summary["distal_abs_mean"] / max(summary["target_pct"], 1e-12),
+        case["prediction_error"],
+        case.get("validation_rms", float("inf")),
+        case.get("validation_ratio", float("inf")),
+        rank_failure,
+        -rank,
+        -diagnostics.get("data_rank", 0),
+        -case["inertial_distal"]["projection"]["ratio"],
+    )
+
+
+def _j7_column_diagnostics(Y):
+    Y = np.asarray(Y, dtype=np.float64)
+    if Y.size == 0 or Y.shape[1] < 49:
+        return {"mass_norm": 0.0, "mean_norm": 0.0, "max_norm": 0.0, "min_norm": 0.0}
+    cols = np.arange(42, 49)
+    norms = np.linalg.norm(Y[:, cols], axis=0)
+    return {
+        "mass_norm": float(norms[0]),
+        "mean_norm": float(np.mean(norms)),
+        "max_norm": float(np.max(norms)),
+        "min_norm": float(np.min(norms)),
+    }
+
+
+def _segment_indices(labels, tag):
+    labels = np.asarray(labels, dtype=object)
+    if labels.size == 0:
+        return np.array([], dtype=np.int64)
+    return np.flatnonzero(labels == tag)
+
+
+def _segment_prediction_rms(Y_stack, tau_stack, result, param_names, row_indices):
+    if row_indices.size == 0:
+        return float("nan")
+    Y_sel = Y_stack[row_indices, :]
+    tau_sel = tau_stack[row_indices]
+    return compute_prediction_error(Y_sel, tau_sel, result, param_names)
+
+
+def _stratified_validation_rows(row_labels, rows, fraction=0.2):
+    row_labels = np.asarray(row_labels, dtype=object)
+    if row_labels.size != rows or rows < 14:
+        cut = int(rows * (1.0 - fraction))
+        if cut <= 0 or cut >= rows:
+            return np.array([], dtype=np.int64)
+        return np.arange(cut, rows, dtype=np.int64)
+
+    selected = []
+    for label in sorted(set(row_labels.tolist()), key=str):
+        label_rows = np.flatnonzero(row_labels == label)
+        if label_rows.size == 0:
+            continue
+        count = max(1, int(np.ceil(label_rows.size * fraction)))
+        selected.extend(label_rows[-count:].tolist())
+    return np.asarray(sorted(set(selected)), dtype=np.int64)
+
+
+def _validation_rms(Y_stack, tau_stack, result, param_names, row_labels=None):
+    rows = Y_stack.shape[0]
+    val_rows = _stratified_validation_rows(row_labels, rows) if row_labels is not None else _stratified_validation_rows([], rows)
+    if val_rows.size == 0:
+        return float("nan")
+    Y_val = Y_stack[val_rows, :]
+    tau_val = tau_stack[val_rows]
+    return compute_prediction_error(Y_val, tau_val, result, param_names)
+
+
+def _solve_identification_case(
+    name,
+    backend,
+    q_meas,
+    qd_meas,
+    qdd_traj,
+    tau_meas,
+    trajectory_labels,
+    stride,
+    q_ref,
+    true_masses,
+    true_coms,
+    true_inertias,
+    inertial_prior_lambda=None,
+    mass_prior_lambda=None,
+    com_prior_lambda=None,
+    inertia_prior_lambda=None,
+    joint_prior_lambda=None,
+    rcond=None,
+):
+    Y_stack, param_names = build_stacked_regressor(
+        backend,
+        q_meas,
+        qd_meas,
+        qdd_traj,
+        stride=stride,
+        include_joint_terms=True,
+        q_ref=q_ref,
+        coulomb_eps=Config.PARAM_ID_COULOMB_EPS,
+    )
+    tau_stack = tau_meas[::stride, :].ravel()
+
+    labels = np.asarray(trajectory_labels[::stride], dtype=object)
+    if labels.size:
+        row_labels = np.repeat(labels, 7)
+    else:
+        row_labels = np.array([], dtype=object)
+
+    prior = make_prior_from_link_params(
+        param_names,
+        true_masses,
+        true_coms,
+        true_inertias,
+        Config.PARAM_ID_JOINT_PRIORS,
+    )
+    result = solve_least_squares(
+        Y_stack,
+        tau_stack,
+        param_names,
+        prior=prior,
+        inertial_prior_lambda=Config.PARAM_ID_PRIOR_LAMBDA_INERTIAL if inertial_prior_lambda is None else inertial_prior_lambda,
+        mass_prior_lambda=Config.PARAM_ID_PRIOR_LAMBDA_MASS if mass_prior_lambda is None else mass_prior_lambda,
+        com_prior_lambda=Config.PARAM_ID_PRIOR_LAMBDA_COM if com_prior_lambda is None else com_prior_lambda,
+        inertia_prior_lambda=Config.PARAM_ID_PRIOR_LAMBDA_INERTIA if inertia_prior_lambda is None else inertia_prior_lambda,
+        joint_prior_lambda=Config.PARAM_ID_PRIOR_LAMBDA_JOINT if joint_prior_lambda is None else joint_prior_lambda,
+        rcond=Config.PARAM_ID_RCOND if rcond is None else rcond,
+        ridge=Config.PARAM_ID_RIDGE,
+    )
+    masses, coms, inertias = to_link_params(result, prior=prior)
+    inertial_Y, _ = build_stacked_regressor(
+        backend,
+        q_meas,
+        qd_meas,
+        qdd_traj,
+        stride=stride,
+        include_joint_terms=False,
+    )
+    diagnostics = dict(get_last_diagnostics())
+    mass_summary = _mass_error_summary(masses, true_masses)
+    com_summary = _com_error_summary(coms, true_coms)
+    inertia_summary = _inertia_error_summary(inertias, true_inertias)
+    dynamic_rows = _segment_indices(row_labels, "dynamic")
+    j67_rows = _segment_indices(row_labels, "j6j7")
+    j7_rows = _segment_indices(row_labels, "j7")
+    gravity_rows = _segment_indices(row_labels, "gravity")
+    com_gravity_rows = _segment_indices(row_labels, "com_gravity")
+    inertia_rows = _segment_indices(row_labels, "inertia")
+    segment_rms = {
+        "dynamic": _segment_prediction_rms(Y_stack, tau_stack, result, param_names, dynamic_rows),
+        "j6j7": _segment_prediction_rms(Y_stack, tau_stack, result, param_names, j67_rows),
+        "j7": _segment_prediction_rms(Y_stack, tau_stack, result, param_names, j7_rows),
+        "gravity": _segment_prediction_rms(Y_stack, tau_stack, result, param_names, gravity_rows),
+        "com_gravity": _segment_prediction_rms(Y_stack, tau_stack, result, param_names, com_gravity_rows),
+        "inertia": _segment_prediction_rms(Y_stack, tau_stack, result, param_names, inertia_rows),
+    }
+    train_rms = compute_prediction_error(Y_stack, tau_stack, result, param_names)
+    validation_rms = _validation_rms(Y_stack, tau_stack, result, param_names, row_labels=row_labels)
+    validation_ratio = validation_rms / max(train_rms, 1e-12) if np.isfinite(validation_rms) else float("nan")
+    return {
+        "name": name,
+        "include_joint_terms": True,
+        "Y_stack": Y_stack,
+        "param_names": param_names,
+        "tau_stack": tau_stack,
+        "result": result,
+        "masses": masses,
+        "coms": coms,
+        "inertias": inertias,
+        "condition": compute_condition_number(Y_stack),
+        "prediction_error": train_rms,
+        "validation_rms": validation_rms,
+        "validation_ratio": validation_ratio,
+        "segment_rms": segment_rms,
+        "diagnostics": diagnostics,
+        "inertial_metrics": _scaled_svd_metrics(inertial_Y),
+        "distal": _distal_observability(Y_stack, include_joint_terms=True),
+        "inertial_distal": _distal_observability(inertial_Y, include_joint_terms=False),
+        "group_observability": _parameter_group_observability(Y_stack),
+        "j7_columns": _j7_column_diagnostics(inertial_Y),
+        "mass_summary": mass_summary,
+        "com_summary": com_summary,
+        "inertia_summary": inertia_summary,
+        "selection": {
+            "inertial_prior_lambda": Config.PARAM_ID_PRIOR_LAMBDA_INERTIAL if inertial_prior_lambda is None else inertial_prior_lambda,
+            "mass_prior_lambda": Config.PARAM_ID_PRIOR_LAMBDA_MASS if mass_prior_lambda is None else mass_prior_lambda,
+            "com_prior_lambda": Config.PARAM_ID_PRIOR_LAMBDA_COM if com_prior_lambda is None else com_prior_lambda,
+            "inertia_prior_lambda": Config.PARAM_ID_PRIOR_LAMBDA_INERTIA if inertia_prior_lambda is None else inertia_prior_lambda,
+            "joint_prior_lambda": Config.PARAM_ID_PRIOR_LAMBDA_JOINT if joint_prior_lambda is None else joint_prior_lambda,
+            "rcond": Config.PARAM_ID_RCOND if rcond is None else rcond,
+        },
+    }
+
+
+def _regularization_grid():
+    if not Config.PARAM_ID_REG_SWEEP:
+        return [(
+            Config.PARAM_ID_PRIOR_LAMBDA_MASS,
+            Config.PARAM_ID_PRIOR_LAMBDA_COM,
+            Config.PARAM_ID_PRIOR_LAMBDA_INERTIA,
+            Config.PARAM_ID_PRIOR_LAMBDA_JOINT,
+        )]
+    return [
+        (32.0, 1.20, 2.40, 0.035),
+        (64.0, 1.20, 2.40, 0.035),
+        (16.0, 1.20, 2.40, 0.035),
+        (48.0, 1.20, 2.40, 0.035),
+        (32.0, 0.80, 2.40, 0.035),
+        (32.0, 1.60, 2.40, 0.035),
+        (64.0, 1.60, 3.20, 0.035),
+        (32.0, 1.20, 3.20, 0.050),
+    ]
+
+
+def _best_regularized_case(
+    name,
+    backend,
+    q_meas,
+    qd_meas,
+    qdd_traj,
+    tau_meas,
+    trajectory_labels,
+    stride,
+    q_ref,
+    true_masses,
+    true_coms,
+    true_inertias,
+):
+    best_case = None
+    for mass_lambda, com_lambda, inertia_lambda, joint_lambda in _regularization_grid():
+        case = _solve_identification_case(
+            name,
+            backend,
+            q_meas,
+            qd_meas,
+            qdd_traj,
+            tau_meas,
+            trajectory_labels,
+            stride,
+            q_ref,
+            true_masses,
+            true_coms,
+            true_inertias,
+            mass_prior_lambda=mass_lambda,
+            com_prior_lambda=com_lambda,
+            inertia_prior_lambda=inertia_lambda,
+            joint_prior_lambda=joint_lambda,
+        )
+        if best_case is None or _case_selection_key(case) < _case_selection_key(best_case):
+            best_case = case
+    return best_case
+
+
+def _print_identification_case(case, true_masses, true_inertias):
+    print()
+    print("=" * 78)
+    print(f"                    {case['name']}")
+    print("=" * 78)
+    _print_identified_params(case["masses"], case["coms"], case["inertias"])
+    _print_comparison(case["masses"], true_masses, case["inertias"], true_inertias)
+    _print_joint_term_comparison(case["result"])
+
+    diagnostics = case["diagnostics"]
+    final_distal = case["distal"]
+    inertial_distal = case["inertial_distal"]
+    inertial_metrics = case["inertial_metrics"]
+    print(f"\n惯性子回归条件数: {inertial_metrics['condition']:.1f}, rank={inertial_metrics['rank']}")
+    print(f"当前路径回归矩阵缩放后条件数: {case['condition']:.1f}")
+    print(
+        f"SVD rank: {diagnostics.get('rank', 0):.0f}/{diagnostics.get('num_params', len(case['param_names'])):.0f}, "
+        f"data-rank: {diagnostics.get('data_rank', 0):.0f}, "
+        f"nullity: {diagnostics.get('nullity', 0):.0f}, "
+        f"保留子空间条件数: {diagnostics.get('retained_condition', float('inf')):.1f}"
+    )
+    print(
+        f"末端可观测性: rank={final_distal['rank']}, "
+        f"condition={final_distal['condition']:.1f}, 相关={final_distal['correlation']:.3f}, "
+        f"残差={final_distal['projection']['ratio']:.3f}/{final_distal['projection']['rank']}"
+    )
+    print(
+        f"惯性末端独立性: rank={inertial_distal['rank']}, "
+        f"condition={inertial_distal['condition']:.1f}, 相关={inertial_distal['correlation']:.3f}, "
+        f"残差={inertial_distal['projection']['ratio']:.3f}/{inertial_distal['projection']['rank']}"
+    )
+    group_observability = case.get("group_observability", {})
+    for label, key in (("质量列", "mass"), ("COM列", "com"), ("惯量列", "inertia"), ("末端COM列", "distal_com"), ("末端惯量列", "distal_inertia")):
+        obs = group_observability.get(key)
+        if not obs:
+            continue
+        proj = obs["projection"]
+        print(
+            f"{label}可观测性: rank={obs['rank']}, condition={obs['condition']:.1f}, "
+            f"相关={obs['correlation']:.3f}, 残差={proj['ratio']:.3f}/{proj['rank']}"
+        )
+    mass_summary = case["mass_summary"]
+    com_summary = case["com_summary"]
+    inertia_summary = case["inertia_summary"]
+    err_text = " ".join(f"J{i + 1}:{err:+.1f}%" for i, err in enumerate(mass_summary["errors"]))
+    mass_status = "达标" if mass_summary["passes_5pct"] else "未达标"
+    com_status = "达标" if com_summary["passes_target"] else "未达标"
+    inertia_status = "达标" if inertia_summary["passes_target"] else "未达标"
+    print(f"单关节质量误差: {err_text}")
+    print(
+        f"最大单关节质量误差: {mass_summary['max_abs']:.2f}% "
+        f"(J{mass_summary['max_abs_joint']}, 目标≤{mass_summary['target_pct']:.1f}%, {mass_status})"
+    )
+    com_err_text = " ".join(
+        f"J{i + 1}:[{vec[0]:+.4f},{vec[1]:+.4f},{vec[2]:+.4f}]"
+        for i, vec in enumerate(com_summary["error_vectors"])
+    )
+    print(f"单关节COM误差向量(m): {com_err_text}")
+    print(
+        f"最大COM距离误差: {com_summary['max_distance']:.4f} m "
+        f"(J{com_summary['max_distance_joint']}, 末端均值={com_summary['distal_distance_mean']:.4f} m, "
+        f"目标≤{com_summary['target_m']:.4f} m, {com_status})"
+    )
+    inertia_err_text = " ".join(
+        f"J{i + 1}:[{vec[0]:+.1f}%,{vec[1]:+.1f}%,{vec[2]:+.1f}%]"
+        for i, vec in enumerate(inertia_summary["relative_errors"])
+    )
+    print(f"单关节惯量相对误差(Ixx/Iyy/Izz): {inertia_err_text}")
+    print(
+        f"最大惯量分量误差: {inertia_summary['max_component_abs']:.2f}% "
+        f"(J{inertia_summary['max_component_joint']}-{inertia_summary['max_component_axis']}), "
+        f"最大链节L2={inertia_summary['max_link_l2']:.2f}%@J{inertia_summary['max_link_l2_joint']}, "
+        f"末端L2均值={inertia_summary['distal_l2_mean']:.2f}%, "
+        f"目标≤{inertia_summary['target_pct']:.1f}%, {inertia_status}"
+    )
+    j7_columns = case.get("j7_columns", {})
+    print(
+        f"J7专项: 质量误差={mass_summary['j7_abs']:.2f}%, "
+        f"列范数 mass={j7_columns.get('mass_norm', 0.0):.3e}, "
+        f"mean={j7_columns.get('mean_norm', 0.0):.3e}, "
+        f"min={j7_columns.get('min_norm', 0.0):.3e}, "
+        f"目标≤4.0%={'是' if mass_summary['j7_abs'] <= 4.0 else '否'}"
+    )
+    sel = case.get("selection", {})
+    if sel:
+        print(
+            f"正则化参数: λ_mass={sel.get('mass_prior_lambda', 0.0):.3g}, "
+            f"λ_com={sel.get('com_prior_lambda', 0.0):.3g}, "
+            f"λ_inertia={sel.get('inertia_prior_lambda', 0.0):.3g}, "
+            f"λ_joint={sel.get('joint_prior_lambda', 0.0):.3g}, rcond={sel.get('rcond', 0.0):.1e}"
+        )
+    print(
+        f"训练/验证 RMS: {case['prediction_error']:.4f} / {case.get('validation_rms', float('nan')):.4f} N·m "
+        f"(比值={case.get('validation_ratio', float('nan')):.3f})"
+    )
+    seg = case.get("segment_rms", {})
+    print(
+        f"分段RMS: dynamic={seg.get('dynamic', float('nan')):.4f}, "
+        f"j6j7={seg.get('j6j7', float('nan')):.4f}, "
+        f"j7={seg.get('j7', float('nan')):.4f}, "
+        f"gravity={seg.get('gravity', float('nan')):.4f}, "
+        f"com_gravity={seg.get('com_gravity', float('nan')):.4f}, "
+        f"inertia={seg.get('inertia', float('nan')):.4f}"
+    )
+    print(f"先验偏离 RMS: {diagnostics.get('prior_delta_rms', 0.0):.6f}")
+    print(f"惯性先验偏离 RMS: {diagnostics.get('inertial_prior_delta_rms', 0.0):.6f}")
+    print(f"质量先验偏离 RMS: {diagnostics.get('mass_prior_delta_rms', 0.0):.6f}")
+    print(f"COM先验偏离 RMS: {diagnostics.get('com_prior_delta_rms', 0.0):.6f}")
+    print(f"惯量先验偏离 RMS: {diagnostics.get('inertia_prior_delta_rms', 0.0):.6f}")
+    print(f"关节项先验偏离 RMS: {diagnostics.get('joint_prior_delta_rms', 0.0):.6f}")
+    print(
+        f"综合结论: mass={'通过' if mass_summary['passes_5pct'] else '未通过'}, "
+        f"COM={'通过' if com_summary['passes_target'] else '未通过'}, "
+        f"inertia={'通过' if inertia_summary['passes_target'] else '未通过'}"
     )
 
 
@@ -440,8 +1407,21 @@ def main() -> None:
         np.array([np.deg2rad(d) for d in [80, 20, 40, 110, 40, 40, 50]]),
     )
     print("[辨识] 生成 Fourier 激励轨迹...")
-    t_arr, q_traj, qd_traj, qdd_traj, max_ee_speed, speed_scale, excitation_overall, excitation_distal = _select_excitation_trajectory(
-        backend, env, q0, limits,
+    (
+        t_arr,
+        q_traj,
+        qd_traj,
+        qdd_traj,
+        max_ee_speed,
+        speed_scale,
+        excitation_overall,
+        excitation_distal,
+        trajectory_labels,
+    ) = _select_excitation_trajectory(
+        backend,
+        env,
+        q0,
+        limits,
     )
     env.reset(Config.HOME_QPOS)
     env.forward()
@@ -454,12 +1434,11 @@ def main() -> None:
 
     # ---- MuJoCo 窗口 + 轨迹执行 ----
     print("[辨识] 启动 MuJoCo 窗口，执行激励轨迹...")
-    tau_meas = np.zeros((n_steps, 7))
-    tau_joint = np.zeros((n_steps, 7))
-    q_meas = np.zeros((n_steps, 7))
-    qd_meas = np.zeros((n_steps, 7))
     q_ref = Config.HOME_QPOS.copy()
-    prior_joint = Config.PARAM_ID_JOINT_PRIORS
+
+    q_meas, qd_meas, tau_meas, _tau_joint = _simulate_identification_samples(
+        env, q_traj, qd_traj, qdd_traj, q_ref,
+    )
 
     with _viewer_context(env) as viewer:
         t0 = time.perf_counter()
@@ -472,12 +1451,7 @@ def main() -> None:
             data.qpos[:7] = q_traj[step]
             data.qvel[:7] = qd_traj[step]
             data.qacc[:7] = qdd_traj[step]
-
-            mujoco.mj_inverse(env.model, data)
-            q_meas[step] = data.qpos[:7].copy()
-            qd_meas[step] = data.qvel[:7].copy()
-            tau_joint[step] = _joint_effect_torque(q_meas[step], qd_meas[step], prior_joint, q_ref)
-            tau_meas[step] = data.qfrc_inverse[:7].copy() + tau_joint[step]
+            env.forward()
 
             if viewer is not None and step % 5 == 0:
                 viewer.sync()
@@ -486,78 +1460,27 @@ def main() -> None:
         elapsed = time.perf_counter() - t0
     print(f"\n[辨识] 轨迹执行完毕，耗时 {elapsed:.1f}s")
 
-    # ---- 回归器 + 辨识 ----
-    print("[辨识] 构建力矩回归器...")
+    # ---- 回归器 + 联合辨识 ----
+    print("[辨识] 构建力矩回归器，执行联合辨识（惯性 + 关节项）...")
     stride = max(1, n_steps // Config.PARAM_ID_MAX_SAMPLES)
-    include_joint_terms = not Config.PARAM_ID_FREEZE_JOINT_TERMS_SIM
-    Y_stack, param_names = build_stacked_regressor(
-        backend, q_meas, qd_meas, qdd_traj, stride=stride,
-        include_joint_terms=include_joint_terms, q_ref=q_ref, coulomb_eps=Config.PARAM_ID_COULOMB_EPS,
-    )
-    if include_joint_terms:
-        tau_stack = tau_meas[::stride, :].ravel()
-    else:
-        tau_stack = (tau_meas[::stride, :] - tau_joint[::stride, :]).ravel()
-
-    prior = make_prior_from_link_params(
-        param_names,
+    identified_case = _best_regularized_case(
+        "联合辨识结果（惯性 + 关节项）",
+        backend,
+        q_meas,
+        qd_meas,
+        qdd_traj,
+        tau_meas,
+        trajectory_labels,
+        stride,
+        q_ref,
         true_masses,
         true_coms,
         true_inertias,
-        Config.PARAM_ID_JOINT_PRIORS if include_joint_terms else None,
     )
-    result = solve_least_squares(
-        Y_stack,
-        tau_stack,
-        param_names,
-        prior=prior,
-        inertial_prior_lambda=Config.PARAM_ID_PRIOR_LAMBDA_INERTIAL,
-        joint_prior_lambda=Config.PARAM_ID_PRIOR_LAMBDA_JOINT,
-        rcond=Config.PARAM_ID_RCOND,
-        ridge=Config.PARAM_ID_RIDGE,
-    )
-    masses, coms, inertias = to_link_params(result, prior=prior)
-    cond = compute_condition_number(Y_stack)
-    pred_err = compute_prediction_error(Y_stack, tau_stack, result, param_names)
-    diagnostics = get_last_diagnostics()
-    inertial_Y, _ = build_stacked_regressor(
-        backend, q_meas, qd_meas, qdd_traj, stride=stride, include_joint_terms=False,
-    )
-    inertial_metrics = _scaled_svd_metrics(inertial_Y)
-    final_distal = _distal_observability(Y_stack, include_joint_terms=include_joint_terms)
-    inertial_distal = _distal_observability(inertial_Y, include_joint_terms=False)
 
     # ---- 中文终端输出 ----
     _print_chinese_header()
-    _print_identified_params(masses, coms, inertias)
-    _print_comparison(masses, true_masses, inertias, true_inertias)
-    if include_joint_terms:
-        _print_joint_term_comparison(result)
-    else:
-        print("\n===== 关节摩擦/弹性/偏置辨识对比 =====")
-        print("仿真模式已冻结关节项：从测量力矩中扣除已知先验关节项，仅辨识惯性参数。")
-    print(f"\n惯性子回归条件数: {inertial_metrics['condition']:.1f}, rank={inertial_metrics['rank']}")
-    print(f"联合回归矩阵缩放后条件数: {cond:.1f}")
-    print(
-        f"SVD rank: {diagnostics.get('rank', 0):.0f}/{diagnostics.get('num_params', len(param_names)):.0f}, "
-        f"data-rank: {diagnostics.get('data_rank', 0):.0f}, "
-        f"nullity: {diagnostics.get('nullity', 0):.0f}, "
-        f"保留子空间条件数: {diagnostics.get('retained_condition', float('inf')):.1f}"
-    )
-    print(
-        f"末端可观测性: rank={final_distal['rank']}, "
-        f"condition={final_distal['condition']:.1f}, 相关={final_distal['correlation']:.3f}, "
-        f"残差={final_distal['projection']['ratio']:.3f}/{final_distal['projection']['rank']}"
-    )
-    print(
-        f"惯性末端独立性: rank={inertial_distal['rank']}, "
-        f"condition={inertial_distal['condition']:.1f}, 相关={inertial_distal['correlation']:.3f}, "
-        f"残差={inertial_distal['projection']['ratio']:.3f}/{inertial_distal['projection']['rank']}"
-    )
-    print(f"力矩预测 RMS 误差: {pred_err:.4f} N·m")
-    print(f"先验偏离 RMS: {diagnostics.get('prior_delta_rms', 0.0):.6f}")
-    print(f"惯性先验偏离 RMS: {diagnostics.get('inertial_prior_delta_rms', 0.0):.6f}")
-    print(f"关节项先验偏离 RMS: {diagnostics.get('joint_prior_delta_rms', 0.0):.6f}")
+    _print_identification_case(identified_case, true_masses, true_inertias)
     print(f"\n辨识参数已计算，可用于后续导出/验证。")
     print("=" * 78)
 
@@ -566,9 +1489,13 @@ def main() -> None:
         import rerun as rr
 
         for j in range(7):
-            rr.log(f"param_id/result/mass/J{j+1}", rr.Scalars(float(masses[j])))
-            rr.log(f"param_id/result/Ixx/J{j+1}", rr.Scalars(float(inertias[j][0])))
-            rr.log(f"param_id/result/Iyy/J{j+1}", rr.Scalars(float(inertias[j][1])))
+            rr.log(f"param_id/result/mass/J{j+1}", rr.Scalars(float(identified_case["masses"][j])))
+            rr.log(f"param_id/result/com_x/J{j+1}", rr.Scalars(float(identified_case["coms"][j][0])))
+            rr.log(f"param_id/result/com_y/J{j+1}", rr.Scalars(float(identified_case["coms"][j][1])))
+            rr.log(f"param_id/result/com_z/J{j+1}", rr.Scalars(float(identified_case["coms"][j][2])))
+            rr.log(f"param_id/result/Ixx/J{j+1}", rr.Scalars(float(identified_case["inertias"][j][0])))
+            rr.log(f"param_id/result/Iyy/J{j+1}", rr.Scalars(float(identified_case["inertias"][j][1])))
+            rr.log(f"param_id/result/Izz/J{j+1}", rr.Scalars(float(identified_case["inertias"][j][2])))
 
     backend.close()
     print("\n[辨识] 完成。")

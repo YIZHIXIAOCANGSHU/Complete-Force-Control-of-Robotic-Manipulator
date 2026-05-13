@@ -20,15 +20,41 @@ def _prior_weights(
     param_names: List[str],
     inertial_lambda: float,
     joint_lambda: float,
+    mass_lambda: float | None = None,
+    com_lambda: float | None = None,
+    inertia_lambda: float | None = None,
 ) -> np.ndarray:
+    mass_lambda = inertial_lambda if mass_lambda is None else mass_lambda
+    com_lambda = inertial_lambda if com_lambda is None else com_lambda
+    inertia_lambda = inertial_lambda if inertia_lambda is None else inertia_lambda
     weights = np.empty(len(param_names), dtype=np.float64)
     for i, name in enumerate(param_names):
-        weights[i] = joint_lambda if name.startswith("J") else inertial_lambda
+        if name.startswith("J"):
+            weights[i] = joint_lambda
+        elif name.endswith("_mass"):
+            weights[i] = mass_lambda
+        elif name.endswith(("_mcx", "_mcy", "_mcz")):
+            weights[i] = com_lambda
+        elif name.endswith(("_Ixx", "_Iyy", "_Izz")):
+            weights[i] = inertia_lambda
+        else:
+            weights[i] = inertial_lambda
     return np.maximum(weights, 0.0)
 
 
-def _relative_scale(theta_prior: np.ndarray) -> np.ndarray:
-    return np.maximum(np.abs(theta_prior), 1.0)
+def _natural_scale_floor(name: str) -> float:
+    if name.endswith("_mass"):
+        return 1.0
+    if name.endswith(("_mcx", "_mcy", "_mcz")):
+        return 1e-2
+    if name.endswith(("_Ixx", "_Iyy", "_Izz")):
+        return 1e-3
+    return 1.0
+
+
+def _relative_scale(theta_prior: np.ndarray, param_names: List[str]) -> np.ndarray:
+    floors = np.array([_natural_scale_floor(name) for name in param_names], dtype=np.float64)
+    return np.maximum(np.abs(theta_prior), floors)
 
 
 def solve_least_squares(
@@ -39,6 +65,9 @@ def solve_least_squares(
     rcond: float = 1e-8,
     ridge: float = 1e-8,
     inertial_prior_lambda: float = 1e-3,
+    mass_prior_lambda: float | None = None,
+    com_prior_lambda: float | None = None,
+    inertia_prior_lambda: float | None = None,
     joint_prior_lambda: float = 1e-1,
 ) -> Dict[str, float]:
     """Solve with column scaling, SVD truncation, and grouped prior regularization."""
@@ -59,12 +88,21 @@ def solve_least_squares(
     else:
         data_rank = int(np.count_nonzero(data_singular_values > (float(rcond) * data_singular_values[0])))
 
-    prior_weights = _prior_weights(param_names, inertial_prior_lambda, joint_prior_lambda)
+    prior_weights = _prior_weights(
+        param_names,
+        inertial_prior_lambda,
+        joint_prior_lambda,
+        mass_lambda=mass_prior_lambda,
+        com_lambda=com_prior_lambda,
+        inertia_lambda=inertia_prior_lambda,
+    )
     if np.any(prior_weights > 0.0):
-        rel = _relative_scale(theta_prior)
+        rel = _relative_scale(theta_prior, param_names)
         reg_diag = np.sqrt(prior_weights) / (rel * col_scale)
         active = reg_diag > 0.0
-        reg_rows = np.diag(reg_diag[active])
+        active_cols = np.flatnonzero(active)
+        reg_rows = np.zeros((active_cols.size, len(param_names)), dtype=np.float64)
+        reg_rows[np.arange(active_cols.size), active_cols] = reg_diag[active]
         A_aug = np.vstack([Ys, reg_rows])
         b_aug = np.concatenate([tau, reg_rows @ prior_scaled])
     else:
@@ -97,7 +135,10 @@ def solve_least_squares(
 
     residual = tau - Y @ theta
     prior_delta = theta - theta_prior
-    inertial_mask = np.array([not name.startswith("J") for name in param_names], dtype=bool)
+    mass_mask = np.array([name.endswith("_mass") for name in param_names], dtype=bool)
+    com_mask = np.array([name.endswith(("_mcx", "_mcy", "_mcz")) for name in param_names], dtype=bool)
+    inertia_mask = np.array([name.endswith(("_Ixx", "_Iyy", "_Izz")) for name in param_names], dtype=bool)
+    inertial_mask = mass_mask | com_mask | inertia_mask
     joint_mask = ~inertial_mask
     nullspace_residual = 0.0
     if Vt.shape[0] < len(param_names):
@@ -116,6 +157,9 @@ def solve_least_squares(
         "residual_rms": float(np.sqrt(np.mean(residual**2))) if residual.size else 0.0,
         "prior_delta_rms": float(np.sqrt(np.mean(prior_delta**2))) if prior_delta.size else 0.0,
         "inertial_prior_delta_rms": float(np.sqrt(np.mean(prior_delta[inertial_mask] ** 2))) if np.any(inertial_mask) else 0.0,
+        "mass_prior_delta_rms": float(np.sqrt(np.mean(prior_delta[mass_mask] ** 2))) if np.any(mass_mask) else 0.0,
+        "com_prior_delta_rms": float(np.sqrt(np.mean(prior_delta[com_mask] ** 2))) if np.any(com_mask) else 0.0,
+        "inertia_prior_delta_rms": float(np.sqrt(np.mean(prior_delta[inertia_mask] ** 2))) if np.any(inertia_mask) else 0.0,
         "joint_prior_delta_rms": float(np.sqrt(np.mean(prior_delta[joint_mask] ** 2))) if np.any(joint_mask) else 0.0,
         "nullspace_prior_delta_norm": nullspace_residual,
     }
@@ -130,6 +174,9 @@ def solve_weighted_least_squares(
     weights: np.ndarray = None,
     prior: Dict[str, float] | None = None,
     inertial_prior_lambda: float = 1e-3,
+    mass_prior_lambda: float | None = None,
+    com_prior_lambda: float | None = None,
+    inertia_prior_lambda: float | None = None,
     joint_prior_lambda: float = 1e-1,
 ) -> Dict[str, float]:
     Y = np.asarray(Y_stack, dtype=np.float64)
@@ -141,6 +188,9 @@ def solve_weighted_least_squares(
             param_names,
             prior=prior,
             inertial_prior_lambda=inertial_prior_lambda,
+            mass_prior_lambda=mass_prior_lambda,
+            com_prior_lambda=com_prior_lambda,
+            inertia_prior_lambda=inertia_prior_lambda,
             joint_prior_lambda=joint_prior_lambda,
         )
 
@@ -151,6 +201,9 @@ def solve_weighted_least_squares(
         param_names,
         prior=prior,
         inertial_prior_lambda=inertial_prior_lambda,
+        mass_prior_lambda=mass_prior_lambda,
+        com_prior_lambda=com_prior_lambda,
+        inertia_prior_lambda=inertia_prior_lambda,
         joint_prior_lambda=joint_prior_lambda,
     )
 
