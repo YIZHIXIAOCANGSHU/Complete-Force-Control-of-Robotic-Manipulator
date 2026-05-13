@@ -10,6 +10,9 @@ from __future__ import annotations
 import os
 import sys
 import time
+from datetime import datetime
+from html import escape
+from pathlib import Path
 
 import numpy as np
 
@@ -144,17 +147,67 @@ def _setup_rerun() -> bool:
         import rerun.blueprint as rrb
 
         rr.init("AM-D02 参数辨识 (Sim)", spawn=True)
-        for name in ["excitation_q_rad", "excitation_qd_rad_s", "tau_nm"]:
-            rr.log(f"param_id/{name}", rr.SeriesLines(
-                colors=[[230, 100, 50], [80, 200, 220]],
-                names=["J1", "J2"], widths=[2, 2],
-            ), static=True)
+        colors = [
+            [230, 90, 70],
+            [80, 170, 240],
+            [70, 190, 120],
+            [245, 180, 65],
+            [170, 110, 230],
+            [70, 200, 190],
+            [220, 95, 150],
+        ]
+        for i in range(7):
+            joint = f"J{i + 1}"
+            rr.log(
+                f"param_id/excitation_q_rad/{joint}",
+                rr.SeriesLines(colors=[colors[i]], names=[f"{joint} position"], widths=[2]),
+                static=True,
+            )
+            rr.log(
+                f"param_id/excitation_qd_rad_s/{joint}",
+                rr.SeriesLines(colors=[colors[i]], names=[f"{joint} velocity"], widths=[2]),
+                static=True,
+            )
+            rr.log(
+                f"param_id/tau_nm/{joint}",
+                rr.SeriesLines(colors=[colors[i]], names=[f"{joint} torque"], widths=[2]),
+                static=True,
+            )
+        overview = rrb.Vertical(
+            rrb.TimeSeriesView(name="All Joint Positions q (rad)", origin="/param_id/excitation_q_rad"),
+            rrb.TimeSeriesView(name="All Joint Velocities qd (rad/s)", origin="/param_id/excitation_qd_rad_s"),
+            rrb.TimeSeriesView(name="All Joint Torques tau (N*m)", origin="/param_id/tau_nm"),
+            name="Joint Overview",
+        )
+        detail_rows = []
+        for start in range(1, 8, 2):
+            children = []
+            for joint in range(start, min(start + 2, 8)):
+                children.append(
+                    rrb.Vertical(
+                        rrb.TimeSeriesView(
+                            name=f"J{joint} Position (rad)",
+                            origin=f"/param_id/excitation_q_rad/J{joint}",
+                        ),
+                        rrb.TimeSeriesView(
+                            name=f"J{joint} Velocity (rad/s)",
+                            origin=f"/param_id/excitation_qd_rad_s/J{joint}",
+                        ),
+                        name=f"J{joint}",
+                    )
+                )
+            detail_rows.append(rrb.Horizontal(*children, name=f"J{start}-J{min(start + 1, 7)}"))
+        details = rrb.Vertical(*detail_rows, name="Joint Details")
+        results = rrb.Vertical(
+            rrb.TimeSeriesView(name="Identified Mass", origin="/param_id/result/mass"),
+            rrb.TimeSeriesView(name="Identified COM X", origin="/param_id/result/com_x"),
+            rrb.TimeSeriesView(name="Identified COM Y", origin="/param_id/result/com_y"),
+            rrb.TimeSeriesView(name="Identified COM Z", origin="/param_id/result/com_z"),
+            rrb.TimeSeriesView(name="Identified Inertia Diagonal", origin="/param_id/result"),
+            name="Identification Results",
+        )
         blueprint = rrb.Blueprint(
-            rrb.Vertical(
-                rrb.TimeSeriesView(name="关节位置 q", origin="/param_id/excitation_q_rad"),
-                rrb.TimeSeriesView(name="关节速度 qd", origin="/param_id/excitation_qd_rad_s"),
-                rrb.TimeSeriesView(name="力矩对比", origin="/param_id/tau_nm"),
-            ),
+            rrb.Tabs(overview, details, results, name="Param ID"),
             collapse_panels=True,
         )
         rr.send_blueprint(blueprint)
@@ -173,6 +226,405 @@ def _log_rerun_step(rerun_ok: bool, t: float, q, qd, tau):
         rr.log("param_id/excitation_q_rad/J%d" % (i + 1), rr.Scalars(float(q[i])))
         rr.log("param_id/excitation_qd_rad_s/J%d" % (i + 1), rr.Scalars(float(qd[i])))
         rr.log("param_id/tau_nm/J%d" % (i + 1), rr.Scalars(float(tau[i])))
+
+
+def _fmt(value, digits=4):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if np.isnan(number):
+        return "nan"
+    if np.isposinf(number):
+        return "inf"
+    if np.isneginf(number):
+        return "-inf"
+    return f"{number:.{digits}f}"
+
+
+def _as_joint_matrix(values):
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] < 7:
+        return np.zeros((0, 7), dtype=np.float64)
+    return arr[:, :7]
+
+
+def _records_to_html_table(records, columns):
+    if not records:
+        return '<p class="empty">无数据</p>'
+    rows = [
+        {label: str(record.get(key, "")) for key, label in columns}
+        for record in records
+    ]
+    try:
+        import pandas as pd
+
+        return pd.DataFrame(rows).to_html(
+            index=False,
+            border=0,
+            escape=True,
+            classes=["data-table"],
+        )
+    except Exception:
+        head = "".join(f"<th>{escape(label)}</th>" for _key, label in columns)
+        body_rows = []
+        for row in rows:
+            cells = "".join(f"<td>{escape(row[label])}</td>" for _key, label in columns)
+            body_rows.append(f"<tr>{cells}</tr>")
+        return f'<table class="data-table"><thead><tr>{head}</tr></thead><tbody>{"".join(body_rows)}</tbody></table>'
+
+
+def _series_stats_records(q_meas, qd_meas, tau_meas):
+    records = []
+    for series, unit, values in (
+        ("q", "rad", _as_joint_matrix(q_meas)),
+        ("qd", "rad/s", _as_joint_matrix(qd_meas)),
+        ("tau", "N*m", _as_joint_matrix(tau_meas)),
+    ):
+        for joint in range(7):
+            col = values[:, joint] if values.size else np.array([], dtype=np.float64)
+            if col.size:
+                minimum = float(np.min(col))
+                maximum = float(np.max(col))
+                mean = float(np.mean(col))
+                std = float(np.std(col))
+            else:
+                minimum = maximum = mean = std = float("nan")
+            records.append(
+                {
+                    "series": series,
+                    "unit": unit,
+                    "joint": f"J{joint + 1}",
+                    "min": _fmt(minimum),
+                    "max": _fmt(maximum),
+                    "span": _fmt(maximum - minimum),
+                    "mean": _fmt(mean),
+                    "std": _fmt(std),
+                }
+            )
+    return records
+
+
+def _parameter_records(case):
+    result = case.get("result", {})
+    masses = np.asarray(case.get("masses", np.zeros(7)), dtype=np.float64)
+    coms = np.asarray(case.get("coms", np.zeros((7, 3))), dtype=np.float64)
+    inertias = np.asarray(case.get("inertias", np.zeros((7, 3))), dtype=np.float64)
+    records = []
+    for joint in range(7):
+        records.append(
+            {
+                "joint": f"J{joint + 1}",
+                "mass": _fmt(masses[joint]),
+                "com_x": _fmt(coms[joint][0]),
+                "com_y": _fmt(coms[joint][1]),
+                "com_z": _fmt(coms[joint][2]),
+                "ixx": _fmt(inertias[joint][0], 6),
+                "iyy": _fmt(inertias[joint][1], 6),
+                "izz": _fmt(inertias[joint][2], 6),
+                "fc": _fmt(result.get(f"J{joint + 1}_fc", 0.0), 3),
+                "k": _fmt(result.get(f"J{joint + 1}_k", 0.0), 3),
+                "fv": _fmt(result.get(f"J{joint + 1}_fv", 0.0), 3),
+                "fo": _fmt(result.get(f"J{joint + 1}_fo", 0.0), 3),
+            }
+        )
+    return records
+
+
+def _comparison_records(case, true_masses, true_coms, true_inertias):
+    masses = np.asarray(case.get("masses", np.zeros(7)), dtype=np.float64)
+    true_masses = np.asarray(true_masses, dtype=np.float64)
+    com_summary = case.get("com_summary") or _com_error_summary(case.get("coms", np.zeros((7, 3))), true_coms)
+    inertia_summary = case.get("inertia_summary") or _inertia_error_summary(case.get("inertias", np.zeros((7, 3))), true_inertias)
+    mass_summary = case.get("mass_summary") or _mass_error_summary(masses, true_masses)
+    inertia_errors = inertia_summary.get("relative_errors", [[0.0, 0.0, 0.0] for _ in range(7)])
+    records = []
+    for joint in range(7):
+        records.append(
+            {
+                "joint": f"J{joint + 1}",
+                "mass": _fmt(masses[joint]),
+                "true_mass": _fmt(true_masses[joint] if joint < len(true_masses) else 0.0),
+                "mass_error": _fmt(mass_summary["errors"][joint], 2),
+                "com_error": _fmt(com_summary["distance_errors"][joint], 5),
+                "ixx_error": _fmt(inertia_errors[joint][0], 2),
+                "iyy_error": _fmt(inertia_errors[joint][1], 2),
+                "izz_error": _fmt(inertia_errors[joint][2], 2),
+            }
+        )
+    return records
+
+
+def _diagnostic_records(case, t_arr, rerun_ok, trajectory_metadata, generated_at):
+    t_arr = np.asarray(t_arr, dtype=np.float64)
+    diagnostics = case.get("diagnostics", {})
+    selection = case.get("selection", {})
+    segment_rms = case.get("segment_rms", {})
+    rows = [
+        ("生成时间", generated_at),
+        ("步数", len(t_arr)),
+        ("dt (s)", _fmt(Config.DT, 6)),
+        ("总时长 (s)", _fmt(t_arr[-1] if t_arr.size else 0.0, 3)),
+        ("Rerun 启用", "是" if rerun_ok else "否"),
+        ("轨迹 profile", trajectory_metadata.get("profile", "")),
+        ("轨迹 seed", trajectory_metadata.get("seed", "")),
+        ("回归 stride", trajectory_metadata.get("stride", "")),
+        ("SVD rank", f"{diagnostics.get('rank', 0)}/{diagnostics.get('num_params', len(case.get('param_names', [])))}"),
+        ("data rank", diagnostics.get("data_rank", "")),
+        ("retained condition", _fmt(diagnostics.get("retained_condition", float("nan")), 3)),
+        ("scaled condition", _fmt(case.get("condition", float("nan")), 3)),
+        ("训练/验证 RMS", f"{_fmt(case.get('prediction_error', float('nan')))} / {_fmt(case.get('validation_rms', float('nan')))} N*m"),
+        ("验证/训练比值", _fmt(case.get("validation_ratio", float("nan")), 3)),
+        ("λ_mass", selection.get("mass_prior_lambda", "")),
+        ("λ_com", selection.get("com_prior_lambda", "")),
+        ("λ_inertia", selection.get("inertia_prior_lambda", "")),
+        ("λ_joint", selection.get("joint_prior_lambda", "")),
+        ("rcond", selection.get("rcond", "")),
+        ("先验偏离 RMS", _fmt(diagnostics.get("prior_delta_rms", 0.0), 6)),
+        ("惯性先验偏离 RMS", _fmt(diagnostics.get("inertial_prior_delta_rms", 0.0), 6)),
+        ("质量先验偏离 RMS", _fmt(diagnostics.get("mass_prior_delta_rms", 0.0), 6)),
+        ("COM先验偏离 RMS", _fmt(diagnostics.get("com_prior_delta_rms", 0.0), 6)),
+        ("惯量先验偏离 RMS", _fmt(diagnostics.get("inertia_prior_delta_rms", 0.0), 6)),
+        ("关节项先验偏离 RMS", _fmt(diagnostics.get("joint_prior_delta_rms", 0.0), 6)),
+    ]
+    for label in ("dynamic", "j6j7", "j7", "gravity", "com_gravity", "inertia"):
+        rows.append((f"分段 RMS {label}", _fmt(segment_rms.get(label, float("nan")))))
+    return [{"metric": metric, "value": value} for metric, value in rows]
+
+
+def _make_plotly_charts(t_arr, q_meas, qd_meas, tau_meas):
+    try:
+        import plotly.graph_objects as go
+    except Exception:
+        return '<div class="notice">plotly 未安装，已生成表格型 HTML 报告。</div>', ["plotly 未安装，图表已降级为表格。"]
+
+    t = np.asarray(t_arr, dtype=np.float64)
+    if t.size == 0:
+        t = np.arange(_as_joint_matrix(q_meas).shape[0], dtype=np.float64) * Config.DT
+    chart_parts = []
+    for idx, (title, unit, values) in enumerate(
+        (
+            ("关节位置 q", "rad", _as_joint_matrix(q_meas)),
+            ("关节速度 qd", "rad/s", _as_joint_matrix(qd_meas)),
+            ("测得力矩 tau", "N*m", _as_joint_matrix(tau_meas)),
+        )
+    ):
+        fig = go.Figure()
+        x = t[: values.shape[0]] if values.size else t
+        for joint in range(7):
+            if values.size:
+                fig.add_trace(go.Scatter(x=x, y=values[:, joint], mode="lines", name=f"J{joint + 1}"))
+        fig.update_layout(
+            title=title,
+            height=320,
+            margin={"l": 52, "r": 20, "t": 50, "b": 42},
+            template="plotly_white",
+            xaxis_title="time (s)",
+            yaxis_title=unit,
+            legend={"orientation": "h", "y": -0.25},
+        )
+        chart_parts.append(fig.to_html(full_html=False, include_plotlyjs=True if idx == 0 else False))
+    return "\n".join(chart_parts), []
+
+
+def _report_styles():
+    return """
+body { margin: 0; font-family: Arial, "Noto Sans CJK SC", sans-serif; color: #202124; background: #f5f7fa; }
+main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 48px; }
+header { margin-bottom: 24px; }
+h1 { margin: 0 0 8px; font-size: 30px; font-weight: 700; }
+h2 { margin: 28px 0 12px; font-size: 20px; }
+.subtitle { margin: 0; color: #5f6368; }
+.section { background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; padding: 18px; margin: 16px 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th, .data-table td { padding: 8px 9px; border-bottom: 1px solid #e8eaed; text-align: right; white-space: nowrap; }
+.data-table th:first-child, .data-table td:first-child { text-align: left; }
+.data-table th { background: #eef2f6; color: #344054; font-weight: 700; }
+.notice { padding: 12px 14px; border: 1px solid #d7b46a; background: #fff6db; border-radius: 6px; color: #634500; }
+.warnings { color: #7a3500; }
+.table-wrap { overflow-x: auto; }
+.empty { color: #6b7280; }
+"""
+
+
+_PARAM_ID_HTML_TEMPLATE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+  <style>{{ styles }}</style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>{{ title }}</h1>
+      <p class="subtitle">{{ subtitle }}</p>
+    </header>
+    {% if warnings %}
+    <section class="section warnings">
+      <h2>Warnings</h2>
+      <ul>
+      {% for warning in warnings %}
+        <li>{{ warning }}</li>
+      {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+    <section class="section">
+      <h2>轨迹图</h2>
+      {{ chart_html | safe }}
+    </section>
+    <section class="section">
+      <h2>诊断摘要</h2>
+      <div class="table-wrap">{{ diagnostics_table | safe }}</div>
+    </section>
+    <section class="section">
+      <h2>参数表</h2>
+      <div class="table-wrap">{{ parameter_table | safe }}</div>
+    </section>
+    <section class="section">
+      <h2>真值对比</h2>
+      <div class="table-wrap">{{ comparison_table | safe }}</div>
+    </section>
+    <section class="section">
+      <h2>激励统计</h2>
+      <div class="table-wrap">{{ excitation_table | safe }}</div>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+def _render_html_report(context):
+    try:
+        from jinja2 import Environment, BaseLoader
+
+        env = Environment(loader=BaseLoader(), autoescape=True)
+        return env.from_string(_PARAM_ID_HTML_TEMPLATE).render(**context)
+    except Exception:
+        warnings_html = "".join(f"<li>{escape(str(warning))}</li>" for warning in context["warnings"])
+        warning_section = ""
+        if warnings_html:
+            warning_section = f'<section class="section warnings"><h2>Warnings</h2><ul>{warnings_html}</ul></section>'
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(context["title"])}</title>
+  <style>{context["styles"]}</style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>{escape(context["title"])}</h1>
+      <p class="subtitle">{escape(context["subtitle"])}</p>
+    </header>
+    {warning_section}
+    <section class="section"><h2>轨迹图</h2>{context["chart_html"]}</section>
+    <section class="section"><h2>诊断摘要</h2><div class="table-wrap">{context["diagnostics_table"]}</div></section>
+    <section class="section"><h2>参数表</h2><div class="table-wrap">{context["parameter_table"]}</div></section>
+    <section class="section"><h2>真值对比</h2><div class="table-wrap">{context["comparison_table"]}</div></section>
+    <section class="section"><h2>激励统计</h2><div class="table-wrap">{context["excitation_table"]}</div></section>
+  </main>
+</body>
+</html>
+"""
+
+
+def _write_html_report(
+    case,
+    true_masses,
+    true_coms,
+    true_inertias,
+    t_arr,
+    q_meas,
+    qd_meas,
+    tau_meas,
+    rerun_ok,
+    trajectory_metadata=None,
+    warnings=None,
+):
+    if not getattr(Config, "PARAM_ID_ENABLE_HTML_REPORT", True):
+        return None
+    trajectory_metadata = dict(trajectory_metadata or {})
+    warnings = list(warnings or [])
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        chart_html, chart_warnings = _make_plotly_charts(t_arr, q_meas, qd_meas, tau_meas)
+        warnings.extend(chart_warnings)
+        context = {
+            "title": "参数辨识报告（仿真模式）",
+            "subtitle": f"{case.get('name', '联合辨识结果')} · {generated_at}",
+            "styles": _report_styles(),
+            "warnings": warnings,
+            "chart_html": chart_html,
+            "diagnostics_table": _records_to_html_table(
+                _diagnostic_records(case, t_arr, rerun_ok, trajectory_metadata, generated_at),
+                [("metric", "指标"), ("value", "值")],
+            ),
+            "parameter_table": _records_to_html_table(
+                _parameter_records(case),
+                [
+                    ("joint", "关节"),
+                    ("mass", "质量 kg"),
+                    ("com_x", "COM x m"),
+                    ("com_y", "COM y m"),
+                    ("com_z", "COM z m"),
+                    ("ixx", "Ixx kg*m^2"),
+                    ("iyy", "Iyy kg*m^2"),
+                    ("izz", "Izz kg*m^2"),
+                    ("fc", "fc"),
+                    ("k", "k"),
+                    ("fv", "fv"),
+                    ("fo", "fo"),
+                ],
+            ),
+            "comparison_table": _records_to_html_table(
+                _comparison_records(case, true_masses, true_coms, true_inertias),
+                [
+                    ("joint", "关节"),
+                    ("mass", "辨识质量"),
+                    ("true_mass", "真值质量"),
+                    ("mass_error", "质量误差 %"),
+                    ("com_error", "COM距离误差 m"),
+                    ("ixx_error", "Ixx误差 %"),
+                    ("iyy_error", "Iyy误差 %"),
+                    ("izz_error", "Izz误差 %"),
+                ],
+            ),
+            "excitation_table": _records_to_html_table(
+                _series_stats_records(q_meas, qd_meas, tau_meas),
+                [
+                    ("series", "序列"),
+                    ("joint", "关节"),
+                    ("unit", "单位"),
+                    ("min", "min"),
+                    ("max", "max"),
+                    ("span", "span"),
+                    ("mean", "mean"),
+                    ("std", "std"),
+                ],
+            ),
+        }
+        report_dir = Path(Config.RESULTS_DIR) / "param_id" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / "report.html"
+        report_path.write_text(_render_html_report(context), encoding="utf-8")
+        if getattr(Config, "PARAM_ID_HTML_OPEN_BROWSER", False):
+            try:
+                import webbrowser
+
+                webbrowser.open(report_path.resolve().as_uri())
+            except Exception as exc:
+                print(f"[辨识] HTML 报告已生成，但无法自动打开浏览器: {exc}")
+        return str(report_path)
+    except Exception as exc:
+        print(f"[辨识] HTML 报告生成失败: {exc}")
+        return None
 
 
 def _trajectory_seeds() -> list[int]:
@@ -880,6 +1332,12 @@ def _select_excitation_trajectory(backend, env, q0, limits):
         return (
             best["t"], best["q"], best["qd"], best["qdd"], best["max_ee_speed"],
             best["speed_scale"], best["overall"], best["distal"], best["labels"],
+            {
+                "profile": best["profile"],
+                "description": best["description"],
+                "seed": best["seed"],
+                "score": best["score"],
+            },
         )
 
     best = ranked_candidates[0] if ranked_candidates else None
@@ -910,6 +1368,12 @@ def _select_excitation_trajectory(backend, env, q0, limits):
     return (
         best["t"], best["q"], best["qd"], best["qdd"], best["max_ee_speed"],
         best["speed_scale"], best["overall"], best["distal"], best["labels"],
+        {
+            "profile": best["profile"],
+            "description": best["description"],
+            "seed": best["seed"],
+            "score": best["score"],
+        },
     )
 
 
@@ -1417,6 +1881,7 @@ def main() -> None:
         excitation_overall,
         excitation_distal,
         trajectory_labels,
+        trajectory_metadata,
     ) = _select_excitation_trajectory(
         backend,
         env,
@@ -1455,6 +1920,14 @@ def main() -> None:
 
             if viewer is not None and step % 5 == 0:
                 viewer.sync()
+            if step % Config.RERUN_LOG_STRIDE == 0:
+                _log_rerun_step(
+                    rerun_ok,
+                    t_arr[step],
+                    q_meas[step],
+                    qd_meas[step],
+                    tau_meas[step],
+                )
             _sync_realtime(t0, t_arr[step])
 
         elapsed = time.perf_counter() - t0
@@ -1481,6 +1954,27 @@ def main() -> None:
     # ---- 中文终端输出 ----
     _print_chinese_header()
     _print_identification_case(identified_case, true_masses, true_inertias)
+    report_metadata = {
+        **trajectory_metadata,
+        "stride": stride,
+        "rerun_log_stride": Config.RERUN_LOG_STRIDE,
+        "max_ee_speed": max_ee_speed,
+        "speed_scale": speed_scale,
+    }
+    report_path = _write_html_report(
+        identified_case,
+        true_masses,
+        true_coms,
+        true_inertias,
+        t_arr,
+        q_meas,
+        qd_meas,
+        tau_meas,
+        rerun_ok,
+        report_metadata,
+    )
+    if report_path:
+        print(f"HTML 报告已保存: {report_path}")
     print(f"\n辨识参数已计算，可用于后续导出/验证。")
     print("=" * 78)
 

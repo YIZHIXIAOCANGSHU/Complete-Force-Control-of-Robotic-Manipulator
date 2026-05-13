@@ -1,5 +1,6 @@
 import inspect
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -265,3 +266,212 @@ def test_sim_main_reports_single_joint_inclusive_result():
     assert "仅惯性辨识结果" not in source
     assert "_print_case_summary" not in source
     assert "inertial_case" not in source
+
+
+class _DummyRerun(types.ModuleType):
+    def __init__(self):
+        super().__init__("rerun")
+        self.__path__ = []
+        self.logs = []
+        self.blueprint = None
+        self.time_calls = []
+
+    def init(self, *_args, **_kwargs):
+        return None
+
+    def set_time_seconds(self, timeline, value):
+        self.time_calls.append((timeline, value))
+
+    def log(self, path, payload, static=False):
+        self.logs.append((path, payload, static))
+
+    def send_blueprint(self, blueprint):
+        self.blueprint = blueprint
+
+    def Scalars(self, value):
+        return value
+
+    def SeriesLines(self, **kwargs):
+        return {"kind": "SeriesLines", **kwargs}
+
+
+class _DummyBlueprint:
+    @staticmethod
+    def TimeSeriesView(name, origin):
+        return {"kind": "TimeSeriesView", "name": name, "origin": origin}
+
+    @staticmethod
+    def Horizontal(*children, name=None):
+        return {"kind": "Horizontal", "name": name, "children": list(children)}
+
+    @staticmethod
+    def Vertical(*children, name=None):
+        return {"kind": "Vertical", "name": name, "children": list(children)}
+
+    @staticmethod
+    def Tabs(*children, name=None):
+        return {"kind": "Tabs", "name": name, "children": list(children)}
+
+    @staticmethod
+    def Blueprint(root, collapse_panels=False):
+        return {"kind": "Blueprint", "root": root, "collapse_panels": collapse_panels}
+
+
+def _iter_blueprint_nodes(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _iter_blueprint_nodes(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_blueprint_nodes(item)
+
+
+def _install_dummy_rerun(monkeypatch):
+    dummy_rr = _DummyRerun()
+    blueprint_module = types.ModuleType("rerun.blueprint")
+    for name in ("TimeSeriesView", "Horizontal", "Vertical", "Tabs", "Blueprint"):
+        setattr(blueprint_module, name, getattr(_DummyBlueprint, name))
+    dummy_rr.blueprint = blueprint_module
+    monkeypatch.setitem(sys.modules, "rerun", dummy_rr)
+    monkeypatch.setitem(sys.modules, "rerun.blueprint", blueprint_module)
+    return dummy_rr
+
+
+def test_param_id_rerun_step_logs_q_qd_tau_for_all_joints(monkeypatch):
+    dummy_rr = _install_dummy_rerun(monkeypatch)
+    q = np.arange(7, dtype=np.float64) + 0.1
+    qd = np.arange(7, dtype=np.float64) + 0.2
+    tau = np.arange(7, dtype=np.float64) + 0.3
+
+    sim_main._log_rerun_step(True, 1.25, q, qd, tau)
+
+    logged = {path: payload for path, payload, _static in dummy_rr.logs}
+    assert dummy_rr.time_calls == [("time", 1.25)]
+    for joint in range(1, 8):
+        assert logged[f"param_id/excitation_q_rad/J{joint}"] == q[joint - 1]
+        assert logged[f"param_id/excitation_qd_rad_s/J{joint}"] == qd[joint - 1]
+        assert logged[f"param_id/tau_nm/J{joint}"] == tau[joint - 1]
+
+
+def test_param_id_rerun_blueprint_contains_joint_detail_panels(monkeypatch):
+    dummy_rr = _install_dummy_rerun(monkeypatch)
+    monkeypatch.setattr(sim_main.Config, "ENABLE_RERUN", True)
+
+    assert sim_main._setup_rerun()
+
+    names = {
+        node["name"]
+        for node in _iter_blueprint_nodes(dummy_rr.blueprint)
+        if node.get("name")
+    }
+    origins = {
+        node["origin"]
+        for node in _iter_blueprint_nodes(dummy_rr.blueprint)
+        if node.get("kind") == "TimeSeriesView"
+    }
+    static_line_names = {
+        path: payload["names"]
+        for path, payload, static in dummy_rr.logs
+        if static and payload.get("kind") == "SeriesLines"
+    }
+
+    assert "Joint Details" in names
+    assert "J1 Position (rad)" in names
+    assert "J7 Velocity (rad/s)" in names
+    assert "/param_id/excitation_q_rad/J1" in origins
+    assert "/param_id/excitation_qd_rad_s/J7" in origins
+    assert static_line_names["param_id/excitation_q_rad/J1"] == ["J1 position"]
+    assert static_line_names["param_id/excitation_qd_rad_s/J7"] == ["J7 velocity"]
+    assert static_line_names["param_id/tau_nm/J7"] == ["J7 torque"]
+
+
+def _minimal_identified_case():
+    masses = np.arange(1, 8, dtype=np.float64).tolist()
+    coms = (np.arange(21, dtype=np.float64).reshape(7, 3) / 1000.0).tolist()
+    inertias = (np.ones((7, 3), dtype=np.float64) * 0.01).tolist()
+    return {
+        "name": "联合辨识结果（惯性 + 关节项）",
+        "masses": masses,
+        "coms": coms,
+        "inertias": inertias,
+        "result": {
+            f"J{joint}_{term}": float(joint)
+            for joint in range(1, 8)
+            for term in ("fc", "k", "fv", "fo")
+        },
+        "diagnostics": {
+            "rank": 69,
+            "data_rank": 70,
+            "retained_condition": 12.5,
+            "prior_delta_rms": 0.01,
+        },
+        "condition": 14.0,
+        "prediction_error": 0.123,
+        "validation_rms": 0.234,
+        "validation_ratio": 1.902,
+        "segment_rms": {"dynamic": 0.1, "j7": 0.2},
+        "selection": {
+            "mass_prior_lambda": 32.0,
+            "com_prior_lambda": 1.2,
+            "inertia_prior_lambda": 2.4,
+            "joint_prior_lambda": 0.035,
+            "rcond": 1e-8,
+        },
+        "mass_summary": sim_main._mass_error_summary(masses, np.ones(7)),
+        "com_summary": sim_main._com_error_summary(coms, np.zeros((7, 3))),
+        "inertia_summary": sim_main._inertia_error_summary(inertias, np.ones((7, 3)) * 0.01),
+    }
+
+
+def test_param_id_html_report_writes_core_tables(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim_main.Config, "RESULTS_DIR", str(tmp_path))
+    q = np.zeros((3, 7), dtype=np.float64)
+    qd = np.ones((3, 7), dtype=np.float64)
+    tau = np.ones((3, 7), dtype=np.float64) * 2.0
+
+    report_path = sim_main._write_html_report(
+        _minimal_identified_case(),
+        true_masses=np.ones(7),
+        true_coms=np.zeros((7, 3)),
+        true_inertias=np.ones((7, 3)) * 0.01,
+        t_arr=np.array([0.0, 0.1, 0.2]),
+        q_meas=q,
+        qd_meas=qd,
+        tau_meas=tau,
+        rerun_ok=True,
+        trajectory_metadata={"profile": "T0", "seed": 43},
+    )
+
+    assert report_path is not None
+    html = Path(report_path).read_text(encoding="utf-8")
+    assert "参数辨识报告（仿真模式）" in html
+    assert "J1" in html and "J7" in html
+    assert "训练/验证 RMS" in html
+    assert "质量" in html
+    assert "COM" in html
+    assert "惯量" in html
+
+
+def test_param_id_html_report_degrades_without_plotly(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim_main.Config, "RESULTS_DIR", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "plotly", None)
+    monkeypatch.setitem(sys.modules, "plotly.graph_objects", None)
+
+    report_path = sim_main._write_html_report(
+        _minimal_identified_case(),
+        true_masses=np.ones(7),
+        true_coms=np.zeros((7, 3)),
+        true_inertias=np.ones((7, 3)) * 0.01,
+        t_arr=np.array([0.0, 0.1]),
+        q_meas=np.zeros((2, 7)),
+        qd_meas=np.zeros((2, 7)),
+        tau_meas=np.zeros((2, 7)),
+        rerun_ok=False,
+        trajectory_metadata={},
+    )
+
+    assert report_path is not None
+    html = Path(report_path).read_text(encoding="utf-8")
+    assert "plotly 未安装" in html
+    assert "参数表" in html

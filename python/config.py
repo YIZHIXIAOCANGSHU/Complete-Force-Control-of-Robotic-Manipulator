@@ -115,6 +115,8 @@ class Config:
     PARAM_ID_DISTAL_WEIGHT = max(0.0, _env_float("AM_D02_PARAM_ID_DISTAL_WEIGHT", 2.0))
     PARAM_ID_DISTAL_LINK_START = min(7, max(1, _env_int("AM_D02_PARAM_ID_DISTAL_LINK_START", 5)))
     PARAM_ID_MAX_SAMPLES = max(50, _env_int("AM_D02_PARAM_ID_MAX_SAMPLES", 700))
+    PARAM_ID_ENABLE_HTML_REPORT = _env_bool("AM_D02_PARAM_ID_HTML", True)
+    PARAM_ID_HTML_OPEN_BROWSER = _env_bool("AM_D02_PARAM_ID_HTML_OPEN_BROWSER", False)
 
     # === 目标位置 (Target Posture) ===
     # 用于重力补偿与 PD 控制的目标位置 (rad)
