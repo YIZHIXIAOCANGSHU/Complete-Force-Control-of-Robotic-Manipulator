@@ -10,7 +10,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 import param_id.sim_main as sim_main
-from param_id.identification import _prior_weights, _relative_scale, get_last_diagnostics, solve_least_squares
+from param_id.identification import (
+    _link_excitation_quality,
+    _prior_weights,
+    _relative_scale,
+    get_last_diagnostics,
+    solve_least_squares,
+)
 from param_id.regressor import build_joint_term_regressor, build_stacked_regressor, joint_term_param_names
 from param_id.sim_main import (
     _case_selection_key,
@@ -83,6 +89,31 @@ def test_prior_weights_split_inertial_parameter_groups():
     )
 
     assert np.allclose(weights, [0.04, 0.3, 0.3, 0.3, 0.6, 0.6, 0.6, 0.05])
+
+
+def test_link_excitation_quality_scales_weak_link_priors():
+    names = [
+        *(f"L0_{suffix}" for suffix in ("mass", "mcx", "mcy", "mcz", "Ixx", "Iyy", "Izz")),
+        *(f"L1_{suffix}" for suffix in ("mass", "mcx", "mcy", "mcz", "Ixx", "Iyy", "Izz")),
+    ]
+    strong = np.eye(7, dtype=np.float64)
+    weak_base = np.linspace(0.2, 1.0, 7, dtype=np.float64)[:, None]
+    weak = np.repeat(weak_base, 7, axis=1)
+    y = np.vstack([np.hstack([strong, weak]), np.hstack([strong * 0.5, weak * 0.5])])
+
+    qualities = _link_excitation_quality(y, names)
+    weights = _prior_weights(
+        names,
+        inertial_lambda=1.0,
+        joint_lambda=0.0,
+        mass_lambda=2.0,
+        com_lambda=3.0,
+        inertia_lambda=4.0,
+        link_excitation=qualities,
+    )
+
+    assert qualities[0] > qualities[1]
+    assert weights[7] > weights[0] * 10.0
 
 
 def test_relative_scale_uses_natural_floors_for_small_inertial_terms():
@@ -552,7 +583,55 @@ def _minimal_identified_case():
         "mass_summary": sim_main._mass_error_summary(masses, np.ones(7)),
         "com_summary": sim_main._com_error_summary(coms, np.zeros((7, 3))),
         "inertia_summary": sim_main._inertia_error_summary(inertias, np.ones((7, 3)) * 0.01),
+        "param_names": [f"L{link}_{suffix}" for link in range(7) for suffix in ("mass", "mcx", "mcy", "mcz", "Ixx", "Iyy", "Izz")],
     }
+
+
+def test_terminal_report_uses_summary_tables_and_folds_diagnostics(monkeypatch, capsys):
+    monkeypatch.delenv("AM_D02_PARAM_ID_DIAGNOSTICS", raising=False)
+
+    sim_main._print_identification_case(
+        _minimal_identified_case(),
+        true_masses=np.ones(7),
+        true_inertias=np.ones((7, 3)) * 0.01,
+        true_coms=np.zeros((7, 3)),
+    )
+    concise = capsys.readouterr().out
+
+    assert "参数辨识结果总览" in concise
+    assert "质量+COM" in concise
+    assert "Izz(辨识)" in concise
+    assert "训练/验证 RMS" in concise
+    assert "先验偏离 RMS" not in concise
+    assert "J7专项" not in concise
+
+    monkeypatch.setenv("AM_D02_PARAM_ID_DIAGNOSTICS", "1")
+    sim_main._print_identification_case(
+        _minimal_identified_case(),
+        true_masses=np.ones(7),
+        true_inertias=np.ones((7, 3)) * 0.01,
+        true_coms=np.zeros((7, 3)),
+    )
+    detailed = capsys.readouterr().out
+
+    assert "诊断详情" in detailed
+    assert "J7专项" in detailed
+
+
+def test_error_pct_formatter_caps_uninformative_large_errors():
+    assert sim_main._fmt_error_pct(3.2, target=5.0) == "+3.2% ✓"
+    assert sim_main._fmt_error_pct(-7.25, target=5.0) == "-7.2% ✗"
+    assert sim_main._fmt_error_pct(5000.0, target=5.0) == ">1000% ✗"
+
+
+def test_trajectory_profiles_include_combined_com_and_inertia_t7(monkeypatch):
+    monkeypatch.setattr(sim_main.Config, "PARAM_ID_TRAJECTORY_PROFILES", 8)
+
+    profiles = sim_main._trajectory_profiles()
+    t7 = next(profile for profile in profiles if profile["name"] == "T7")
+
+    assert t7["with_com_gravity"]
+    assert t7["with_inertia_burst"]
 
 
 def test_param_id_html_report_writes_core_tables(tmp_path, monkeypatch):
@@ -582,6 +661,8 @@ def test_param_id_html_report_writes_core_tables(tmp_path, monkeypatch):
     assert "质量" in html
     assert "COM" in html
     assert "惯量" in html
+    assert "Mass: Identified vs URDF" in html
+    assert "Izz: Identified vs URDF" in html
 
 
 def test_param_id_html_report_degrades_without_plotly(tmp_path, monkeypatch):

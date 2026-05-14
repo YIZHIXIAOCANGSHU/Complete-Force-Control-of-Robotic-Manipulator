@@ -16,6 +16,45 @@ def _as_prior_vector(param_names: List[str], prior: Dict[str, float] | None) -> 
     return np.array([float(prior.get(name, 0.0)) for name in param_names], dtype=np.float64)
 
 
+def _link_index_from_name(name: str) -> int | None:
+    if not name.startswith("L"):
+        return None
+    head = name.split("_", 1)[0]
+    try:
+        return int(head[1:])
+    except ValueError:
+        return None
+
+
+def _link_excitation_quality(Y_stack: np.ndarray, param_names: List[str]) -> np.ndarray:
+    """Estimate per-link excitation quality in ``(0, 1]`` from available columns."""
+    Y = np.asarray(Y_stack, dtype=np.float64)
+    link_to_cols: Dict[int, List[int]] = {}
+    for col, name in enumerate(param_names):
+        link = _link_index_from_name(name)
+        if link is not None:
+            link_to_cols.setdefault(link, []).append(col)
+    if not link_to_cols:
+        return np.ones(0, dtype=np.float64)
+
+    qualities = np.ones(max(link_to_cols) + 1, dtype=np.float64)
+    for link, cols in link_to_cols.items():
+        block = Y[:, cols]
+        norms = np.linalg.norm(block, axis=0)
+        active = norms > 1e-12
+        if not np.any(active):
+            qualities[link] = 1e-6
+            continue
+        block = block[:, active] / norms[active]
+        singular_values = np.linalg.svd(block, compute_uv=False)
+        if singular_values.size == 0 or singular_values[0] <= 1e-12:
+            quality = 1e-6
+        else:
+            quality = singular_values[-1] / singular_values[0]
+        qualities[link] = float(np.clip(quality, 1e-6, 1.0))
+    return qualities
+
+
 def _prior_weights(
     param_names: List[str],
     inertial_lambda: float,
@@ -23,10 +62,12 @@ def _prior_weights(
     mass_lambda: float | None = None,
     com_lambda: float | None = None,
     inertia_lambda: float | None = None,
+    link_excitation: np.ndarray | None = None,
 ) -> np.ndarray:
     mass_lambda = inertial_lambda if mass_lambda is None else mass_lambda
     com_lambda = inertial_lambda if com_lambda is None else com_lambda
     inertia_lambda = inertial_lambda if inertia_lambda is None else inertia_lambda
+    quality = None if link_excitation is None else np.asarray(link_excitation, dtype=np.float64)
     weights = np.empty(len(param_names), dtype=np.float64)
     for i, name in enumerate(param_names):
         if name.startswith("J"):
@@ -39,6 +80,9 @@ def _prior_weights(
             weights[i] = inertia_lambda
         else:
             weights[i] = inertial_lambda
+        link = _link_index_from_name(name)
+        if link is not None and quality is not None and link < quality.size:
+            weights[i] *= 1.0 / np.sqrt(max(float(quality[link]), 1e-6))
     return np.maximum(weights, 0.0)
 
 
@@ -88,6 +132,7 @@ def solve_least_squares(
     else:
         data_rank = int(np.count_nonzero(data_singular_values > (float(rcond) * data_singular_values[0])))
 
+    link_excitation = _link_excitation_quality(Y, param_names)
     prior_weights = _prior_weights(
         param_names,
         inertial_prior_lambda,
@@ -95,6 +140,7 @@ def solve_least_squares(
         mass_lambda=mass_prior_lambda,
         com_lambda=com_prior_lambda,
         inertia_lambda=inertia_prior_lambda,
+        link_excitation=link_excitation,
     )
     if np.any(prior_weights > 0.0):
         rel = _relative_scale(theta_prior, param_names)
@@ -162,6 +208,8 @@ def solve_least_squares(
         "inertia_prior_delta_rms": float(np.sqrt(np.mean(prior_delta[inertia_mask] ** 2))) if np.any(inertia_mask) else 0.0,
         "joint_prior_delta_rms": float(np.sqrt(np.mean(prior_delta[joint_mask] ** 2))) if np.any(joint_mask) else 0.0,
         "nullspace_prior_delta_norm": nullspace_residual,
+        "link_excitation_min": float(np.min(link_excitation)) if link_excitation.size else 1.0,
+        "link_excitation_mean": float(np.mean(link_excitation)) if link_excitation.size else 1.0,
     }
 
     return {name: float(value) for name, value in zip(param_names, theta)}

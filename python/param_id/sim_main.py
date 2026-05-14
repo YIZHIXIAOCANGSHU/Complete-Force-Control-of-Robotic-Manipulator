@@ -600,13 +600,75 @@ def _threshold_warnings(trajectory_records):
 
 
 def _summary_cards(summary):
+    cards = []
+    for item in summary.get("identification_quality", []):
+        cards.append(
+            {
+                "label": item["label"],
+                "value": item["value"],
+                "level": item["level"],
+            }
+        )
+    cards.extend(
+        [
+            {"label": "Status", "value": summary.get("status", "warning"), "level": summary.get("status", "warning")},
+            {"label": "Final Loss", "value": _fmt(summary.get("final_loss"), 4), "level": "neutral"},
+            {"label": "RMS Pos Err", "value": f"{_fmt(summary.get('rms_position_error_mm'), 3)} mm", "level": "neutral"},
+            {"label": "RMS Rot Err", "value": f"{_fmt(summary.get('rms_rotation_error_deg'), 3)} deg", "level": "neutral"},
+            {"label": "Worst DOF", "value": summary.get("worst_dof") or "n/a", "level": "neutral"},
+            {
+                "label": "Max Error Time",
+                "value": f"{_fmt(summary.get('max_error_time'), 3)} s" if summary.get("max_error_time") is not None else "n/a",
+                "level": "neutral",
+            },
+        ]
+    )
+    return cards
+
+
+def _quality_level(value, target):
+    value = float(value)
+    target = max(float(target), 1e-12)
+    if value <= target:
+        return "ok"
+    if value <= target * 2.0:
+        return "warning"
+    return "danger"
+
+
+def _identification_quality_summary(case):
+    mass = case.get("mass_summary", {})
+    com = case.get("com_summary", {})
+    inertia = case.get("inertia_summary", {})
     return [
-        {"label": "Status", "value": summary.get("status", "warning")},
-        {"label": "Final Loss", "value": _fmt(summary.get("final_loss"), 4)},
-        {"label": "RMS Pos Err", "value": f"{_fmt(summary.get('rms_position_error_mm'), 3)} mm"},
-        {"label": "RMS Rot Err", "value": f"{_fmt(summary.get('rms_rotation_error_deg'), 3)} deg"},
-        {"label": "Worst DOF", "value": summary.get("worst_dof") or "n/a"},
-        {"label": "Max Error Time", "value": f"{_fmt(summary.get('max_error_time'), 3)} s" if summary.get("max_error_time") is not None else "n/a"},
+        {
+            "label": "质量",
+            "value": (
+                f"{'通过' if mass.get('passes_5pct') else '未通过'} · "
+                f"{mass.get('max_abs', float('nan')):.2f}% / {mass.get('target_pct', Config.PARAM_ID_MASS_ERROR_TARGET_PCT):.1f}%"
+            ),
+            "level": _quality_level(mass.get("max_abs", float("inf")), mass.get("target_pct", Config.PARAM_ID_MASS_ERROR_TARGET_PCT)),
+        },
+        {
+            "label": "COM",
+            "value": (
+                f"{'通过' if com.get('passes_target') else '未通过'} · "
+                f"{com.get('max_distance', float('nan')):.4f} / {com.get('target_m', Config.PARAM_ID_COM_ERROR_TARGET_M):.4f} m"
+            ),
+            "level": _quality_level(com.get("max_distance", float("inf")), com.get("target_m", Config.PARAM_ID_COM_ERROR_TARGET_M)),
+        },
+        {
+            "label": "惯量",
+            "value": (
+                f"{'通过' if inertia.get('passes_target') else '未通过'} · "
+                f"{inertia.get('max_component_abs', float('nan')):.2f}% / "
+                f"{inertia.get('target_pct', Config.PARAM_ID_INERTIA_ERROR_TARGET_PCT):.1f}%"
+            ),
+            "level": _quality_level(
+                inertia.get("max_component_abs", float("inf")),
+                inertia.get("target_pct", Config.PARAM_ID_INERTIA_ERROR_TARGET_PCT),
+            ),
+        },
     ]
 
 
@@ -671,6 +733,7 @@ def _build_identification_summary(
             "worst_dof": worst_dof,
             "max_error_time": max_error_time,
             "before_after_metrics": case.get("before_after_metrics"),
+            "identification_quality": _identification_quality_summary(case),
             "warnings": list(warnings),
             "trajectory_metadata": dict(trajectory_metadata or {}),
             "config": {
@@ -932,7 +995,7 @@ def _chart_placeholders(message):
     }
 
 
-def _make_report_charts(case, t_arr, q_meas, qd_meas, tau_meas, trajectory_records):
+def _make_report_charts(case, t_arr, q_meas, qd_meas, tau_meas, trajectory_records, true_masses=None, true_inertias=None):
     try:
         import plotly.graph_objects as go
     except Exception:
@@ -960,6 +1023,13 @@ def _make_report_charts(case, t_arr, q_meas, qd_meas, tau_meas, trajectory_recor
             legend={"orientation": "h", "y": -0.25},
         )
         return fig
+
+    def use_log_axis(values):
+        arr = np.asarray(values, dtype=np.float64)
+        positive = arr[np.isfinite(arr) & (arr > 0.0)]
+        if positive.size < 2:
+            return False
+        return float(np.max(positive) / max(np.min(positive), 1e-15)) >= 100.0
 
     records, arrays = _trajectory_records_to_arrays(trajectory_records)
     times = arrays["time"] if records else np.asarray(t_arr, dtype=np.float64)
@@ -1016,6 +1086,55 @@ def _make_report_charts(case, t_arr, q_meas, qd_meas, tau_meas, trajectory_recor
         param_parts.append(_figure_block("Loss Convergence", to_html(fig)))
     else:
         param_parts.append(_notice_html("Loss convergence history unavailable."))
+
+    mass_values = np.asarray(case.get("masses", []), dtype=np.float64)
+    true_mass_values = None if true_masses is None else np.asarray(true_masses, dtype=np.float64)
+    if mass_values.size >= 7 and true_mass_values is not None and true_mass_values.size >= 7:
+        joints = [f"J{joint + 1}" for joint in range(7)]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(name="URDF", x=joints, y=true_mass_values[:7], marker_color="#64748b"))
+        fig.add_trace(go.Bar(name="Identified", x=joints, y=mass_values[:7], marker_color="#2563eb"))
+        fig.update_layout(
+            title="Mass: Identified vs URDF",
+            template="plotly_white",
+            barmode="group",
+            height=340,
+            margin={"l": 58, "r": 24, "t": 54, "b": 52},
+            yaxis_title="kg",
+            legend={"orientation": "h", "y": -0.22},
+        )
+        if use_log_axis([*true_mass_values[:7], *mass_values[:7]]):
+            fig.update_yaxes(type="log")
+        param_parts.append(_figure_block("Mass: Identified vs URDF", to_html(fig)))
+
+    inertia_values = np.asarray(case.get("inertias", []), dtype=np.float64)
+    true_inertia_values = None if true_inertias is None else np.asarray(true_inertias, dtype=np.float64)
+    if (
+        inertia_values.ndim == 2
+        and inertia_values.shape[0] >= 7
+        and inertia_values.shape[1] >= 3
+        and true_inertia_values is not None
+        and true_inertia_values.ndim == 2
+        and true_inertia_values.shape[0] >= 7
+        and true_inertia_values.shape[1] >= 3
+    ):
+        joints = [f"J{joint + 1}" for joint in range(7)]
+        for axis, axis_name in enumerate(("Ixx", "Iyy", "Izz")):
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name="URDF", x=joints, y=true_inertia_values[:7, axis], marker_color="#64748b"))
+            fig.add_trace(go.Bar(name="Identified", x=joints, y=inertia_values[:7, axis], marker_color="#0f766e"))
+            fig.update_layout(
+                title=f"{axis_name}: Identified vs URDF",
+                template="plotly_white",
+                barmode="group",
+                height=320,
+                margin={"l": 58, "r": 24, "t": 54, "b": 52},
+                yaxis_title="kg*m^2",
+                legend={"orientation": "h", "y": -0.24},
+            )
+            if use_log_axis([*true_inertia_values[:7, axis], *inertia_values[:7, axis]]):
+                fig.update_yaxes(type="log")
+            param_parts.append(_figure_block(f"{axis_name}: Identified vs URDF", to_html(fig)))
     parameter_charts_html = "\n".join(param_parts)
 
     before_after = case.get("before_after_metrics") or {}
@@ -1213,6 +1332,11 @@ h3 { margin: 18px 0 10px; font-size: 15px; letter-spacing: 0; }
 .section { background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; padding: 18px; margin: 14px 0; }
 .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
 .metric { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fbfcfe; min-height: 70px; }
+.metric.ok { border-color: #86efac; background: #f0fdf4; }
+.metric.warning { border-color: #fde68a; background: #fffbeb; }
+.metric.danger { border-color: #fca5a5; background: #fef2f2; }
+.metric.success { border-color: #86efac; background: #f0fdf4; }
+.metric.neutral { background: #fbfcfe; }
 .metric-label { color: #667085; font-size: 12px; margin-bottom: 8px; }
 .metric-value { color: #111827; font-size: 20px; font-weight: 700; overflow-wrap: anywhere; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
@@ -1255,7 +1379,7 @@ _PARAM_ID_HTML_TEMPLATE = """<!doctype html>
       <h2>Executive Summary</h2>
       <div class="summary-grid">
       {% for card in summary_cards %}
-        <div class="metric">
+        <div class="metric {{ card.level | default('neutral') }}">
           <div class="metric-label">{{ card.label }}</div>
           <div class="metric-value">{{ card.value }}</div>
         </div>
@@ -1340,7 +1464,7 @@ def _render_html_report(context):
         if warnings_html:
             warning_section = f'<section class="section warnings"><h2>Warnings</h2><ul>{warnings_html}</ul></section>'
         cards = "".join(
-            f'<div class="metric"><div class="metric-label">{escape(str(card["label"]))}</div>'
+            f'<div class="metric {escape(str(card.get("level", "neutral")))}"><div class="metric-label">{escape(str(card["label"]))}</div>'
             f'<div class="metric-value">{escape(str(card["value"]))}</div></div>'
             for card in context.get("summary_cards", [])
         )
@@ -1412,7 +1536,16 @@ def _write_html_report(
             generated_at,
             run_id,
         )
-        chart_parts, chart_warnings = _make_report_charts(case, t_arr, q_meas, qd_meas, tau_meas, trajectory_records)
+        chart_parts, chart_warnings = _make_report_charts(
+            case,
+            t_arr,
+            q_meas,
+            qd_meas,
+            tau_meas,
+            trajectory_records,
+            true_masses=true_masses,
+            true_inertias=true_inertias,
+        )
         warnings.extend(chart_warnings)
         summary["warnings"] = list(warnings)
         summary["status"] = "warning" if warnings else summary.get("status", "success")
@@ -1744,6 +1877,15 @@ def _trajectory_profiles():
             "with_inertia_burst": True,
             "dynamic_label": "inertia",
         },
+        {
+            "name": "T7",
+            "description": "COM gravity holds + distal inertia burst chirps",
+            "modifiers": ("j7_high_frequency",),
+            "with_gravity": False,
+            "with_com_gravity": True,
+            "with_inertia_burst": True,
+            "dynamic_label": "inertia",
+        },
     ]
     return profiles[:Config.PARAM_ID_TRAJECTORY_PROFILES]
 
@@ -1922,9 +2064,9 @@ def _inertia_burst_segment(q_start, limits, dt):
     q = np.repeat(q_start[None, :], n, axis=0)
 
     amp4 = _safe_joint_amplitude(q_start, limits, 3, 0.20)
-    amp5 = _safe_joint_amplitude(q_start, limits, 4, 0.36)
-    amp6 = _safe_joint_amplitude(q_start, limits, 5, 0.42)
-    amp7 = _safe_joint_amplitude(q_start, limits, 6, 0.55)
+    amp5 = _safe_joint_amplitude(q_start, limits, 4, 0.47)
+    amp6 = _safe_joint_amplitude(q_start, limits, 5, 0.55)
+    amp7 = _safe_joint_amplitude(q_start, limits, 6, 0.72)
     chirp_a = 0.35 * t + 0.045 * t * t
     chirp_b = 0.50 * t + 0.065 * t * t
     chirp_c = 0.70 * t + 0.085 * t * t
@@ -2027,7 +2169,7 @@ def _candidate_score(overall, distal, inertial_overall, inertial_distal, group_o
         + inertial_overall["rank"] * 5.0
         + inertial_distal["rank"] * 30.0
         + inertial_projection["rank"] * 20.0
-        + inertial_projection["ratio"] * 220.0
+        + inertial_projection["ratio"] * 260.0
         + joint_projection["ratio"] * 60.0
         + com_obs.get("rank", 0) * 8.0
         + inertia_obs.get("rank", 0) * 7.0
@@ -2036,7 +2178,7 @@ def _candidate_score(overall, distal, inertial_overall, inertial_distal, group_o
         + com_projection.get("rank", 0) * 8.0
         + inertia_projection.get("rank", 0) * 7.0
         + distal_com_projection.get("ratio", 0.0) * 120.0
-        + distal_inertia_projection.get("ratio", 0.0) * 150.0
+        + distal_inertia_projection.get("ratio", 0.0) * 180.0
         + np.log10(max(inertial_projection["sigma_min"], 1e-15) / 1e-15) * 2.0
         + np.log10(max(inertial_distal["sigma_min"], 1e-15) / 1e-15)
         + np.log10(max(com_projection.get("sigma_min", 1e-15), 1e-15) / 1e-15)
@@ -2710,121 +2852,192 @@ def _best_regularized_case(
     return best_case
 
 
-def _print_identification_case(case, true_masses, true_inertias):
+def _fmt_error_pct(value, target=5.0):
+    value = float(value)
+    if not np.isfinite(value):
+        return "nan ✗"
+    if abs(value) > 1000.0:
+        return ">1000% ✗"
+    return f"{value:+.1f}% {'✓' if abs(value) <= float(target) else '✗'}"
+
+
+def _print_box_line(text="", left="║", right="║", width=74):
+    clipped = str(text)[:width]
+    print(f"{left}{clipped:<{width}}{right}")
+
+
+def _pass_label(passes):
+    return "✓ 通过" if passes else "✗ 未通过"
+
+
+def _print_executive_summary(case):
+    mass = case.get("mass_summary", {})
+    com = case.get("com_summary", {})
+    inertia = case.get("inertia_summary", {})
+    print()
+    print("╔" + "═" * 74 + "╗")
+    _print_box_line("参数辨识结果总览".center(60))
+    print("╠" + "═" * 74 + "╣")
+    _print_box_line(
+        f"  质量: {_pass_label(mass.get('passes_5pct', False)):<8} "
+        f"最大误差 J{mass.get('max_abs_joint', 0)}: {mass.get('max_abs', float('nan')):.2f}% "
+        f"(目标 ≤ {mass.get('target_pct', Config.PARAM_ID_MASS_ERROR_TARGET_PCT):.1f}%)"
+    )
+    _print_box_line(
+        f"  COM:  {_pass_label(com.get('passes_target', False)):<8} "
+        f"最大误差 J{com.get('max_distance_joint', 0)}: {com.get('max_distance', float('nan')):.4f} m "
+        f"(目标 ≤ {com.get('target_m', Config.PARAM_ID_COM_ERROR_TARGET_M):.4f} m)"
+    )
+    _print_box_line(
+        f"  惯量: {_pass_label(inertia.get('passes_target', False)):<8} "
+        f"最大误差 J{inertia.get('max_component_joint', 0)}-{inertia.get('max_component_axis', '')}: "
+        f"{inertia.get('max_component_abs', float('nan')):.2f}% "
+        f"(目标 ≤ {inertia.get('target_pct', Config.PARAM_ID_INERTIA_ERROR_TARGET_PCT):.1f}%)"
+    )
+    _print_box_line(
+        f"  训练/验证 RMS: {case.get('prediction_error', float('nan')):.4f} / "
+        f"{case.get('validation_rms', float('nan')):.4f} N·m "
+        f"(比值 {case.get('validation_ratio', float('nan')):.3f})"
+    )
+    print("╚" + "═" * 74 + "╝")
+
+
+def _print_inertial_results(case, true_masses, true_coms=None, true_inertias=None):
+    masses = np.asarray(case.get("masses", np.zeros(7)), dtype=np.float64)
+    coms = np.asarray(case.get("coms", np.zeros((7, 3))), dtype=np.float64)
+    inertias = np.asarray(case.get("inertias", np.zeros((7, 3))), dtype=np.float64)
+    true_masses = np.asarray(true_masses, dtype=np.float64)
+    true_inertias = np.asarray(true_inertias if true_inertias is not None else np.zeros((7, 3)), dtype=np.float64)
+    mass_summary = case.get("mass_summary") or _mass_error_summary(masses, true_masses)
+    com_summary = case.get("com_summary") or _com_error_summary(
+        coms,
+        np.zeros_like(coms) if true_coms is None else true_coms,
+    )
+
+    print("\n┌─ 惯性参数辨识结果 ──────────────────────────────────────────────┐")
+    print("│ 质量+COM")
+    print("│ 关节  质量(kg)  真值(kg)  误差        COMx      COMy      COMz     COM误差m")
+    for j in range(7):
+        err = mass_summary.get("errors", [0.0] * 7)[j]
+        tm = true_masses[j] if j < true_masses.size else 0.0
+        com_err = com_summary.get("distance_errors", [0.0] * 7)[j]
+        print(
+            f"│ J{j + 1:<2} {masses[j]:>10.4f} {tm:>9.4f} "
+            f"{_fmt_error_pct(err, mass_summary.get('target_pct', 5.0)):>12} "
+            f"{coms[j][0]:>9.4f} {coms[j][1]:>9.4f} {coms[j][2]:>9.4f} {com_err:>10.5f}"
+        )
+    print("│")
+    print("│ 惯量")
+    print("│ 关节  Ixx(辨识)  Ixx(真值)  Iyy(辨识)  Iyy(真值)  Izz(辨识)  Izz(真值)")
+    for j in range(7):
+        truth = true_inertias[j] if j < len(true_inertias) else np.zeros(3, dtype=np.float64)
+        print(
+            f"│ J{j + 1:<2} {inertias[j][0]:>10.6f} {truth[0]:>10.6f} "
+            f"{inertias[j][1]:>10.6f} {truth[1]:>10.6f} "
+            f"{inertias[j][2]:>10.6f} {truth[2]:>10.6f}"
+        )
+    print("└────────────────────────────────────────────────────────────────┘")
+
+
+def _print_joint_results(case):
+    print("\n┌─ 关节摩擦/弹性辨识 ─────────────────────────────────────────────┐")
+    _print_joint_term_comparison(case.get("result", {}))
+    print("└────────────────────────────────────────────────────────────────┘")
+
+
+def _diagnostics_requested():
+    return os.getenv("AM_D02_PARAM_ID_DIAGNOSTICS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _print_diagnostics(case):
+    diagnostics = case.get("diagnostics", {})
+    inertial_metrics = case.get("inertial_metrics", {})
+    distal = case.get("distal", {})
+    inertial_distal = case.get("inertial_distal", {})
+    seg = case.get("segment_rms", {})
+    sel = case.get("selection", {})
+
+    print("\n┌─ 诊断摘要 ─────────────────────────────────────────────────────┐")
+    print(
+        f"│ 回归矩阵条件数: scaled={case.get('condition', float('nan')):.3g} "
+        f"inertial={inertial_metrics.get('condition', float('nan')):.3g}"
+    )
+    print(
+        f"│ SVD: rank={diagnostics.get('rank', 0):.0f}/"
+        f"{diagnostics.get('num_params', len(case.get('param_names', []))):.0f} "
+        f"data-rank={diagnostics.get('data_rank', 0):.0f} "
+        f"retained-cond={diagnostics.get('retained_condition', float('nan')):.3g}"
+    )
+    print(
+        f"│ 末端/惯性末端: distal-rank={distal.get('rank', 0)} "
+        f"inertial-rank={inertial_distal.get('rank', 0)} "
+        f"residual={inertial_distal.get('projection', {}).get('ratio', float('nan')):.3f}"
+    )
+    print(
+        f"│ 分段RMS: 动态={seg.get('dynamic', float('nan')):.4f}, "
+        f"远端={seg.get('j6j7', float('nan')):.4f}/{seg.get('j7', float('nan')):.4f}, "
+        f"静态={seg.get('gravity', float('nan')):.4f}/{seg.get('com_gravity', float('nan')):.4f}, "
+        f"惯量={seg.get('inertia', float('nan')):.4f}"
+    )
+    if sel:
+        print(
+            f"│ 正则化: λ_m={sel.get('mass_prior_lambda', 0.0):.3g} "
+            f"λ_c={sel.get('com_prior_lambda', 0.0):.3g} "
+            f"λ_i={sel.get('inertia_prior_lambda', 0.0):.3g} "
+            f"λ_j={sel.get('joint_prior_lambda', 0.0):.3g} "
+            f"rcond={sel.get('rcond', 0.0):.1e}"
+        )
+    print("└────────────────────────────────────────────────────────────────┘")
+
+    if not _diagnostics_requested():
+        return
+
+    print("\n┌─ 诊断详情 (AM_D02_PARAM_ID_DIAGNOSTICS=1) ─────────────────────┐")
+    group_observability = case.get("group_observability", {})
+    for label, key in (
+        ("质量列", "mass"),
+        ("COM列", "com"),
+        ("惯量列", "inertia"),
+        ("末端COM列", "distal_com"),
+        ("末端惯量列", "distal_inertia"),
+    ):
+        obs = group_observability.get(key)
+        if not obs:
+            continue
+        proj = obs.get("projection", {})
+        print(
+            f"│ {label}: rank={obs.get('rank', 0)}, condition={obs.get('condition', float('nan')):.3g}, "
+            f"相关={obs.get('correlation', float('nan')):.3f}, 残差={proj.get('ratio', float('nan')):.3f}/{proj.get('rank', 0)}"
+        )
+    mass_summary = case.get("mass_summary", {})
+    j7_columns = case.get("j7_columns", {})
+    print(
+        f"│ J7专项: 质量误差={mass_summary.get('j7_abs', float('nan')):.2f}%, "
+        f"列范数 mass={j7_columns.get('mass_norm', 0.0):.3e}, "
+        f"mean={j7_columns.get('mean_norm', 0.0):.3e}, min={j7_columns.get('min_norm', 0.0):.3e}"
+    )
+    print(
+        f"│ 先验偏离 RMS: all={diagnostics.get('prior_delta_rms', 0.0):.6f}, "
+        f"mass={diagnostics.get('mass_prior_delta_rms', 0.0):.6f}, "
+        f"COM={diagnostics.get('com_prior_delta_rms', 0.0):.6f}, "
+        f"inertia={diagnostics.get('inertia_prior_delta_rms', 0.0):.6f}"
+    )
+    print(
+        f"│ 激励质量: min={diagnostics.get('link_excitation_min', float('nan')):.3g}, "
+        f"mean={diagnostics.get('link_excitation_mean', float('nan')):.3g}"
+    )
+    print("└────────────────────────────────────────────────────────────────┘")
+
+
+def _print_identification_case(case, true_masses, true_inertias, true_coms=None):
     print()
     print("=" * 78)
     print(f"                    {case['name']}")
     print("=" * 78)
-    _print_identified_params(case["masses"], case["coms"], case["inertias"])
-    _print_comparison(case["masses"], true_masses, case["inertias"], true_inertias)
-    _print_joint_term_comparison(case["result"])
-
-    diagnostics = case["diagnostics"]
-    final_distal = case["distal"]
-    inertial_distal = case["inertial_distal"]
-    inertial_metrics = case["inertial_metrics"]
-    print(f"\n惯性子回归条件数: {inertial_metrics['condition']:.1f}, rank={inertial_metrics['rank']}")
-    print(f"当前路径回归矩阵缩放后条件数: {case['condition']:.1f}")
-    print(
-        f"SVD rank: {diagnostics.get('rank', 0):.0f}/{diagnostics.get('num_params', len(case['param_names'])):.0f}, "
-        f"data-rank: {diagnostics.get('data_rank', 0):.0f}, "
-        f"nullity: {diagnostics.get('nullity', 0):.0f}, "
-        f"保留子空间条件数: {diagnostics.get('retained_condition', float('inf')):.1f}"
-    )
-    print(
-        f"末端可观测性: rank={final_distal['rank']}, "
-        f"condition={final_distal['condition']:.1f}, 相关={final_distal['correlation']:.3f}, "
-        f"残差={final_distal['projection']['ratio']:.3f}/{final_distal['projection']['rank']}"
-    )
-    print(
-        f"惯性末端独立性: rank={inertial_distal['rank']}, "
-        f"condition={inertial_distal['condition']:.1f}, 相关={inertial_distal['correlation']:.3f}, "
-        f"残差={inertial_distal['projection']['ratio']:.3f}/{inertial_distal['projection']['rank']}"
-    )
-    group_observability = case.get("group_observability", {})
-    for label, key in (("质量列", "mass"), ("COM列", "com"), ("惯量列", "inertia"), ("末端COM列", "distal_com"), ("末端惯量列", "distal_inertia")):
-        obs = group_observability.get(key)
-        if not obs:
-            continue
-        proj = obs["projection"]
-        print(
-            f"{label}可观测性: rank={obs['rank']}, condition={obs['condition']:.1f}, "
-            f"相关={obs['correlation']:.3f}, 残差={proj['ratio']:.3f}/{proj['rank']}"
-        )
-    mass_summary = case["mass_summary"]
-    com_summary = case["com_summary"]
-    inertia_summary = case["inertia_summary"]
-    err_text = " ".join(f"J{i + 1}:{err:+.1f}%" for i, err in enumerate(mass_summary["errors"]))
-    mass_status = "达标" if mass_summary["passes_5pct"] else "未达标"
-    com_status = "达标" if com_summary["passes_target"] else "未达标"
-    inertia_status = "达标" if inertia_summary["passes_target"] else "未达标"
-    print(f"单关节质量误差: {err_text}")
-    print(
-        f"最大单关节质量误差: {mass_summary['max_abs']:.2f}% "
-        f"(J{mass_summary['max_abs_joint']}, 目标≤{mass_summary['target_pct']:.1f}%, {mass_status})"
-    )
-    com_err_text = " ".join(
-        f"J{i + 1}:[{vec[0]:+.4f},{vec[1]:+.4f},{vec[2]:+.4f}]"
-        for i, vec in enumerate(com_summary["error_vectors"])
-    )
-    print(f"单关节COM误差向量(m): {com_err_text}")
-    print(
-        f"最大COM距离误差: {com_summary['max_distance']:.4f} m "
-        f"(J{com_summary['max_distance_joint']}, 末端均值={com_summary['distal_distance_mean']:.4f} m, "
-        f"目标≤{com_summary['target_m']:.4f} m, {com_status})"
-    )
-    inertia_err_text = " ".join(
-        f"J{i + 1}:[{vec[0]:+.1f}%,{vec[1]:+.1f}%,{vec[2]:+.1f}%]"
-        for i, vec in enumerate(inertia_summary["relative_errors"])
-    )
-    print(f"单关节惯量相对误差(Ixx/Iyy/Izz): {inertia_err_text}")
-    print(
-        f"最大惯量分量误差: {inertia_summary['max_component_abs']:.2f}% "
-        f"(J{inertia_summary['max_component_joint']}-{inertia_summary['max_component_axis']}), "
-        f"最大链节L2={inertia_summary['max_link_l2']:.2f}%@J{inertia_summary['max_link_l2_joint']}, "
-        f"末端L2均值={inertia_summary['distal_l2_mean']:.2f}%, "
-        f"目标≤{inertia_summary['target_pct']:.1f}%, {inertia_status}"
-    )
-    j7_columns = case.get("j7_columns", {})
-    print(
-        f"J7专项: 质量误差={mass_summary['j7_abs']:.2f}%, "
-        f"列范数 mass={j7_columns.get('mass_norm', 0.0):.3e}, "
-        f"mean={j7_columns.get('mean_norm', 0.0):.3e}, "
-        f"min={j7_columns.get('min_norm', 0.0):.3e}, "
-        f"目标≤4.0%={'是' if mass_summary['j7_abs'] <= 4.0 else '否'}"
-    )
-    sel = case.get("selection", {})
-    if sel:
-        print(
-            f"正则化参数: λ_mass={sel.get('mass_prior_lambda', 0.0):.3g}, "
-            f"λ_com={sel.get('com_prior_lambda', 0.0):.3g}, "
-            f"λ_inertia={sel.get('inertia_prior_lambda', 0.0):.3g}, "
-            f"λ_joint={sel.get('joint_prior_lambda', 0.0):.3g}, rcond={sel.get('rcond', 0.0):.1e}"
-        )
-    print(
-        f"训练/验证 RMS: {case['prediction_error']:.4f} / {case.get('validation_rms', float('nan')):.4f} N·m "
-        f"(比值={case.get('validation_ratio', float('nan')):.3f})"
-    )
-    seg = case.get("segment_rms", {})
-    print(
-        f"分段RMS: dynamic={seg.get('dynamic', float('nan')):.4f}, "
-        f"j6j7={seg.get('j6j7', float('nan')):.4f}, "
-        f"j7={seg.get('j7', float('nan')):.4f}, "
-        f"gravity={seg.get('gravity', float('nan')):.4f}, "
-        f"com_gravity={seg.get('com_gravity', float('nan')):.4f}, "
-        f"inertia={seg.get('inertia', float('nan')):.4f}"
-    )
-    print(f"先验偏离 RMS: {diagnostics.get('prior_delta_rms', 0.0):.6f}")
-    print(f"惯性先验偏离 RMS: {diagnostics.get('inertial_prior_delta_rms', 0.0):.6f}")
-    print(f"质量先验偏离 RMS: {diagnostics.get('mass_prior_delta_rms', 0.0):.6f}")
-    print(f"COM先验偏离 RMS: {diagnostics.get('com_prior_delta_rms', 0.0):.6f}")
-    print(f"惯量先验偏离 RMS: {diagnostics.get('inertia_prior_delta_rms', 0.0):.6f}")
-    print(f"关节项先验偏离 RMS: {diagnostics.get('joint_prior_delta_rms', 0.0):.6f}")
-    print(
-        f"综合结论: mass={'通过' if mass_summary['passes_5pct'] else '未通过'}, "
-        f"COM={'通过' if com_summary['passes_target'] else '未通过'}, "
-        f"inertia={'通过' if inertia_summary['passes_target'] else '未通过'}"
-    )
+    _print_executive_summary(case)
+    _print_inertial_results(case, true_masses, true_coms=true_coms, true_inertias=true_inertias)
+    _print_joint_results(case)
+    _print_diagnostics(case)
 
 
 def main() -> None:
@@ -2946,7 +3159,7 @@ def main() -> None:
 
     # ---- 中文终端输出 ----
     _print_chinese_header()
-    _print_identification_case(identified_case, true_masses, true_inertias)
+    _print_identification_case(identified_case, true_masses, true_inertias, true_coms=true_coms)
     report_metadata = {
         **trajectory_metadata,
         "stride": stride,

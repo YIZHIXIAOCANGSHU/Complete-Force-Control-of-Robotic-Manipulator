@@ -181,10 +181,10 @@ def test_regularization_grid_uses_planned_joint_path_candidates():
     ]
 
 
-def test_trajectory_profiles_match_planned_t0_to_t6_matrix():
+def test_trajectory_profiles_match_planned_t0_to_t7_matrix():
     profiles = _trajectory_profiles()
 
-    assert [profile["name"] for profile in profiles] == ["T0", "T1", "T2", "T3", "T4", "T5", "T6"]
+    assert [profile["name"] for profile in profiles] == ["T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7"]
     assert profiles[0]["modifiers"] == ()
     assert profiles[1]["modifiers"] == ("j7_high_frequency",)
     assert profiles[2]["modifiers"] == ("j6_j7_phase_sweep",)
@@ -193,6 +193,8 @@ def test_trajectory_profiles_match_planned_t0_to_t6_matrix():
     assert profiles[4]["with_gravity"]
     assert profiles[5]["with_com_gravity"]
     assert profiles[6]["with_inertia_burst"]
+    assert profiles[7]["with_com_gravity"]
+    assert profiles[7]["with_inertia_burst"]
 
 
 def test_planned_t4_t5_t6_trajectories_add_specialized_segments():
@@ -204,6 +206,7 @@ def test_planned_t4_t5_t6_trajectories_add_specialized_segments():
     t4, q_t4, qd_t4, qdd_t4, labels_t4 = _build_planned_trajectory(profiles["T4"], 43, q0, limits)
     t5, q_t5, qd_t5, qdd_t5, labels_t5 = _build_planned_trajectory(profiles["T5"], 43, q0, limits)
     t6, q_t6, qd_t6, qdd_t6, labels_t6 = _build_planned_trajectory(profiles["T6"], 43, q0, limits)
+    t7, q_t7, qd_t7, qdd_t7, labels_t7 = _build_planned_trajectory(profiles["T7"], 43, q0, limits)
 
     assert len(t4) > len(t0)
     assert q_t4.shape == qd_t4.shape == qdd_t4.shape
@@ -216,6 +219,10 @@ def test_planned_t4_t5_t6_trajectories_add_specialized_segments():
     assert len(t6) > len(t0)
     assert q_t6.shape == qd_t6.shape == qdd_t6.shape
     assert "inertia" in set(labels_t6.tolist())
+    assert len(t7) > len(t5)
+    assert q_t7.shape == qd_t7.shape == qdd_t7.shape
+    assert "com_gravity" in set(labels_t7.tolist())
+    assert "inertia" in set(labels_t7.tolist())
     assert np.ptp(q_t6[:, 6]) > np.ptp(q_t0[:, 6])
     assert set(labels_t0.tolist()) == {"dynamic"}
     for q in (q_t4, q_t5, q_t6):
