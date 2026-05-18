@@ -1,1 +1,0 @@
-"""Control simulation mode entry."""

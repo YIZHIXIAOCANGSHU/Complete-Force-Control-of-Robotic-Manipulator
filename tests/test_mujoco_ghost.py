@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-from common.mujoco.ghost import MujocoGhostRobot, create_mujoco_ghost_if_enabled
+from robot_control.shared.mujoco.ghost import MujocoGhostRobot, create_mujoco_ghost_if_enabled
 
 
 class DummyModel:
@@ -58,7 +52,7 @@ def test_ghost_factory_returns_none_when_disabled():
 def test_real_mujoco_ghost_updates_target_pose_from_qpos():
     pytest.importorskip("mujoco")
 
-    from sim.env import MujocoSimEnv
+    from robot_control.shared.mujoco.env import MujocoSimEnv
 
     env = MujocoSimEnv()
     ghost = MujocoGhostRobot(env.model, env.data, dof_ids=env.dof_ids)

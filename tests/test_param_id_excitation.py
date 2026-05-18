@@ -1,14 +1,5 @@
-import sys
-from pathlib import Path
-
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-from param_id.excitation import fourier_trajectory, limit_ee_speed
-from param_id.sim_main import (
-    _apply_specialized_profile,
-    _build_planned_trajectory,
+from robot_control.param_id.diagnostics import (
     _distal_column_groups,
     _j7_column_diagnostics,
     _parameter_column_groups,
@@ -16,6 +7,11 @@ from param_id.sim_main import (
     _projection_residual_metrics,
     _regularization_grid,
     _stratified_validation_rows,
+)
+from robot_control.param_id.excitation import fourier_trajectory, limit_ee_speed
+from robot_control.param_id.trajectory import (
+    _apply_specialized_profile,
+    _build_planned_trajectory,
     _trajectory_profiles,
 )
 

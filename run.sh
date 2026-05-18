@@ -107,7 +107,7 @@ else
 fi
 APP_ARGS=("${EXTRA_ARGS[@]}" "$@")
 select_python
-export PYTHONPATH="$PWD/python:$PWD${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "=========================================================="
 case "$MODE" in
@@ -122,7 +122,7 @@ PRINT_BLUE "[System] Python 解释器: $PYTHON_BIN"
 if [ "$MODE" == "sim" ]; then
     PRINT_BLUE "[1/2] 启动后台 Python MuJoCo 物理仿真服务器..."
     READY_FILE=$(mktemp /tmp/am_d02_server_ready.XXXXXX)
-    "$PYTHON_BIN" -m modes.control_sim.main --ready-file "$READY_FILE" "${APP_ARGS[@]}" &
+    "$PYTHON_BIN" -m robot_control.modes.control_sim.main --ready-file "$READY_FILE" "${APP_ARGS[@]}" &
     SERVER_PID=$!
 
     cleanup() {
@@ -158,7 +158,7 @@ if [ "$MODE" == "sim" ]; then
     PRINT_GREEN "[2/2] 启动 Python Pinocchio 仿真控制器..."
     echo "----------------------------------------------------------"
     set +e
-    "$PYTHON_BIN" python/sim/pinocchio_sim_controller.py "${APP_ARGS[@]}"
+    "$PYTHON_BIN" -m robot_control.modes.control_sim.pinocchio_controller "${APP_ARGS[@]}"
     APP_STATUS=$?
     set -e
     exit $APP_STATUS
@@ -169,7 +169,7 @@ elif [ "$MODE" == "param-id-sim" ]; then
     export AM_D02_ENABLE_VIEWER AM_D02_ENABLE_RERUN
     PRINT_BLUE "[1/1] 启动全参辨识 PD 闭环仿真模式..."
     echo "----------------------------------------------------------"
-    "$PYTHON_BIN" -m modes.param_id_sim.main "${APP_ARGS[@]}"
+    "$PYTHON_BIN" -m robot_control.modes.param_id_sim.main "${APP_ARGS[@]}"
 
 elif [ "$MODE" == "param-id-real" ]; then
     : "${AM_D02_ENABLE_VIEWER:=0}"
@@ -178,7 +178,7 @@ elif [ "$MODE" == "param-id-real" ]; then
     export AM_D02_ENABLE_VIEWER AM_D02_ENABLE_RERUN AM_D02_CAN_INTERFACE
     PRINT_BLUE "[1/1] 启动全参辨识实机模式..."
     echo "----------------------------------------------------------"
-    "$PYTHON_BIN" -m modes.param_id_real.main "${APP_ARGS[@]}"
+    "$PYTHON_BIN" -m robot_control.modes.param_id_real.main "${APP_ARGS[@]}"
 
 else  # real
     : "${AM_D02_CAN_INTERFACE:=can0}"
@@ -197,5 +197,5 @@ else  # real
     fi
     PRINT_GREEN "[1/1] 启动 Python 真实硬件控制回路..."
     echo "----------------------------------------------------------"
-    "$PYTHON_BIN" -m modes.control_real.main "${APP_ARGS[@]}"
+    "$PYTHON_BIN" -m robot_control.modes.control_real.main "${APP_ARGS[@]}"
 fi

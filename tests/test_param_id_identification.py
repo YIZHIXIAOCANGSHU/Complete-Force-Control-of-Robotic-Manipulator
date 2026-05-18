@@ -6,19 +6,19 @@ import types
 from pathlib import Path
 
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-import param_id.sim_main as sim_main
-from param_id.identification import (
+import robot_control.param_id.sim_main as sim_main
+import robot_control.param_id.reporting as reporting
+import robot_control.param_id.trajectory as trajectory
+import robot_control.param_id.diagnostics as diagnostics
+from robot_control.param_id.identification import (
     _link_excitation_quality,
     _prior_weights,
     _relative_scale,
     get_last_diagnostics,
     solve_least_squares,
 )
-from param_id.regressor import build_joint_term_regressor, build_stacked_regressor, joint_term_param_names
-from param_id.sim_main import (
+from robot_control.param_id.regressor import build_joint_term_regressor, build_stacked_regressor, joint_term_param_names
+from robot_control.param_id.diagnostics import (
     _case_selection_key,
     _com_error_summary,
     _inertia_error_summary,
@@ -180,7 +180,7 @@ def test_stacked_regressor_path_shapes_with_and_without_joint_terms(monkeypatch)
             return inertial
         return np.hstack([inertial, build_joint_term_regressor(q, qd, q_ref=q_ref, coulomb_eps=coulomb_eps)])
 
-    monkeypatch.setattr("param_id.regressor.build_regressor", fake_build_regressor)
+    monkeypatch.setattr("robot_control.param_id.regressor.build_regressor", fake_build_regressor)
     q = np.zeros((3, 7))
     qd = np.ones((3, 7)) * 0.1
     qdd = np.zeros((3, 7))
@@ -381,9 +381,9 @@ def _install_dummy_rerun(monkeypatch):
     dummy_rr.blueprint = blueprint_module
     monkeypatch.setitem(sys.modules, "rerun", dummy_rr)
     monkeypatch.setitem(sys.modules, "rerun.blueprint", blueprint_module)
-    monkeypatch.setattr(sim_main.rerun_viz, "RERUN_AVAILABLE", True)
-    monkeypatch.setattr(sim_main.rerun_viz, "rr", dummy_rr, raising=False)
-    monkeypatch.setattr(sim_main.rerun_viz, "rrb", blueprint_module, raising=False)
+    monkeypatch.setattr(reporting.rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(reporting.rerun_viz, "rr", dummy_rr, raising=False)
+    monkeypatch.setattr(reporting.rerun_viz, "rrb", blueprint_module, raising=False)
     return dummy_rr
 
 
@@ -393,7 +393,7 @@ def test_param_id_rerun_step_logs_q_qd_tau_for_all_joints(monkeypatch):
     qd = np.arange(7, dtype=np.float64) + 0.2
     tau = np.arange(7, dtype=np.float64) + 0.3
 
-    sim_main._log_rerun_step(True, 1.25, q, qd, tau)
+    reporting._log_rerun_step(True, 1.25, q, qd, tau)
 
     logged = {path: payload for path, payload, _static in dummy_rr.logs}
     assert dummy_rr.time_calls == [("time", 1.25)]
@@ -407,7 +407,7 @@ def test_param_id_rerun_blueprint_contains_joint_detail_panels(monkeypatch):
     dummy_rr = _install_dummy_rerun(monkeypatch)
     monkeypatch.setattr(sim_main.Config, "ENABLE_RERUN", True)
 
-    assert sim_main._setup_rerun()
+    assert reporting._setup_rerun()
 
     names = {
         node["name"]
@@ -444,9 +444,9 @@ def test_param_id_rerun_setup_uses_common_init_and_keeps_sim_views(monkeypatch):
         init_calls.append(app_name)
         return True
 
-    monkeypatch.setattr(sim_main.rerun_viz, "init_rerun", fake_init)
+    monkeypatch.setattr(reporting.rerun_viz, "init_rerun", fake_init)
 
-    assert sim_main._setup_rerun()
+    assert reporting._setup_rerun()
 
     origins = {
         node["origin"]
@@ -462,9 +462,9 @@ def test_param_id_rerun_setup_uses_common_init_and_keeps_sim_views(monkeypatch):
 def test_param_id_rerun_setup_degrades_when_common_init_fails(monkeypatch, capsys):
     _install_dummy_rerun(monkeypatch)
     monkeypatch.setattr(sim_main.Config, "ENABLE_RERUN", True)
-    monkeypatch.setattr(sim_main.rerun_viz, "init_rerun", lambda _app_name: False)
+    monkeypatch.setattr(reporting.rerun_viz, "init_rerun", lambda _app_name: False)
 
-    assert not sim_main._setup_rerun()
+    assert not reporting._setup_rerun()
 
     assert "Rerun" in capsys.readouterr().out
 
@@ -512,7 +512,7 @@ def test_param_id_logs_common_sim_realtime_step_from_env(monkeypatch):
     def fake_log_sim_realtime_step(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr(sim_main.rerun_viz, "log_sim_realtime_step", fake_log_sim_realtime_step)
+    monkeypatch.setattr(reporting.rerun_viz, "log_sim_realtime_step", fake_log_sim_realtime_step)
     env = FakeEnv()
     saved_qpos = env.data.qpos.copy()
     saved_qvel = env.data.qvel.copy()
@@ -522,7 +522,7 @@ def test_param_id_logs_common_sim_realtime_step_from_env(monkeypatch):
     qd_actual = np.ones(7, dtype=np.float64) * 0.1
     tau = np.arange(7, dtype=np.float64)
 
-    sim_main._log_sim_realtime_step_from_env(
+    reporting._log_sim_realtime_step_from_env(
         rerun_ok=True,
         env=env,
         t=0.5,
@@ -580,10 +580,10 @@ def _minimal_identified_case():
             "joint_prior_lambda": 0.035,
             "rcond": 1e-8,
         },
-        "mass_summary": sim_main._mass_error_summary(masses, np.ones(7)),
-        "com_summary": sim_main._com_error_summary(coms, np.zeros((7, 3))),
-        "inertia_summary": sim_main._inertia_error_summary(inertias, np.ones((7, 3)) * 0.01),
-        "joint_term_error_summary": sim_main._joint_term_error_summary(
+        "mass_summary": diagnostics._mass_error_summary(masses, np.ones(7)),
+        "com_summary": diagnostics._com_error_summary(coms, np.zeros((7, 3))),
+        "inertia_summary": diagnostics._inertia_error_summary(inertias, np.ones((7, 3)) * 0.01),
+        "joint_term_error_summary": diagnostics._joint_term_error_summary(
             {
                 f"J{joint}_{term}": float(joint)
                 for joint in range(1, 8)
@@ -610,7 +610,7 @@ def test_joint_term_error_summary_reports_parameter_and_torque_errors():
     qd[:, 0] = 0.5
     qd[:, 1] = 0.25
 
-    summary = sim_main._joint_term_error_summary(result, q, qd, np.zeros(7))
+    summary = diagnostics._joint_term_error_summary(result, q, qd, np.zeros(7))
 
     assert summary["max_abs_param_error"] >= 0.1
     assert summary["max_abs_param"] == "J1_fc"
@@ -625,7 +625,7 @@ def test_joint_term_error_summary_reports_parameter_and_torque_errors():
 def test_terminal_report_uses_summary_tables_and_folds_diagnostics(monkeypatch, capsys):
     monkeypatch.delenv("AM_D02_PARAM_ID_DIAGNOSTICS", raising=False)
 
-    sim_main._print_identification_case(
+    reporting._print_identification_case(
         _minimal_identified_case(),
         true_masses=np.ones(7),
         true_inertias=np.ones((7, 3)) * 0.01,
@@ -642,7 +642,7 @@ def test_terminal_report_uses_summary_tables_and_folds_diagnostics(monkeypatch, 
     assert "J7专项" not in concise
 
     monkeypatch.setenv("AM_D02_PARAM_ID_DIAGNOSTICS", "1")
-    sim_main._print_identification_case(
+    reporting._print_identification_case(
         _minimal_identified_case(),
         true_masses=np.ones(7),
         true_inertias=np.ones((7, 3)) * 0.01,
@@ -655,15 +655,15 @@ def test_terminal_report_uses_summary_tables_and_folds_diagnostics(monkeypatch, 
 
 
 def test_error_pct_formatter_caps_uninformative_large_errors():
-    assert sim_main._fmt_error_pct(3.2, target=5.0) == "+3.2% ✓"
-    assert sim_main._fmt_error_pct(-7.25, target=5.0) == "-7.2% ✗"
-    assert sim_main._fmt_error_pct(5000.0, target=5.0) == ">1000% ✗"
+    assert reporting._fmt_error_pct(3.2, target=5.0) == "+3.2% ✓"
+    assert reporting._fmt_error_pct(-7.25, target=5.0) == "-7.2% ✗"
+    assert reporting._fmt_error_pct(5000.0, target=5.0) == ">1000% ✗"
 
 
 def test_trajectory_profiles_include_combined_com_and_inertia_t7(monkeypatch):
     monkeypatch.setattr(sim_main.Config, "PARAM_ID_TRAJECTORY_PROFILES", 8)
 
-    profiles = sim_main._trajectory_profiles()
+    profiles = trajectory._trajectory_profiles()
     t7 = next(profile for profile in profiles if profile["name"] == "T7")
 
     assert t7["with_com_gravity"]
@@ -676,7 +676,7 @@ def test_param_id_html_report_writes_core_tables(tmp_path, monkeypatch):
     qd = np.ones((3, 7), dtype=np.float64)
     tau = np.ones((3, 7), dtype=np.float64) * 2.0
 
-    report_path = sim_main._write_html_report(
+    report_path = reporting._write_html_report(
         _minimal_identified_case(),
         true_masses=np.ones(7),
         true_coms=np.zeros((7, 3)),
@@ -710,7 +710,7 @@ def test_param_id_html_report_degrades_without_plotly(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "plotly", None)
     monkeypatch.setitem(sys.modules, "plotly.graph_objects", None)
 
-    report_path = sim_main._write_html_report(
+    report_path = reporting._write_html_report(
         _minimal_identified_case(),
         true_masses=np.ones(7),
         true_coms=np.zeros((7, 3)),
@@ -783,7 +783,7 @@ def _sample_trajectory_records():
 def test_param_id_html_report_writes_offline_summary_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(sim_main.Config, "RESULTS_DIR", str(tmp_path))
 
-    report_path = sim_main._write_html_report(
+    report_path = reporting._write_html_report(
         _minimal_identified_case(),
         true_masses=np.ones(7),
         true_coms=np.zeros((7, 3)),
@@ -825,7 +825,7 @@ def test_param_id_html_report_writes_offline_summary_artifacts(tmp_path, monkeyp
 def test_param_id_html_report_uses_friction_reading_order_and_6dof_sections(tmp_path, monkeypatch):
     monkeypatch.setattr(sim_main.Config, "RESULTS_DIR", str(tmp_path))
 
-    report_path = sim_main._write_html_report(
+    report_path = reporting._write_html_report(
         _minimal_identified_case(),
         true_masses=np.ones(7),
         true_coms=np.zeros((7, 3)),

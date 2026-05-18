@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 import errno
-import sys
-from pathlib import Path
-
 import pytest
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from usb2fdcan_send.damiao import (  # noqa: E402
+from robot_control.hardware.usb2fdcan import (
     CANFD_BRS,
     CANFD_MTU,
     DEFAULT_MOTOR_CAN_IDS,
@@ -130,7 +124,7 @@ def test_transport_decodes_feedback_from_can_and_mst_ids():
 def test_send_zero_mit_retries_enobufs_and_counts_backpressure(monkeypatch):
     fake = FakeSocketTransport(fail_once_with_enobufs=True)
     sleeps: list[float] = []
-    monkeypatch.setattr("usb2fdcan_send.damiao.time.sleep", sleeps.append)
+    monkeypatch.setattr("robot_control.hardware.usb2fdcan.transport.time.sleep", sleeps.append)
 
     transport = Usb2FdcanZeroTransport(Usb2FdcanConfig(), socket_transport=fake)
     packet = transport.send_zero_mit(1)
@@ -145,7 +139,7 @@ def test_send_zero_mit_retries_enobufs_and_counts_backpressure(monkeypatch):
 
 def test_enable_motor_primes_and_refreshes_zero_mit(monkeypatch):
     fake = FakeSocketTransport()
-    monkeypatch.setattr("usb2fdcan_send.damiao.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("robot_control.hardware.usb2fdcan.transport.time.sleep", lambda _seconds: None)
     transport = Usb2FdcanTransport(Usb2FdcanConfig(), socket_transport=fake)
 
     transport.enable_motor(1)
@@ -171,18 +165,6 @@ def test_transport_send_mit_torque_uses_root_usb2fdcan_package():
     assert packet
     feedback = decode_feedback(_feedback_payload_from_mit_payload(0x13, payload), DM_Motor_Type.DM4340)
     assert feedback.torque == pytest.approx(2.5, abs=2e-2)
-
-
-def test_split_usb2fdcan_modules_reexport_compatible_api():
-    from usb2fdcan_send.config import Usb2FdcanConfig as SplitConfig
-    from usb2fdcan_send.feedback import DecodedFeedbackFrame as SplitFrame
-    from usb2fdcan_send.protocol import build_mit_frame as split_build_mit_frame
-    from usb2fdcan_send.transport import Usb2FdcanTransport as SplitTransport
-
-    assert SplitConfig is Usb2FdcanConfig
-    assert SplitTransport is Usb2FdcanTransport
-    assert SplitFrame.__name__ == "DecodedFeedbackFrame"
-    assert split_build_mit_frame is build_mit_frame
 
 
 def test_transport_send_mit_command_forwards_full_mit_fields():

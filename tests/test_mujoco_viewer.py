@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-from common import mujoco_viewer
+from robot_control.shared.mujoco import viewer as mujoco_viewer
 
 
 class DummyViewerModule:
@@ -43,7 +37,7 @@ def test_launch_passive_viewer_hides_both_side_panels(monkeypatch):
 def test_mujoco_sim_env_uses_model_default_joint_dynamics():
     pytest.importorskip("mujoco")
 
-    from sim.env import MujocoSimEnv
+    from robot_control.shared.mujoco.env import MujocoSimEnv
 
     env = MujocoSimEnv()
 

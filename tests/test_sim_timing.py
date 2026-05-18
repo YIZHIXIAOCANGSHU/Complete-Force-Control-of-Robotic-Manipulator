@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-from config import Config
-from core.gravity_backend import GravityCompTool
-from control.sim import backend_mujoco_usb2fdcan as udp_server
+from robot_control.config import Config
+from robot_control.dynamics.gravity import GravityCompTool
+import robot_control.modes.control_sim.mujoco_can_backend as udp_server
 
 
 def test_simulation_default_timestep_is_python_owned():

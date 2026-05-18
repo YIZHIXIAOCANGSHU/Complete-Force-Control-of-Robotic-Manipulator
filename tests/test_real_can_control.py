@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-from common.shared_state import SharedRobotState
-from modes.control_real import main as real_can_control
+from robot_control.shared.state import SharedRobotState
+from robot_control.modes.control_real import can_loop as real_can_control
 
 
 def _fake_control_output(status: int = 0):

@@ -1,17 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-from common.runtime.feedback_state import FeedbackSnapshot, snapshot_from_frames
-from common.runtime.safety import check_feedback_age, check_joint_limits
+from robot_control.shared.runtime.feedback_state import FeedbackSnapshot, snapshot_from_frames
+from robot_control.shared.runtime.safety import check_feedback_age, check_joint_limits
 
 
 @dataclass

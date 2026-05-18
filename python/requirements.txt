@@ -1,9 +1,0 @@
-# AM-D02 MuJoCo 仿真依赖
-mujoco>=3.0.0
-numpy>=1.20.0
-scipy>=1.10.0
-rerun-sdk>=0.18.0
-pyserial
-plotly>=5.20
-jinja2>=3.1
-pandas>=2.0

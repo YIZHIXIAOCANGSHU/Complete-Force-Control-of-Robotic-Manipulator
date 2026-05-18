@@ -1,2 +1,0 @@
-"""SITL simulation state package."""
-

@@ -6,6 +6,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .cache/
+*.egg-info/
 .venv/
 
-results/friction_id/
+outputs/
+results/

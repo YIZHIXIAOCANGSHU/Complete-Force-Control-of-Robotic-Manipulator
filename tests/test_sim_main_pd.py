@@ -1,12 +1,9 @@
 import contextlib
-import sys
-from pathlib import Path
-
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-import modes.param_id_sim.main as sim_pd
+import robot_control.param_id.diagnostics as param_diag
+import robot_control.param_id.trajectory as param_traj
+import robot_control.modes.param_id_sim.main as sim_pd
+import robot_control.modes.param_id_sim.validation as sim_pd_validation
 
 
 class _FakeBackend:
@@ -159,7 +156,7 @@ def test_solve_hierarchical_pd_case_marks_distal_refinement(monkeypatch):
     def fake_build_stacked_regressor(*_args, **_kwargs):
         return y, param_names
 
-    monkeypatch.setattr(sim_pd, "build_stacked_regressor", fake_build_stacked_regressor)
+    monkeypatch.setattr(sim_pd_validation, "build_stacked_regressor", fake_build_stacked_regressor)
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_DISTAL_LINK_START", 5)
     labels = np.asarray(["dynamic"] * (rows // sim_pd.Config.NUM_JOINTS), dtype=object)
 
@@ -284,20 +281,20 @@ def test_select_excitation_trajectory_pd_validates_top_svd_candidate(monkeypatch
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_TRAJECTORY_CANDIDATES", 1)
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_VALIDATION_TOP_N", 1)
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS", False)
-    monkeypatch.setattr(sim_pd._base, "_extract_ground_truth", lambda backend: ([1.0] * 7, [[0.0] * 3] * 7, [[1.0] * 3] * 7))
-    monkeypatch.setattr(sim_pd._base, "_trajectory_profiles", lambda: profiles)
-    monkeypatch.setattr(sim_pd._base, "_trajectory_seeds", lambda: [43])
-    monkeypatch.setattr(sim_pd._base, "_build_planned_trajectory", fake_build_planned)
-    monkeypatch.setattr(sim_pd, "limit_ee_speed", lambda env, q, qd, qdd, max_speed: (q, qd, qdd, max_speed, 1.0))
-    monkeypatch.setattr(sim_pd, "build_stacked_regressor", fake_build_stacked)
-    monkeypatch.setattr(sim_pd._base, "_scaled_svd_metrics", fake_metrics)
-    monkeypatch.setattr(sim_pd._base, "_distal_observability", fake_distal)
-    monkeypatch.setattr(sim_pd._base, "_parameter_group_observability", lambda Y: {})
-    monkeypatch.setattr(sim_pd._base, "_joint_coverage", lambda q: {"mean": 1.0})
-    monkeypatch.setattr(sim_pd._base, "_candidate_score", lambda overall, *args: overall["score"])
-    monkeypatch.setattr(sim_pd, "_pd_validation_grid", lambda: [(1.0, 1.0, 1.0, 1.0)])
-    monkeypatch.setattr(sim_pd, "_solve_hierarchical_pd_case", fake_solve)
-    monkeypatch.setattr(sim_pd._base, "_case_selection_key", lambda case: case["validation_rms"])
+    monkeypatch.setattr(param_diag, "_extract_ground_truth", lambda backend: ([1.0] * 7, [[0.0] * 3] * 7, [[1.0] * 3] * 7))
+    monkeypatch.setattr(param_traj, "_trajectory_profiles", lambda: profiles)
+    monkeypatch.setattr(param_traj, "_trajectory_seeds", lambda: [43])
+    monkeypatch.setattr(param_traj, "_build_planned_trajectory", fake_build_planned)
+    monkeypatch.setattr(sim_pd_validation, "limit_ee_speed", lambda env, q, qd, qdd, max_speed: (q, qd, qdd, max_speed, 1.0))
+    monkeypatch.setattr(sim_pd_validation, "build_stacked_regressor", fake_build_stacked)
+    monkeypatch.setattr(param_diag, "_scaled_svd_metrics", fake_metrics)
+    monkeypatch.setattr(param_diag, "_distal_observability", fake_distal)
+    monkeypatch.setattr(param_diag, "_parameter_group_observability", lambda Y: {})
+    monkeypatch.setattr(param_traj, "_joint_coverage", lambda q: {"mean": 1.0})
+    monkeypatch.setattr(param_traj, "_candidate_score", lambda overall, *args: overall["score"])
+    monkeypatch.setattr(sim_pd_validation, "_pd_validation_grid", lambda: [(1.0, 1.0, 1.0, 1.0)])
+    monkeypatch.setattr(sim_pd_validation, "_solve_hierarchical_pd_case", fake_solve)
+    monkeypatch.setattr(param_diag, "_case_selection_key", lambda case: case["validation_rms"])
 
     env = _PointMassEnv(dt=0.01)
     controller = sim_pd.PDController(_FakeBackend(), kp=np.ones(7), kd=np.zeros(7))
@@ -351,7 +348,7 @@ def test_pd_validation_grid_uses_full_grid_by_default(monkeypatch):
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_REG_SWEEP", True)
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_VALIDATION_REG_GRID_LIMIT", 0)
     grid = sim_pd._pd_validation_grid()
-    base_grid = list(sim_pd._base._regularization_grid())
+    base_grid = list(param_diag._regularization_grid())
     assert len(grid) >= len(base_grid)
     for item in base_grid:
         assert item in grid
@@ -440,20 +437,20 @@ def test_candidate_validation_metadata_includes_new_diagnostics(monkeypatch):
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_TRAJECTORY_CANDIDATES", 1)
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_VALIDATION_TOP_N", 1)
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS", False)
-    monkeypatch.setattr(sim_pd._base, "_extract_ground_truth", lambda backend: ([1.0] * 7, [[0.0] * 3] * 7, [[1.0] * 3] * 7))
-    monkeypatch.setattr(sim_pd._base, "_trajectory_profiles", lambda: profiles)
-    monkeypatch.setattr(sim_pd._base, "_trajectory_seeds", lambda: [43])
-    monkeypatch.setattr(sim_pd._base, "_build_planned_trajectory", fake_build_planned)
-    monkeypatch.setattr(sim_pd, "limit_ee_speed", lambda env, q, qd, qdd, max_speed: (q, qd, qdd, max_speed, 1.0))
-    monkeypatch.setattr(sim_pd, "build_stacked_regressor", fake_build_stacked)
-    monkeypatch.setattr(sim_pd._base, "_scaled_svd_metrics", fake_metrics)
-    monkeypatch.setattr(sim_pd._base, "_distal_observability", fake_distal)
-    monkeypatch.setattr(sim_pd._base, "_parameter_group_observability", lambda Y: {})
-    monkeypatch.setattr(sim_pd._base, "_joint_coverage", lambda q: {"mean": 1.0})
-    monkeypatch.setattr(sim_pd._base, "_candidate_score", lambda overall, *args: overall["score"])
-    monkeypatch.setattr(sim_pd, "_pd_validation_grid", lambda: [(1.0, 1.0, 1.0, 1.0)])
-    monkeypatch.setattr(sim_pd, "_solve_hierarchical_pd_case", fake_solve)
-    monkeypatch.setattr(sim_pd._base, "_case_selection_key", lambda case: case["validation_rms"])
+    monkeypatch.setattr(param_diag, "_extract_ground_truth", lambda backend: ([1.0] * 7, [[0.0] * 3] * 7, [[1.0] * 3] * 7))
+    monkeypatch.setattr(param_traj, "_trajectory_profiles", lambda: profiles)
+    monkeypatch.setattr(param_traj, "_trajectory_seeds", lambda: [43])
+    monkeypatch.setattr(param_traj, "_build_planned_trajectory", fake_build_planned)
+    monkeypatch.setattr(sim_pd_validation, "limit_ee_speed", lambda env, q, qd, qdd, max_speed: (q, qd, qdd, max_speed, 1.0))
+    monkeypatch.setattr(sim_pd_validation, "build_stacked_regressor", fake_build_stacked)
+    monkeypatch.setattr(param_diag, "_scaled_svd_metrics", fake_metrics)
+    monkeypatch.setattr(param_diag, "_distal_observability", fake_distal)
+    monkeypatch.setattr(param_diag, "_parameter_group_observability", lambda Y: {})
+    monkeypatch.setattr(param_traj, "_joint_coverage", lambda q: {"mean": 1.0})
+    monkeypatch.setattr(param_traj, "_candidate_score", lambda overall, *args: overall["score"])
+    monkeypatch.setattr(sim_pd_validation, "_pd_validation_grid", lambda: [(1.0, 1.0, 1.0, 1.0)])
+    monkeypatch.setattr(sim_pd_validation, "_solve_hierarchical_pd_case", fake_solve)
+    monkeypatch.setattr(param_diag, "_case_selection_key", lambda case: case["validation_rms"])
 
     env = _PointMassEnv(dt=0.01)
     controller = sim_pd.PDController(_FakeBackend(), kp=np.ones(7), kd=np.zeros(7))
@@ -501,36 +498,36 @@ def test_end_to_end_pd_pipeline_composes(monkeypatch):
     theta[28:] = 1.5
     tau = Y @ theta + np.random.default_rng(42).normal(0, 1e-6, Y.shape[0])
 
-    monkeypatch.setattr(sim_pd, "build_stacked_regressor", lambda *args, **kwargs: (Y, param_names))
-    monkeypatch.setattr(sim_pd._base, "solve_least_squares", lambda Ys, tau_s, pn, prior, **kw: {n: float(v) for n, v in zip(pn, theta)})
-    monkeypatch.setattr(sim_pd._base, "to_link_params", lambda result, prior: (
+    monkeypatch.setattr(sim_pd_validation, "build_stacked_regressor", lambda *args, **kwargs: (Y, param_names))
+    monkeypatch.setattr(param_diag, "solve_least_squares", lambda Ys, tau_s, pn, prior, **kw: {n: float(v) for n, v in zip(pn, theta)})
+    monkeypatch.setattr(param_diag, "to_link_params", lambda result, prior: (
         [1.0] * 7, [[0.0, 0.0, 0.0]] * 7, [[1.0, 1.0, 1.0]] * 7,
     ))
-    monkeypatch.setattr(sim_pd._base, "compute_prediction_error", lambda *args: 0.01)
-    monkeypatch.setattr(sim_pd._base, "compute_condition_number", lambda *args: 100.0)
-    monkeypatch.setattr(sim_pd._base, "_scaled_svd_metrics", lambda *args: {"rank": 49, "condition": 100.0, "sigma_min": 0.01})
-    monkeypatch.setattr(sim_pd._base, "_distal_observability", lambda *args, **kw: {"rank": 21, "condition": 10.0, "correlation": 0.1, "projection": {"ratio": 0.8, "rank": 21}})
-    monkeypatch.setattr(sim_pd._base, "_parameter_group_observability", lambda *args: {})
-    monkeypatch.setattr(sim_pd._base, "_j7_column_diagnostics", lambda *args: {"mass_norm": 1.0, "mean_norm": 1.0, "max_norm": 1.0, "min_norm": 1.0})
-    monkeypatch.setattr(sim_pd._base, "_validation_rms", lambda *args, **kw: 0.02)
-    monkeypatch.setattr(sim_pd._base, "_segment_prediction_rms", lambda *args, **kw: 0.01)
-    monkeypatch.setattr(sim_pd._base, "_segment_indices", lambda labels, tag: np.arange(len(labels) // 2, dtype=np.int64))
-    monkeypatch.setattr(sim_pd._base, "_mass_error_summary", lambda masses, true_masses: {
+    monkeypatch.setattr(param_diag, "compute_prediction_error", lambda *args: 0.01)
+    monkeypatch.setattr(param_diag, "compute_condition_number", lambda *args: 100.0)
+    monkeypatch.setattr(param_diag, "_scaled_svd_metrics", lambda *args: {"rank": 49, "condition": 100.0, "sigma_min": 0.01})
+    monkeypatch.setattr(param_diag, "_distal_observability", lambda *args, **kw: {"rank": 21, "condition": 10.0, "correlation": 0.1, "projection": {"ratio": 0.8, "rank": 21}})
+    monkeypatch.setattr(param_diag, "_parameter_group_observability", lambda *args: {})
+    monkeypatch.setattr(param_diag, "_j7_column_diagnostics", lambda *args: {"mass_norm": 1.0, "mean_norm": 1.0, "max_norm": 1.0, "min_norm": 1.0})
+    monkeypatch.setattr(param_diag, "_validation_rms", lambda *args, **kw: 0.02)
+    monkeypatch.setattr(param_diag, "_segment_prediction_rms", lambda *args, **kw: 0.01)
+    monkeypatch.setattr(param_diag, "_segment_indices", lambda labels, tag: np.arange(len(labels) // 2, dtype=np.int64))
+    monkeypatch.setattr(param_diag, "_mass_error_summary", lambda masses, true_masses: {
         "errors": [0.0] * 7, "abs_errors": [0.0] * 7, "max_abs": 0.0, "max_abs_joint": 1,
         "passes_5pct": True, "target_pct": 5.0, "j7_abs": 0.0, "distal_abs_mean": 0.0,
     })
-    monkeypatch.setattr(sim_pd._base, "_com_error_summary", lambda coms, true_coms: {
+    monkeypatch.setattr(param_diag, "_com_error_summary", lambda coms, true_coms: {
         "error_vectors": [[0.0, 0.0, 0.0]] * 7, "distance_errors": [0.0] * 7,
         "max_distance": 0.0, "max_distance_joint": 1, "distal_distance_mean": 0.0,
         "target_m": 0.01, "passes_target": True,
     })
-    monkeypatch.setattr(sim_pd._base, "_inertia_error_summary", lambda inertias, true_inertias: {
+    monkeypatch.setattr(param_diag, "_inertia_error_summary", lambda inertias, true_inertias: {
         "relative_errors": [[0.0] * 3] * 7, "absolute_relative_errors": [[0.0] * 3] * 7,
         "link_l2_errors": [0.0] * 7, "max_component_abs": 0.0, "max_component_joint": 1,
         "max_component_axis": "Ixx", "max_link_l2": 0.0, "max_link_l2_joint": 1,
         "distal_l2_mean": 0.0, "target_pct": 15.0, "passes_target": True,
     })
-    monkeypatch.setattr(sim_pd._base, "get_last_diagnostics", lambda: {"rank": 49.0, "num_params": 49.0, "data_rank": 49.0})
+    monkeypatch.setattr(param_diag, "get_last_diagnostics", lambda: {"rank": 49.0, "num_params": 49.0, "data_rank": 49.0})
 
     labels = np.array(["dynamic"] * n_steps, dtype=object)
     case = sim_pd._best_pd_inertial_case(

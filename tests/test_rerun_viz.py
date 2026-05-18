@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-from common import rerun_viz
+from robot_control.shared.rerun import viz as rerun_viz
 
 
 class DummyRR:

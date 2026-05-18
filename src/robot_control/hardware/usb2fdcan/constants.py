@@ -1,0 +1,21 @@
+"""USB2FDCAN protocol and transport constants."""
+
+from __future__ import annotations
+
+import socket
+
+CAN_MTU = 16
+CANFD_MTU = 72
+CAN_RAW_FD_FRAMES = getattr(socket, "CAN_RAW_FD_FRAMES", 5)
+SOL_CAN_RAW = getattr(socket, "SOL_CAN_RAW", socket.SOL_CAN_BASE + socket.CAN_RAW)
+CANFD_BRS = getattr(socket, "CANFD_BRS", 0x01)
+
+CLEAR_ERROR_CMD = 0xFB
+ENABLE_CMD = 0xFC
+DISABLE_CMD = 0xFD
+DEFAULT_BACKPRESSURE_SLEEP = 0.0005
+MAX_BACKPRESSURE_SLEEP = 0.01
+DEFAULT_CONTROL_COMMAND_REPEAT = 5
+DEFAULT_CONTROL_COMMAND_INTERVAL = 0.002
+DEFAULT_PARAM_WRITE_SETTLE = 0.002
+VALID_FEEDBACK_STATE_CODES = frozenset({0x0, 0x1, 0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE})
