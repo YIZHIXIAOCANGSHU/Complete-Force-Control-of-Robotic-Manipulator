@@ -1,4 +1,4 @@
-"""Independent USB2FDCAN helpers for AM-D02 zero-torque mirror mode."""
+"""Independent USB2FDCAN helpers for AM-D02 real-control and identification modes."""
 
 from .damiao import (
     DecodedFeedbackFrame,

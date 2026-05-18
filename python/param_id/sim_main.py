@@ -25,6 +25,7 @@ for path in (PYTHON_ROOT, PROJECT_ROOT):
         sys.path.insert(0, path)
 
 from config import Config
+from common.mujoco.ghost import create_mujoco_ghost_if_enabled
 from core.pinocchio_backend import PinocchioGravityBackend
 from common.mujoco_viewer import launch_passive_viewer
 from common import rerun_viz
@@ -552,6 +553,130 @@ def _joint_param_table_records(case):
     return records
 
 
+def _joint_term_values_from_result(result, priors=None):
+    values = []
+    priors = Config.PARAM_ID_JOINT_PRIORS if priors is None else priors
+    for joint, prior in enumerate(priors, start=1):
+        row = {}
+        for term in ("fc", "k", "fv", "fo"):
+            row[term] = _finite_float(
+                result.get(f"J{joint}_{term}", prior.get(term, 0.0)),
+                prior.get(term, 0.0),
+            )
+        values.append(row)
+    return values
+
+
+def _joint_term_error_summary(result, q_meas=None, qd_meas=None, q_ref=None, priors=None):
+    priors = Config.PARAM_ID_JOINT_PRIORS if priors is None else priors
+    identified = _joint_term_values_from_result(result or {}, priors=priors)
+    param_rows = []
+    abs_errors = []
+    rel_errors = []
+    for joint, (identified_terms, prior_terms) in enumerate(zip(identified, priors), start=1):
+        for term in ("fc", "k", "fv", "fo"):
+            prior_value = float(prior_terms.get(term, 0.0))
+            identified_value = float(identified_terms.get(term, prior_value))
+            error = identified_value - prior_value
+            abs_error = abs(error)
+            rel_error = abs_error / abs(prior_value) * 100.0 if abs(prior_value) > 1e-12 else 0.0
+            param_rows.append(
+                {
+                    "parameter": f"J{joint}_{term}",
+                    "joint": joint,
+                    "term": term,
+                    "identified": identified_value,
+                    "prior": prior_value,
+                    "error": error,
+                    "abs_error": abs_error,
+                    "relative_error_pct": rel_error,
+                }
+            )
+            abs_errors.append(abs_error)
+            rel_errors.append(rel_error)
+
+    n_joints = Config.NUM_JOINTS
+    q = _as_joint_matrix(q_meas) if q_meas is not None else np.zeros((0, n_joints), dtype=np.float64)
+    qd = _as_joint_matrix(qd_meas) if qd_meas is not None else np.zeros((0, n_joints), dtype=np.float64)
+    count = min(len(q), len(qd))
+    torque_error = np.zeros((0, n_joints), dtype=np.float64)
+    if count:
+        q = q[:count]
+        qd = qd[:count]
+        q_ref_arr = np.asarray(Config.HOME_QPOS if q_ref is None else q_ref, dtype=np.float64)
+        torque_identified = np.zeros((count, n_joints), dtype=np.float64)
+        torque_prior = np.zeros((count, n_joints), dtype=np.float64)
+        for step in range(count):
+            torque_identified[step] = _joint_effect_torque(q[step], qd[step], identified, q_ref_arr)
+            torque_prior[step] = _joint_effect_torque(q[step], qd[step], priors, q_ref_arr)
+        torque_error = torque_identified - torque_prior
+
+    if torque_error.size:
+        per_joint_rms = np.sqrt(np.mean(torque_error ** 2, axis=0))
+        per_joint_max = np.max(np.abs(torque_error), axis=0)
+        torque_rms = float(np.sqrt(np.mean(torque_error ** 2)))
+        torque_max = float(np.max(np.abs(torque_error)))
+        torque_max_joint = int(np.argmax(per_joint_max)) + 1
+    else:
+        per_joint_rms = np.zeros(n_joints, dtype=np.float64)
+        per_joint_max = np.zeros(n_joints, dtype=np.float64)
+        torque_rms = 0.0
+        torque_max = 0.0
+        torque_max_joint = 1
+
+    max_abs_idx = int(np.argmax(abs_errors)) if abs_errors else 0
+    max_rel_idx = int(np.argmax(rel_errors)) if rel_errors else 0
+    return {
+        "max_abs_param_error": float(abs_errors[max_abs_idx]) if abs_errors else 0.0,
+        "max_abs_param": param_rows[max_abs_idx]["parameter"] if param_rows else "",
+        "max_relative_param_error_pct": float(rel_errors[max_rel_idx]) if rel_errors else 0.0,
+        "max_relative_param": param_rows[max_rel_idx]["parameter"] if param_rows else "",
+        "param_error_rms": float(np.sqrt(np.mean(np.asarray(abs_errors, dtype=np.float64) ** 2))) if abs_errors else 0.0,
+        "torque_rms": torque_rms,
+        "torque_max_abs": torque_max,
+        "torque_max_abs_joint": torque_max_joint,
+        "sample_count": int(count),
+        "reference": "PARAM_ID_JOINT_PRIORS",
+        "error_definition": "identified - prior",
+        "torque_error_model": "fc*tanh(qd/eps) + k*(q-q_ref) + fv*qd + fo",
+        "per_param": param_rows,
+        "per_joint": [
+            {
+                "joint": joint + 1,
+                "torque_rms": float(per_joint_rms[joint]),
+                "torque_max_abs": float(per_joint_max[joint]),
+            }
+            for joint in range(n_joints)
+        ],
+    }
+
+
+def _joint_term_error_table_records(case):
+    summary = case.get("joint_term_error_summary", {})
+    per_param_by_joint = {}
+    for param in summary.get("per_param", []):
+        joint = int(param.get("joint", 0))
+        current = per_param_by_joint.get(joint)
+        if current is None or float(param.get("abs_error", 0.0)) > float(current.get("abs_error", 0.0)):
+            per_param_by_joint[joint] = param
+
+    rows = []
+    for row in summary.get("per_joint", []):
+        joint = int(row.get("joint", 0))
+        worst_param = per_param_by_joint.get(joint, {})
+        rows.append(
+            {
+                "joint": f"J{joint}",
+                "torque_rms": _fmt(row.get("torque_rms", 0.0), 5),
+                "torque_max_abs": _fmt(row.get("torque_max_abs", 0.0), 5),
+                "worst_param": worst_param.get("parameter", ""),
+                "param_abs_error": _fmt(worst_param.get("abs_error", 0.0), 5),
+                "param_relative_error_pct": _fmt(worst_param.get("relative_error_pct", 0.0), 2),
+            }
+        )
+    return rows
+
+
 def _error_summary_records(trajectory_records):
     stats = _dof_error_stats(trajectory_records)["by_dof"]
     records = []
@@ -640,6 +765,7 @@ def _identification_quality_summary(case):
     mass = case.get("mass_summary", {})
     com = case.get("com_summary", {})
     inertia = case.get("inertia_summary", {})
+    joint_terms = case.get("joint_term_error_summary", {})
     return [
         {
             "label": "质量",
@@ -668,6 +794,14 @@ def _identification_quality_summary(case):
                 inertia.get("max_component_abs", float("inf")),
                 inertia.get("target_pct", Config.PARAM_ID_INERTIA_ERROR_TARGET_PCT),
             ),
+        },
+        {
+            "label": "摩擦/弹性关节项",
+            "value": (
+                f"力矩RMS {joint_terms.get('torque_rms', 0.0):.4f} N·m · "
+                f"最大 {joint_terms.get('torque_max_abs', 0.0):.4f} N·m @J{joint_terms.get('torque_max_abs_joint', 0)}"
+            ),
+            "level": "ok" if joint_terms.get("torque_rms", 0.0) <= 0.05 else "warning",
         },
     ]
 
@@ -734,6 +868,7 @@ def _build_identification_summary(
             "max_error_time": max_error_time,
             "before_after_metrics": case.get("before_after_metrics"),
             "identification_quality": _identification_quality_summary(case),
+            "joint_term_error_summary": case.get("joint_term_error_summary", {}),
             "warnings": list(warnings),
             "trajectory_metadata": dict(trajectory_metadata or {}),
             "config": {
@@ -1399,6 +1534,8 @@ _PARAM_ID_HTML_TEMPLATE = """<!doctype html>
     <section class="section">
       <h2>Identification Result</h2>
       <div class="table-wrap">{{ joint_parameter_table | safe }}</div>
+      <h3>摩擦/弹性关节项误差（相对先验）</h3>
+      <div class="table-wrap">{{ joint_term_error_table | safe }}</div>
       {{ parameter_charts_html | safe }}
     </section>
     <section class="section">
@@ -1444,6 +1581,7 @@ _PARAM_ID_HTML_TEMPLATE = """<!doctype html>
       <h2>Data Notes</h2>
       <p>误差定义：actual - expected。位置误差显示单位为 mm，姿态误差显示单位为 degree。</p>
       <p>姿态误差基于实际四元数和目标四元数的相对旋转，再转换为 Roll / Pitch / Yaw。</p>
+      <p>摩擦/弹性关节项误差以 PARAM_ID_JOINT_PRIORS 为参考，力矩误差按 fc*tanh(qd/eps) + k*(q-q_ref) + fv*qd + fo 计算。</p>
       <p>HTML 是摩擦辨识结束后的离线总结报告；Rerun 仍用于运行时实时观察。</p>
     </section>
   </main>
@@ -1484,7 +1622,7 @@ def _render_html_report(context):
     </header>
     <section class="section"><h2>Executive Summary</h2><div class="summary-grid">{cards}</div></section>
     {warning_section}
-    <section class="section"><h2>Identification Result</h2><div class="table-wrap">{context["joint_parameter_table"]}</div>{context["parameter_charts_html"]}</section>
+    <section class="section"><h2>Identification Result</h2><div class="table-wrap">{context["joint_parameter_table"]}</div><h3>摩擦/弹性关节项误差（相对先验）</h3><div class="table-wrap">{context["joint_term_error_table"]}</div>{context["parameter_charts_html"]}</section>
     <section class="section"><h2>Before / After Comparison</h2>{context["before_after_html"]}</section>
     <section class="section"><h2>Trajectory Overview</h2>{context["trajectory_overview_html"]}</section>
     <section class="section"><h2>6DoF Error Summary</h2><div class="table-wrap">{context["error_summary_table"]}</div></section>
@@ -1492,7 +1630,7 @@ def _render_html_report(context):
     <section class="section"><h2>Rotation Error Curves</h2>{context["rotation_error_charts_html"]}</section>
     <section class="section"><h2>Actual vs Expected Detail</h2>{context["actual_expected_html"]}</section>
     <section class="section"><h2>Identification Diagnostics</h2>{context["diagnostic_charts_html"]}<h3>诊断摘要</h3><div class="table-wrap">{context["diagnostics_table"]}</div><h3>参数表</h3><div class="table-wrap">{context["parameter_table"]}</div><h3>真值对比</h3><div class="table-wrap">{context["comparison_table"]}</div><h3>激励统计</h3><div class="table-wrap">{context["excitation_table"]}</div></section>
-    <section class="section notes"><h2>Data Notes</h2><p>误差定义：actual - expected。位置误差显示单位为 mm，姿态误差显示单位为 degree。</p><p>姿态误差基于实际四元数和目标四元数的相对旋转，再转换为 Roll / Pitch / Yaw。</p><p>HTML 是摩擦辨识结束后的离线总结报告；Rerun 仍用于运行时实时观察。</p></section>
+    <section class="section notes"><h2>Data Notes</h2><p>误差定义：actual - expected。位置误差显示单位为 mm，姿态误差显示单位为 degree。</p><p>姿态误差基于实际四元数和目标四元数的相对旋转，再转换为 Roll / Pitch / Yaw。</p><p>摩擦/弹性关节项误差以 PARAM_ID_JOINT_PRIORS 为参考，力矩误差按 fc*tanh(qd/eps) + k*(q-q_ref) + fv*qd + fo 计算。</p><p>HTML 是摩擦辨识结束后的离线总结报告；Rerun 仍用于运行时实时观察。</p></section>
   </main>
 </body>
 </html>
@@ -1564,6 +1702,17 @@ def _write_html_report(
                     ("delta", "变化量"),
                     ("pct_change", "变化 %"),
                     ("bound_status", "边界状态"),
+                ],
+            ),
+            "joint_term_error_table": _records_to_html_table(
+                _joint_term_error_table_records(case),
+                [
+                    ("joint", "关节"),
+                    ("torque_rms", "力矩RMS N*m"),
+                    ("torque_max_abs", "最大力矩误差 N*m"),
+                    ("worst_param", "最大参数误差项"),
+                    ("param_abs_error", "参数绝对误差"),
+                    ("param_relative_error_pct", "参数相对误差 %"),
                 ],
             ),
             "error_summary_table": _records_to_html_table(
@@ -2741,6 +2890,7 @@ def _solve_identification_case(
     mass_summary = _mass_error_summary(masses, true_masses)
     com_summary = _com_error_summary(coms, true_coms)
     inertia_summary = _inertia_error_summary(inertias, true_inertias)
+    joint_term_summary = _joint_term_error_summary(result, q_meas, qd_meas, q_ref)
     dynamic_rows = _segment_indices(row_labels, "dynamic")
     j67_rows = _segment_indices(row_labels, "j6j7")
     j7_rows = _segment_indices(row_labels, "j7")
@@ -2782,6 +2932,7 @@ def _solve_identification_case(
         "mass_summary": mass_summary,
         "com_summary": com_summary,
         "inertia_summary": inertia_summary,
+        "joint_term_error_summary": joint_term_summary,
         "selection": {
             "inertial_prior_lambda": Config.PARAM_ID_PRIOR_LAMBDA_INERTIAL if inertial_prior_lambda is None else inertial_prior_lambda,
             "mass_prior_lambda": Config.PARAM_ID_PRIOR_LAMBDA_MASS if mass_prior_lambda is None else mass_prior_lambda,
@@ -2894,6 +3045,11 @@ def _print_executive_summary(case):
         f"{inertia.get('max_component_abs', float('nan')):.2f}% "
         f"(目标 ≤ {inertia.get('target_pct', Config.PARAM_ID_INERTIA_ERROR_TARGET_PCT):.1f}%)"
     )
+    joint_terms = case.get("joint_term_error_summary", {})
+    _print_box_line(
+        f"  摩擦/弹性关节项: 力矩RMS {joint_terms.get('torque_rms', 0.0):.4f} N·m, "
+        f"最大 J{joint_terms.get('torque_max_abs_joint', 0)}: {joint_terms.get('torque_max_abs', 0.0):.4f} N·m"
+    )
     _print_box_line(
         f"  训练/验证 RMS: {case.get('prediction_error', float('nan')):.4f} / "
         f"{case.get('validation_rms', float('nan')):.4f} N·m "
@@ -2942,6 +3098,12 @@ def _print_inertial_results(case, true_masses, true_coms=None, true_inertias=Non
 def _print_joint_results(case):
     print("\n┌─ 关节摩擦/弹性辨识 ─────────────────────────────────────────────┐")
     _print_joint_term_comparison(case.get("result", {}))
+    summary = case.get("joint_term_error_summary", {})
+    print(
+        f"关节项力矩误差: RMS={summary.get('torque_rms', 0.0):.5f} N·m, "
+        f"Max={summary.get('torque_max_abs', 0.0):.5f} N·m @J{summary.get('torque_max_abs_joint', 0)}, "
+        f"最大参数误差={summary.get('max_abs_param', '')} {summary.get('max_abs_param_error', 0.0):.5f}"
+    )
     print("└────────────────────────────────────────────────────────────────┘")
 
 
@@ -3098,6 +3260,14 @@ def main() -> None:
     ee_pos_desired_all, ee_quat_desired_all = _compute_ee_poses_for_q_traj(env, q_traj)
 
     with _viewer_context(env) as viewer:
+        ghost = create_mujoco_ghost_if_enabled(
+            env.model,
+            env.data,
+            enabled=viewer is not None and Config.ENABLE_MUJOCO_GHOST,
+            alpha=Config.MUJOCO_GHOST_ALPHA,
+        )
+        if ghost is not None:
+            ghost.dof_ids = env.dof_ids
         t0 = time.perf_counter()
         for step in range(n_steps):
             if step % 250 == 0:
@@ -3109,6 +3279,9 @@ def main() -> None:
             data.qvel[:7] = qd_traj[step]
             data.qacc[:7] = qdd_traj[step]
             env.forward()
+            if ghost is not None:
+                ghost.update_from_qpos(q_traj[step])
+                ghost.update_from_pose(ee_pos_desired_all[step], ee_quat_desired_all[step])
 
             if viewer is not None and step % 5 == 0:
                 viewer.sync()

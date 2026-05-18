@@ -38,8 +38,8 @@ class GravityCompTool:
     """Pinocchio-based gravity compensation and control computation.
 
     Loads the AM-D02 URDF, runs FK / Jacobian / RNEA dynamics / DLS IK
-    entirely through Pinocchio, and exposes the same compute_fk / compute
-    interface that real / mc / usbfdcan-sim callers already use.
+    entirely through Pinocchio, and exposes the compute_fk / compute
+    interface used by the retained real-control and identification callers.
     """
 
     def __init__(self) -> None:

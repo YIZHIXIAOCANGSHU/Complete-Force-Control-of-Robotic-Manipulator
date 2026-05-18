@@ -173,6 +173,18 @@ def test_transport_send_mit_torque_uses_root_usb2fdcan_package():
     assert feedback.torque == pytest.approx(2.5, abs=2e-2)
 
 
+def test_split_usb2fdcan_modules_reexport_compatible_api():
+    from usb2fdcan_send.config import Usb2FdcanConfig as SplitConfig
+    from usb2fdcan_send.feedback import DecodedFeedbackFrame as SplitFrame
+    from usb2fdcan_send.protocol import build_mit_frame as split_build_mit_frame
+    from usb2fdcan_send.transport import Usb2FdcanTransport as SplitTransport
+
+    assert SplitConfig is Usb2FdcanConfig
+    assert SplitTransport is Usb2FdcanTransport
+    assert SplitFrame.__name__ == "DecodedFeedbackFrame"
+    assert split_build_mit_frame is build_mit_frame
+
+
 def test_transport_send_mit_command_forwards_full_mit_fields():
     fake = FakeSocketTransport()
     transport = Usb2FdcanTransport(Usb2FdcanConfig(), socket_transport=fake)

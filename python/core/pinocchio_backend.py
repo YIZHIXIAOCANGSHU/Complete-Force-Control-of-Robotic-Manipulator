@@ -74,12 +74,7 @@ def q7_to_q8(q7: np.ndarray) -> np.ndarray:
 
 
 class PinocchioGravityBackend:
-    """Pinocchio-based kinematics/dynamics/control computation backend.
-
-    Mirrors the public API of GravityCompTool (compute_fk / compute returning
-    MitControlOutput) so callers in usb2fdcan_control and
-    workspace need no changes.
-    """
+    """Pinocchio-based kinematics/dynamics/control computation backend."""
 
     def __init__(
         self,

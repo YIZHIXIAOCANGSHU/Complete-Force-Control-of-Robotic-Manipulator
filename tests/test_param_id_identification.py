@@ -583,8 +583,43 @@ def _minimal_identified_case():
         "mass_summary": sim_main._mass_error_summary(masses, np.ones(7)),
         "com_summary": sim_main._com_error_summary(coms, np.zeros((7, 3))),
         "inertia_summary": sim_main._inertia_error_summary(inertias, np.ones((7, 3)) * 0.01),
+        "joint_term_error_summary": sim_main._joint_term_error_summary(
+            {
+                f"J{joint}_{term}": float(joint)
+                for joint in range(1, 8)
+                for term in ("fc", "k", "fv", "fo")
+            },
+            np.zeros((2, 7)),
+            np.zeros((2, 7)),
+            np.zeros(7),
+        ),
         "param_names": [f"L{link}_{suffix}" for link in range(7) for suffix in ("mass", "mcx", "mcy", "mcz", "Ixx", "Iyy", "Izz")],
     }
+
+
+def test_joint_term_error_summary_reports_parameter_and_torque_errors():
+    result = {
+        f"J{joint}_{term}": float(values[term])
+        for joint, values in enumerate(sim_main.Config.PARAM_ID_JOINT_PRIORS, start=1)
+        for term in ("fc", "k", "fv", "fo")
+    }
+    result["J1_fc"] += 0.1
+    result["J2_fv"] += 0.02
+    q = np.zeros((3, 7), dtype=np.float64)
+    qd = np.zeros((3, 7), dtype=np.float64)
+    qd[:, 0] = 0.5
+    qd[:, 1] = 0.25
+
+    summary = sim_main._joint_term_error_summary(result, q, qd, np.zeros(7))
+
+    assert summary["max_abs_param_error"] >= 0.1
+    assert summary["max_abs_param"] == "J1_fc"
+    assert summary["torque_rms"] > 0.0
+    assert summary["torque_max_abs"] > 0.0
+    assert summary["torque_max_abs_joint"] == 1
+    assert summary["reference"] == "PARAM_ID_JOINT_PRIORS"
+    assert summary["error_definition"] == "identified - prior"
+    assert summary["per_joint"][0]["torque_rms"] > 0.0
 
 
 def test_terminal_report_uses_summary_tables_and_folds_diagnostics(monkeypatch, capsys):
@@ -602,6 +637,7 @@ def test_terminal_report_uses_summary_tables_and_folds_diagnostics(monkeypatch, 
     assert "质量+COM" in concise
     assert "Izz(辨识)" in concise
     assert "训练/验证 RMS" in concise
+    assert "摩擦/弹性关节项:" in concise
     assert "先验偏离 RMS" not in concise
     assert "J7专项" not in concise
 
@@ -661,6 +697,10 @@ def test_param_id_html_report_writes_core_tables(tmp_path, monkeypatch):
     assert "质量" in html
     assert "COM" in html
     assert "惯量" in html
+    assert "关节项" in html
+    assert "力矩RMS" in html
+    assert "相对先验" in html
+    assert "最大参数误差项" in html
     assert "Mass: Identified vs URDF" in html
     assert "Izz: Identified vs URDF" in html
 
@@ -775,6 +815,9 @@ def test_param_id_html_report_writes_offline_summary_artifacts(tmp_path, monkeyp
     assert summary["worst_dof"] == "X"
     assert np.isclose(summary["rms_error_by_dof"]["X"], np.sqrt(5.0))
     assert np.isclose(summary["max_error_by_dof"]["Yaw"], 2.5)
+    assert "joint_term_error_summary" in summary
+    assert "torque_rms" in summary["joint_term_error_summary"]
+    assert summary["joint_term_error_summary"]["reference"] == "PARAM_ID_JOINT_PRIORS"
     assert summary["trajectory_metadata"]["profile"] == "T0"
     assert "ok" in Path(report_path).read_text(encoding="utf-8")
 

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from common.shared_state import SharedRobotState
-from real import usb2fdcan_control as real_can_control
+from modes.control_real import main as real_can_control
 
 
 def _fake_control_output(status: int = 0):

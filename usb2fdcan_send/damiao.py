@@ -1,7 +1,7 @@
-"""Minimal Damiao USB2FDCAN transport for high-rate zero MIT commands.
+"""Minimal Damiao USB2FDCAN transport for real-control and identification modes.
 
 This module is intentionally independent from the historical ``send/`` helper.
-It keeps only the protocol pieces needed by ``usbfdcan-sim``: SocketCAN I/O,
+It keeps the protocol pieces needed by the retained real hardware paths: SocketCAN I/O,
 MIT command packing, feedback decoding, and seven-motor zero/safety commands.
 """
 
@@ -569,7 +569,7 @@ class Usb2FdcanTransport:
 
 
 class Usb2FdcanZeroTransport(Usb2FdcanTransport):
-    """Backward-compatible name for the zero-command mirror transport."""
+    """Backward-compatible name for the zero-command USB2FDCAN transport."""
 
 
 __all__ = [

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from config import Config
 from core.gravity_backend import GravityCompTool
-from sim import udp_server
+from control.sim import backend_mujoco_usb2fdcan as udp_server
 
 
 def test_simulation_default_timestep_is_python_owned():

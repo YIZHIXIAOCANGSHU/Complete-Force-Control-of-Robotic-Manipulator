@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+"""Real-hardware SocketCAN USB2FDCAN control application."""
+
+from __future__ import annotations
+
+import os
+import sys
+import threading
+import time
+from dataclasses import dataclass
+
+PYTHON_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.path.dirname(PYTHON_ROOT)
+for path in (PYTHON_ROOT, PROJECT_ROOT):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from config import Config, _env_bool, _env_float, _env_int
+from common.coord_transforms import RobotMujocoTransformer
+from core.gravity_backend import GravityCompTool
+from common.mujoco.ghost import create_mujoco_ghost_if_enabled
+from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
+from common.rerun_async import RerunLogger
+from common.shared_state import SharedRobotState
+from usb2fdcan_send.damiao import Usb2FdcanConfig, Usb2FdcanTransport
+import common.rerun_viz as rerun_viz
+
+
+CAN_INTERFACE = os.getenv("AM_D02_CAN_INTERFACE", "can0")
+CAN_NOMINAL_BITRATE = _env_int("AM_D02_CAN_NOMINAL_BITRATE", 1_000_000)
+CAN_DATA_BITRATE = _env_int("AM_D02_CAN_DATA_BITRATE", 5_000_000)
+CAN_FORCE_FD = _env_bool("AM_D02_CAN_FORCE_FD", True)
+CAN_CONFIGURE_INTERFACE = _env_bool("AM_D02_CAN_CONFIGURE_INTERFACE", False)
+CAN_FEEDBACK_TIMEOUT_S = max(0.001, _env_float("AM_D02_CAN_FEEDBACK_TIMEOUT_S", 0.10))
+CAN_STARTUP_ENABLE = _env_bool("AM_D02_CAN_STARTUP_ENABLE", True)
+CAN_READ_TIMEOUT_S = max(0.0, _env_float("AM_D02_CAN_READ_TIMEOUT_S", 0.002))
+CAN_READ_CHUNK_SIZE = max(19, _env_int("AM_D02_CAN_READ_CHUNK_SIZE", 256))
+
+shutdown_event = threading.Event()
+
+
+@dataclass(frozen=True)
+class CanRuntimeConfig:
+    transport: Usb2FdcanConfig
+    motor_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
+
+
+def build_can_runtime_config() -> CanRuntimeConfig:
+    return CanRuntimeConfig(
+        transport=Usb2FdcanConfig(
+            interface=CAN_INTERFACE,
+            nominal_bitrate=CAN_NOMINAL_BITRATE,
+            data_bitrate=CAN_DATA_BITRATE,
+            configure_interface=CAN_CONFIGURE_INTERFACE,
+            force_fd=CAN_FORCE_FD,
+            read_timeout=CAN_READ_TIMEOUT_S,
+        )
+    )
+
+
+def open_can_transport():
+    return Usb2FdcanTransport(build_can_runtime_config().transport)
+
+
+def _safe_zero_and_disable(transport, motor_ids) -> None:
+    for motor_id in motor_ids:
+        try:
+            transport.send_mit_command(
+                int(motor_id),
+                position=0.0,
+                velocity=0.0,
+                kp=0.0,
+                kd=0.0,
+                torque=0.0,
+            )
+        except Exception as exc:
+            print(f"[CAN Warning] motor {motor_id} 零力矩下发失败: {exc}")
+    for motor_id in motor_ids:
+        try:
+            transport.disable_motor(int(motor_id))
+        except Exception as exc:
+            print(f"[CAN Warning] motor {motor_id} disable 失败: {exc}")
+
+
+def _send_zero_keepalive(transport, motor_ids) -> None:
+    for motor_id in motor_ids:
+        transport.send_mit_command(
+            int(motor_id),
+            position=0.0,
+            velocity=0.0,
+            kp=0.0,
+            kd=0.0,
+            torque=0.0,
+        )
+
+
+def _startup_enable(transport, motor_ids) -> None:
+    try:
+        transport.reset_input_buffer()
+    except Exception as exc:
+        print(f"[CAN Warning] 清空 CAN 输入缓冲失败: {exc}")
+    for motor_id in motor_ids:
+        transport.clear_error(int(motor_id))
+        transport.send_mit_command(
+            int(motor_id),
+            position=0.0,
+            velocity=0.0,
+            kp=0.0,
+            kd=0.0,
+            torque=0.0,
+        )
+        transport.enable_motor(int(motor_id))
+        transport.send_mit_command(
+            int(motor_id),
+            position=0.0,
+            velocity=0.0,
+            kp=0.0,
+            kd=0.0,
+            torque=0.0,
+        )
+    _send_zero_keepalive(transport, motor_ids)
+
+
+def _send_mit_round(transport, motor_ids, control_output) -> None:
+    for index, motor_id in enumerate(motor_ids):
+        transport.send_mit_command(
+            int(motor_id),
+            position=float(control_output.q_ref[index]),
+            velocity=float(control_output.qd_ref[index]),
+            kp=float(control_output.kp[index]),
+            kd=float(control_output.kd[index]),
+            torque=float(control_output.tau_ff[index]),
+        )
+
+
+def _feedback_state(frame) -> int:
+    return int(getattr(frame, "state", getattr(frame, "state_code", 0)))
+
+
+def _feedback_rotor_temperature(frame) -> float:
+    return float(getattr(frame, "rotor_temperature", getattr(frame, "mos_temperature", 0.0)))
+
+
+def _missing_feedback_ids(feedback_mask: int) -> tuple[int, ...]:
+    return tuple(
+        joint_idx + 1
+        for joint_idx in range(Config.NUM_JOINTS)
+        if not (int(feedback_mask) & (1 << joint_idx))
+    )
+
+
+def can_thread_func(
+    transport,
+    comp_tool: GravityCompTool,
+    shared_state: SharedRobotState,
+    rerun_logger=None,
+    *,
+    startup_enable: bool = CAN_STARTUP_ENABLE,
+    feedback_timeout_s: float = CAN_FEEDBACK_TIMEOUT_S,
+    control_period_s: float = 0.0,
+) -> None:
+    print("[CAN] SocketCAN USB2FDCAN 控制线程启动...")
+
+    motor_ids = tuple(range(1, Config.NUM_JOINTS + 1))
+    complete_feedback_mask = (1 << Config.NUM_JOINTS) - 1
+    feedback_mask = 0
+    step_count = 0
+    last_cycle_end = None
+    feedback_round_start = time.perf_counter()
+    last_stm_status = 0
+
+    update_joint_feedback = shared_state.update_joint_feedback
+    snapshot_control_inputs = shared_state.snapshot_control_inputs
+    set_reported_pose = shared_state.set_reported_pose
+
+    try:
+        if startup_enable:
+            _startup_enable(transport, motor_ids)
+            print("[CAN] 已完成 clear_error、enable 和 MIT 零力矩预置。")
+
+        while not shutdown_event.is_set():
+            _ = control_period_s
+
+            try:
+                transport.read(CAN_READ_CHUNK_SIZE)
+            except Exception as exc:
+                print(f"[CAN Error] 读取 CAN 反馈失败: {exc}")
+                shutdown_event.set()
+                break
+
+            while True:
+                frame = transport.pop_feedback_frame()
+                if frame is None:
+                    break
+                motor_id = int(frame.motor_id)
+                if not 1 <= motor_id <= Config.NUM_JOINTS:
+                    continue
+
+                joint_idx = motor_id - 1
+                update_joint_feedback(joint_idx, frame.position, frame.velocity, frame.torque)
+                feedback_mask |= 1 << joint_idx
+
+            if feedback_mask != complete_feedback_mask:
+                _send_zero_keepalive(transport, motor_ids)
+                if time.perf_counter() - feedback_round_start > feedback_timeout_s:
+                    missing_ids = _missing_feedback_ids(feedback_mask)
+                    print(
+                        f"[CAN Error] {feedback_timeout_s:.3f}s 内未凑齐 7 轴反馈，"
+                        f"缺失电机={missing_ids}，进入安全停机。"
+                    )
+                    shutdown_event.set()
+                    break
+                continue
+            feedback_mask = 0
+            feedback_round_start = time.perf_counter()
+
+            current_q, current_qd, tau_actual, target_pos, target_quat = snapshot_control_inputs()
+
+            python_t0 = time.perf_counter()
+            control_output = comp_tool.compute(
+                current_q,
+                current_qd,
+                target_pos,
+                target_quat,
+            )
+            tau_total = control_output.tau_total
+            ee_pos = control_output.ee_pos
+            ee_quat = control_output.ee_quat
+            stm_status = control_output.status
+            calc_time_ms = control_output.calc_time_ms
+            python_cycle_ms = (time.perf_counter() - python_t0) * 1000.0
+
+            set_reported_pose(ee_pos, ee_quat)
+
+            if stm_status < 0:
+                print(f"[CAN Safety] 控制计算返回异常状态: {stm_status}，停止下发非零力矩。")
+                shutdown_event.set()
+                break
+
+            _send_mit_round(transport, motor_ids, control_output)
+
+            cycle_end = time.perf_counter()
+            can_latency_ms = 0.0
+            can_cycle_hz = 0.0
+            if last_cycle_end is not None:
+                cycle_dt = cycle_end - last_cycle_end
+                if cycle_dt > 0.0:
+                    can_latency_ms = cycle_dt * 1000.0
+                    can_cycle_hz = 1.0 / cycle_dt
+            last_cycle_end = cycle_end
+
+            calc_hz = 1000.0 / calc_time_ms if calc_time_ms > 1e-9 else 0.0
+            should_log_rerun = (
+                rerun_logger is not None
+                and Config.ENABLE_RERUN
+                and (
+                    Config.RERUN_LOG_STRIDE <= 1
+                    or step_count % Config.RERUN_LOG_STRIDE == 0
+                )
+            )
+            if should_log_rerun:
+                rx_str = None
+                tx_str = None
+                if step_count % 100 == 0:
+                    rx_str = ", ".join(f"{x:.3f}" for x in current_q)
+                    tx_str = ", ".join(
+                        f"p={control_output.q_ref[i]:.3f}/v={control_output.qd_ref[i]:.3f}/"
+                        f"kp={control_output.kp[i]:.1f}/kd={control_output.kd[i]:.1f}/"
+                        f"t={control_output.tau_ff[i]:.3f}"
+                        for i in range(Config.NUM_JOINTS)
+                    )
+                rerun_logger.log_step(
+                    t=step_count * Config.DT,
+                    pos_actual=ee_pos,
+                    pos_desired=target_pos,
+                    quat_actual=ee_quat,
+                    quat_desired=target_quat,
+                    tau_total=tau_total,
+                    cycle_time=python_cycle_ms,
+                    q=current_q,
+                    qd=current_qd,
+                    q_target=control_output.q_ref,
+                    tau_actual=tau_actual,
+                    rx_str=rx_str,
+                    tx_str=tx_str,
+                    tx_label="MIT torque via SocketCAN",
+                    step_count=step_count,
+                    uart_latency_ms=can_latency_ms,
+                    uart_cycle_hz=can_cycle_hz,
+                    uart_transfer_kbps=0.0,
+                    calc_time_ms=calc_time_ms,
+                    calc_hz=calc_hz,
+                )
+            if stm_status == 0 and last_stm_status < 0:
+                print("[CAN] 控制计算已恢复正常。")
+            last_stm_status = stm_status
+            step_count += 1
+
+    except Exception as exc:
+        print(f"[CAN Error] {exc}")
+        shutdown_event.set()
+    finally:
+        _safe_zero_and_disable(transport, motor_ids)
+        try:
+            transport.close()
+        except Exception:
+            pass
+        print("[CAN] 控制线程已退出，已执行零力矩和 disable。")
+
+
+def _run_viewer_loop(env: MujocoSimEnv, shared_state: SharedRobotState, transformer: RobotMujocoTransformer) -> None:
+    import mujoco
+
+    model = env.model
+    data = env.data
+    mocap_idx_reported = env.reported_mocap_id
+
+    print("\n[Running] 双回路运行中: CAN 线程 (MIT torque) | 主线程 (MuJoCo 渲染)")
+    with launch_passive_viewer(model, data) as viewer:
+        ghost = create_mujoco_ghost_if_enabled(
+            model,
+            data,
+            enabled=Config.ENABLE_MUJOCO_GHOST,
+            alpha=Config.MUJOCO_GHOST_ALPHA,
+        )
+        while viewer.is_running() and not shutdown_event.is_set():
+            current_q, reported_pos, reported_quat = shared_state.snapshot_viewer_state()
+            active_joints = min(len(current_q), model.nq)
+            data.qpos[:active_joints] = current_q[:active_joints]
+
+            if mocap_idx_reported >= 0:
+                mj_pos, mj_quat = transformer.robot_to_mujoco(reported_pos, reported_quat)
+                data.mocap_pos[mocap_idx_reported] = mj_pos
+                data.mocap_quat[mocap_idx_reported] = mj_quat
+
+            mujoco.mj_forward(model, data)
+            viewer.sync()
+
+            dragged_target_pos_mj, dragged_target_quat_mj = env.get_target_pose()
+            dragged_target_pos, dragged_target_quat = transformer.mujoco_to_robot(
+                dragged_target_pos_mj,
+                dragged_target_quat_mj,
+            )
+            shared_state.set_target_pose(dragged_target_pos, dragged_target_quat)
+            if ghost is not None:
+                ghost.update_from_pose(dragged_target_pos_mj, dragged_target_quat_mj)
+
+            time.sleep(1.0 / Config.REAL_VIEWER_FPS)
+
+
+def main() -> None:
+    print("=" * 60)
+    print("      AM-D02 SocketCAN USB2FDCAN Real Control Program    ")
+    print("=" * 60)
+
+    shutdown_event.clear()
+    shared_state = SharedRobotState()
+    rerun_logger = None
+    transport = None
+
+    if Config.ENABLE_RERUN:
+        rerun_viz.init_rerun("AM-D02 SocketCAN Real Control")
+        rerun_viz.setup_realtime_styles()
+        rerun_logger = RerunLogger()
+        rerun_logger.start()
+
+    try:
+        comp_tool = GravityCompTool()
+        print("[System] Pinocchio 计算后端已就绪。")
+    except Exception as exc:
+        print(f"[Error] 启动 Pinocchio 计算后端失败: {exc}")
+        if rerun_logger is not None:
+            rerun_logger.close()
+        return
+
+    try:
+        transport = open_can_transport()
+        print(
+            "[System] SocketCAN 已就绪: "
+            f"{CAN_INTERFACE}, nominal={CAN_NOMINAL_BITRATE}, data={CAN_DATA_BITRATE}, force_fd={int(CAN_FORCE_FD)}"
+        )
+    except Exception as exc:
+        print(f"[Error] 无法打开 SocketCAN USB2FDCAN: {exc}")
+        comp_tool.close()
+        if rerun_logger is not None:
+            rerun_logger.close()
+        return
+
+    initial_target_pos, initial_target_quat = comp_tool.compute_fk(Config.TARGET_Q.tolist())
+    shared_state.set_target_pose(initial_target_pos, initial_target_quat)
+
+    print("[System] 正在加载 MuJoCo 场景模型 (MujocoSimEnv)...")
+    env = None
+    mujoco_ready = False
+    transformer = None
+    try:
+        import mujoco  # noqa: F401
+        from common.mujoco.env import MujocoSimEnv
+
+        if not VIEWER_AVAILABLE:
+            raise RuntimeError("MuJoCo viewer is not available")
+
+        env = MujocoSimEnv()
+        env.reset(Config.HOME_QPOS)
+        env.forward()
+
+        transformer = RobotMujocoTransformer()
+        initial_mj_pos, initial_mj_quat = transformer.robot_to_mujoco(initial_target_pos, initial_target_quat)
+        env.set_target_pose(initial_mj_pos, initial_mj_quat)
+
+        print(f"[System] MuJoCo 模型加载成功, nmocap={env.model.nmocap}")
+        print("[System] 初始目标保持当前配置，启动后可直接拖动绿色方块修改目标。")
+        mujoco_ready = True
+    except Exception as exc:
+        print(f"[Warning] MuJoCo 初始化失败 (仅使用 Rerun 可视化): {exc}")
+
+    can_thread = threading.Thread(
+        target=can_thread_func,
+        args=(transport, comp_tool, shared_state, rerun_logger),
+        daemon=True,
+    )
+    can_thread.start()
+
+    try:
+        if mujoco_ready and env is not None and transformer is not None:
+            _run_viewer_loop(env, shared_state, transformer)
+        else:
+            print("\n[Running] SocketCAN MIT torque 控制回路运行中。按下 Ctrl+C 停止。")
+            while not shutdown_event.is_set():
+                time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        shutdown_event.set()
+        can_thread.join(timeout=2.0)
+        comp_tool.close()
+        if rerun_logger is not None:
+            rerun_logger.close()
+        print("[System] 已安全退出。")
+
+
+if __name__ == "__main__":
+    main()

@@ -6,7 +6,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import param_id.sim_main_pd as sim_pd
+import modes.param_id_sim.main as sim_pd
 
 
 class _FakeBackend:
@@ -98,10 +98,22 @@ def test_pd_identification_torque_subtracts_joint_effect_model():
     tau_cmd = np.full((2, 7), 10.0, dtype=np.float64)
     priors = [{"fc": 1.0, "k": 2.0, "fv": 3.0, "fo": 4.0} for _ in range(7)]
 
-    tau_id = sim_pd._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors)
+    tau_id = sim_pd._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors, scale=1.0)
 
     expected_joint = np.tanh(0.1 / sim_pd.Config.PARAM_ID_COULOMB_EPS) + 2.0 * 0.2 + 3.0 * 0.1 + 4.0
     assert np.allclose(tau_id, 10.0 - expected_joint)
+
+
+def test_pd_joint_prior_scale_defaults_to_no_subtraction():
+    q = np.full((2, 7), 0.2, dtype=np.float64)
+    qd = np.full((2, 7), 0.1, dtype=np.float64)
+    tau_cmd = np.full((2, 7), 10.0, dtype=np.float64)
+    priors = [{"fc": 1.0, "k": 2.0, "fv": 3.0, "fo": 4.0} for _ in range(7)]
+
+    tau_id = sim_pd._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors)
+
+    assert sim_pd.Config.PARAM_ID_PD_JOINT_PRIOR_SCALE == 0.0
+    assert np.allclose(tau_id, tau_cmd)
 
 
 def test_estimate_qdd_from_measured_velocity():
@@ -171,7 +183,31 @@ def test_solve_hierarchical_pd_case_marks_distal_refinement(monkeypatch):
 
     assert case["selection"]["mode"] == "hierarchical"
     assert case["selection"]["distal_mass_prior_lambda"] == 32.0
+    assert case["selection"]["distal_inertia_prior_lambda"] == 20.0
     assert case["diagnostics"]["hierarchical"] == 1.0
+
+
+def test_pd_inertia_summary_uses_stricter_target(monkeypatch):
+    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_INERTIA_ERROR_TARGET_PCT", 5.0)
+    inertias = np.ones((7, 3), dtype=np.float64)
+    true_inertias = np.ones((7, 3), dtype=np.float64)
+    inertias[6, 2] = 1.06
+
+    summary = sim_pd._pd_inertia_error_summary(inertias, true_inertias)
+
+    assert summary["target_pct"] == 5.0
+    assert not summary["passes_target"]
+
+
+def test_pd_regularization_grid_adds_strict_inertia_candidate(monkeypatch):
+    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_STRICT_MASS_PRIOR_LAMBDA", 64.0)
+    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_STRICT_COM_PRIOR_LAMBDA", 1.6)
+    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_STRICT_INERTIA_PRIOR_LAMBDA", 6.4)
+
+    grid = sim_pd._pd_regularization_grid()
+
+    assert grid[0] == (64.0, 1.6, 6.4, sim_pd.Config.PARAM_ID_PRIOR_LAMBDA_JOINT)
+    assert len(grid) == len(set(grid))
 
 
 def test_viewer_simulation_returns_same_shape_as_collect(monkeypatch):
@@ -260,7 +296,7 @@ def test_select_excitation_trajectory_pd_validates_top_svd_candidate(monkeypatch
     monkeypatch.setattr(sim_pd._base, "_joint_coverage", lambda q: {"mean": 1.0})
     monkeypatch.setattr(sim_pd._base, "_candidate_score", lambda overall, *args: overall["score"])
     monkeypatch.setattr(sim_pd, "_pd_validation_grid", lambda: [(1.0, 1.0, 1.0, 1.0)])
-    monkeypatch.setattr(sim_pd, "_solve_pd_inertial_case", fake_solve)
+    monkeypatch.setattr(sim_pd, "_solve_hierarchical_pd_case", fake_solve)
     monkeypatch.setattr(sim_pd._base, "_case_selection_key", lambda case: case["validation_rms"])
 
     env = _PointMassEnv(dt=0.01)
@@ -299,19 +335,26 @@ def test_prepare_pd_identification_data_filters_and_returns_arrays():
     assert "qdd_rms_J1" in diag
     assert "tau_cmd_rms" in diag
     assert "tau_joint_prior_rms" in diag
+    assert "tau_joint_prior_applied_rms" in diag
     assert "tau_id_rms" in diag
     assert diag["tau_joint_prior_to_cmd_ratio"] >= 0.0
+    assert diag["tau_joint_prior_applied_to_cmd_ratio"] >= 0.0
     assert "tau_cmd_rms_J1" in diag
     assert "tau_pri_rms_J1" in diag
+    assert "tau_pri_applied_rms_J1" in diag
     assert "tau_id_rms_J1" in diag
     assert "tau_pri_ratio_J1" in diag
+    assert "tau_pri_applied_ratio_J1" in diag
 
 
 def test_pd_validation_grid_uses_full_grid_by_default(monkeypatch):
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_REG_SWEEP", True)
     monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_VALIDATION_REG_GRID_LIMIT", 0)
     grid = sim_pd._pd_validation_grid()
-    assert len(grid) == len(list(sim_pd._base._regularization_grid()))
+    base_grid = list(sim_pd._base._regularization_grid())
+    assert len(grid) >= len(base_grid)
+    for item in base_grid:
+        assert item in grid
     assert len(grid) >= 8
 
 
@@ -409,7 +452,7 @@ def test_candidate_validation_metadata_includes_new_diagnostics(monkeypatch):
     monkeypatch.setattr(sim_pd._base, "_joint_coverage", lambda q: {"mean": 1.0})
     monkeypatch.setattr(sim_pd._base, "_candidate_score", lambda overall, *args: overall["score"])
     monkeypatch.setattr(sim_pd, "_pd_validation_grid", lambda: [(1.0, 1.0, 1.0, 1.0)])
-    monkeypatch.setattr(sim_pd, "_solve_pd_inertial_case", fake_solve)
+    monkeypatch.setattr(sim_pd, "_solve_hierarchical_pd_case", fake_solve)
     monkeypatch.setattr(sim_pd._base, "_case_selection_key", lambda case: case["validation_rms"])
 
     env = _PointMassEnv(dt=0.01)
@@ -434,6 +477,7 @@ def test_candidate_validation_metadata_includes_new_diagnostics(monkeypatch):
     assert metadata.get("pd_validation_reg_grid_size") == 1
     assert metadata.get("pd_qdd_rms_mean") is not None
     assert metadata.get("pd_tau_prior_ratio") is not None
+    assert metadata.get("pd_tau_prior_applied_ratio") is not None
 
 
 def test_end_to_end_pd_pipeline_composes(monkeypatch):

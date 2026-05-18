@@ -1,2 +1,0 @@
-"""Real-hardware state package."""
-
