@@ -19,13 +19,14 @@ def test_control_contracts_validate_joint_vectors_and_build_zero_command():
 
 
 def test_param_id_preprocessing_estimates_derivatives():
-    from robot_control.param_id.preprocessing import estimate_qd_qdd
+    from robot_control.param_id.preprocessing import estimate_qd_qdd, estimate_qdd_from_qd
 
     q = np.array([[0.0, 0.0], [1.0, 2.0], [4.0, 8.0]], dtype=np.float64)
     qd, qdd = estimate_qd_qdd(q, 1.0)
 
     np.testing.assert_allclose(qd[1], [2.0, 4.0])
     np.testing.assert_allclose(qdd[1], [2.0, 4.0])
+    np.testing.assert_allclose(estimate_qdd_from_qd(qd, 1.0)[1], [1.0, 2.0])
 
 
 def test_runtime_feedback_snapshot_validates_shapes():

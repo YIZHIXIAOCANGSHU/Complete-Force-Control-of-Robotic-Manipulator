@@ -24,3 +24,14 @@ def estimate_qd_qdd(q, dt: float) -> tuple[np.ndarray, np.ndarray]:
         qdd[-1] = qdd[-2]
     return qd, qdd
 
+
+def estimate_qdd_from_qd(qd, dt: float) -> np.ndarray:
+    velocities = np.asarray(qd, dtype=np.float64)
+    if velocities.ndim != 2:
+        raise ValueError(f"qd must be a 2D trajectory, got {velocities.shape}")
+    if velocities.shape[0] < 2:
+        raise ValueError("qd must contain at least two samples")
+    if dt <= 0.0:
+        raise ValueError("dt must be positive")
+    edge_order = 2 if velocities.shape[0] >= 3 else 1
+    return np.gradient(velocities, float(dt), axis=0, edge_order=edge_order)

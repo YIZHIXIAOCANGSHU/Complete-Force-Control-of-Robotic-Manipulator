@@ -7,6 +7,7 @@ import time
 
 from robot_control.config import Config
 from robot_control.dynamics.gravity import GravityCompTool
+from robot_control.modes.control_real import can_feedback
 from robot_control.modes.control_real.runtime_config import (
     CAN_FEEDBACK_TIMEOUT_S,
     CAN_READ_CHUNK_SIZE,
@@ -18,62 +19,15 @@ shutdown_event = threading.Event()
 
 
 def _safe_zero_and_disable(transport, motor_ids) -> None:
-    for motor_id in motor_ids:
-        try:
-            transport.send_mit_command(
-                int(motor_id),
-                position=0.0,
-                velocity=0.0,
-                kp=0.0,
-                kd=0.0,
-                torque=0.0,
-            )
-        except Exception as exc:
-            print(f"[CAN Warning] motor {motor_id} 零力矩下发失败: {exc}")
-    for motor_id in motor_ids:
-        try:
-            transport.disable_motor(int(motor_id))
-        except Exception as exc:
-            print(f"[CAN Warning] motor {motor_id} disable 失败: {exc}")
+    can_feedback.safe_zero_and_disable(transport, motor_ids)
 
 
 def _send_zero_keepalive(transport, motor_ids) -> None:
-    for motor_id in motor_ids:
-        transport.send_mit_command(
-            int(motor_id),
-            position=0.0,
-            velocity=0.0,
-            kp=0.0,
-            kd=0.0,
-            torque=0.0,
-        )
+    can_feedback.send_zero_keepalive(transport, motor_ids)
 
 
 def _startup_enable(transport, motor_ids) -> None:
-    try:
-        transport.reset_input_buffer()
-    except Exception as exc:
-        print(f"[CAN Warning] 清空 CAN 输入缓冲失败: {exc}")
-    for motor_id in motor_ids:
-        transport.clear_error(int(motor_id))
-        transport.send_mit_command(
-            int(motor_id),
-            position=0.0,
-            velocity=0.0,
-            kp=0.0,
-            kd=0.0,
-            torque=0.0,
-        )
-        transport.enable_motor(int(motor_id))
-        transport.send_mit_command(
-            int(motor_id),
-            position=0.0,
-            velocity=0.0,
-            kp=0.0,
-            kd=0.0,
-            torque=0.0,
-        )
-    _send_zero_keepalive(transport, motor_ids)
+    can_feedback.startup_enable(transport, motor_ids)
 
 
 def _send_mit_round(transport, motor_ids, control_output) -> None:
@@ -97,11 +51,7 @@ def _feedback_rotor_temperature(frame) -> float:
 
 
 def _missing_feedback_ids(feedback_mask: int) -> tuple[int, ...]:
-    return tuple(
-        joint_idx + 1
-        for joint_idx in range(Config.NUM_JOINTS)
-        if not (int(feedback_mask) & (1 << joint_idx))
-    )
+    return can_feedback.missing_feedback_ids(feedback_mask)
 
 
 def can_thread_func(
