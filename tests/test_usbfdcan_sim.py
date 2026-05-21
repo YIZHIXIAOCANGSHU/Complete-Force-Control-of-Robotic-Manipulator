@@ -206,6 +206,26 @@ def test_tx_loop_sends_all_seven_zero_commands_without_normal_sleep(monkeypatch)
     assert sleeps == []
 
 
+def test_startup_enable_zero_primes_zero_before_and_after_enable():
+    transport = FakeZeroTransport()
+
+    app._startup_enable_zero(transport, (1, 2))
+
+    assert transport.commands[:11] == [
+        ("reset", 0, None),
+        ("clear", 1, None),
+        ("mit", 1, 0.0, 0.0, 0.0, 0.0, 0.0),
+        ("enable", 1, None),
+        ("mit", 1, 0.0, 0.0, 0.0, 0.0, 0.0),
+        ("clear", 2, None),
+        ("mit", 2, 0.0, 0.0, 0.0, 0.0, 0.0),
+        ("enable", 2, None),
+        ("mit", 2, 0.0, 0.0, 0.0, 0.0, 0.0),
+        ("mit", 1, 0.0, 0.0, 0.0, 0.0, 0.0),
+        ("mit", 2, 0.0, 0.0, 0.0, 0.0, 0.0),
+    ]
+
+
 def test_rerun_recorder_sends_motor_grouped_blueprint(monkeypatch):
     dummy_rr = DummyRerun()
     monkeypatch.setattr(rerun_feedback, "rr", dummy_rr)
@@ -309,6 +329,26 @@ def test_rx_loop_sends_mit_command_after_complete_feedback_round():
     assert len(comp_tool.compute_calls) == 1
     assert ("mit", 1, 0.11, 0.01, 10.0, 0.1, 1.1) in transport.commands
     assert ("mit", 7, 0.77, 0.07, 70.0, 0.7, 1.7) in transport.commands
+
+
+def test_rx_loop_reports_missing_feedback_ids_on_timeout(capsys):
+    transport = FakeZeroTransport([_feedback_frame(1), _feedback_frame(4)])
+
+    app.shutdown_event.clear()
+    try:
+        app.rx_feedback_loop(
+            transport,
+            SharedRobotState(),
+            None,
+            None,
+            startup_enable=False,
+            feedback_timeout_s=0.0,
+        )
+    finally:
+        app.shutdown_event.clear()
+
+    captured = capsys.readouterr()
+    assert "缺失电机=(2, 3, 5, 6, 7)" in captured.out
 
 
 def test_rx_loop_triggers_safe_stop_on_velocity_limit_violation():

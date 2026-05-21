@@ -100,6 +100,14 @@ def _startup_enable(transport, motor_ids) -> None:
         print(f"[CAN Warning] 清空 CAN 输入缓冲失败: {exc}")
     for motor_id in motor_ids:
         transport.clear_error(int(motor_id))
+        transport.send_mit_command(
+            int(motor_id),
+            position=0.0,
+            velocity=0.0,
+            kp=0.0,
+            kd=0.0,
+            torque=0.0,
+        )
         transport.enable_motor(int(motor_id))
         transport.send_mit_command(
             int(motor_id),
@@ -109,6 +117,7 @@ def _startup_enable(transport, motor_ids) -> None:
             kd=0.0,
             torque=0.0,
         )
+    _send_zero_keepalive(transport, motor_ids)
 
 
 def _send_mit_round(transport, motor_ids, control_output) -> None:
@@ -269,6 +278,7 @@ def can_thread_func(
                     cycle_time=python_cycle_ms,
                     q=current_q,
                     qd=current_qd,
+                    q_target=control_output.q_ref,
                     tau_actual=tau_actual,
                     rx_str=rx_str,
                     tx_str=tx_str,

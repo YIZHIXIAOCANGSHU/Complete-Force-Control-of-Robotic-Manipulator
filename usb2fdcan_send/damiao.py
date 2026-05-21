@@ -448,7 +448,12 @@ class Usb2FdcanTransport:
 
     def enable_motor(self, motor_id: int) -> bytes:
         mapping = self._mapping_for_motor_id(motor_id)
-        return self._ensure_mit_mode(mapping) + self._send_control(mapping, ENABLE_CMD)
+        return (
+            self._ensure_mit_mode(mapping)
+            + self.send_zero_mit(int(motor_id))
+            + self._send_control(mapping, ENABLE_CMD)
+            + self.send_zero_mit(int(motor_id))
+        )
 
     def send_zero_mit(self, motor_id: int) -> bytes:
         return self.send_mit_torque(int(motor_id), 0.0)

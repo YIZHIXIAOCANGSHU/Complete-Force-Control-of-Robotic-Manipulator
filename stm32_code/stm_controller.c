@@ -294,6 +294,27 @@ static int stm_controller_compute_q_ref_from_initial(
                                              IK_MAX_ITERATIONS);
 }
 
+static int stm_controller_q_ref_is_safe(const double q_ref[NUM_JOINTS]) {
+  const double joint_min[NUM_JOINTS] = {
+      JOINT_POS_MIN_1, JOINT_POS_MIN_2, JOINT_POS_MIN_3, JOINT_POS_MIN_4,
+      JOINT_POS_MIN_5, JOINT_POS_MIN_6, JOINT_POS_MIN_7};
+  const double joint_max[NUM_JOINTS] = {
+      JOINT_POS_MAX_1, JOINT_POS_MAX_2, JOINT_POS_MAX_3, JOINT_POS_MAX_4,
+      JOINT_POS_MAX_5, JOINT_POS_MAX_6, JOINT_POS_MAX_7};
+
+  if (!stm_controller_is_finite_vec(q_ref, NUM_JOINTS)) {
+    return 0;
+  }
+
+  for (int i = 0; i < NUM_JOINTS; ++i) {
+    if (q_ref[i] < joint_min[i] - 0.01 || q_ref[i] > joint_max[i] + 0.01) {
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
 static void stm_controller_compute_qd_ref(const double q_ref[NUM_JOINTS],
                                           double qd_ref[NUM_JOINTS]) {
   double next_s;
@@ -430,9 +451,13 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   ik_status = stm_controller_compute_q_ref(in->q, ref_pos, ref_quat,
                                            out->q_ref);
   if (!ik_status) {
-    memcpy(out->q_ref, in->q, sizeof(out->q_ref));
     memset(out->qd_ref, 0, sizeof(out->qd_ref));
-    out->status = 1;
+    if (stm_controller_q_ref_is_safe(out->q_ref)) {
+      out->status = 1;
+    } else {
+      memcpy(out->q_ref, in->q, sizeof(out->q_ref));
+      out->status = 1;
+    }
   } else {
     stm_controller_compute_qd_ref(out->q_ref, out->qd_ref);
   }

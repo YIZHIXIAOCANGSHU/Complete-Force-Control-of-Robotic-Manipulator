@@ -83,8 +83,10 @@ def _startup_enable_zero(transport, motor_ids: tuple[int, ...]) -> None:
         print(f"[USB2FDCAN Warning] 清空 CAN 输入缓冲失败: {exc}")
     for motor_id in motor_ids:
         transport.clear_error(int(motor_id))
+        _send_mit_zero(transport, int(motor_id))
         transport.enable_motor(int(motor_id))
         _send_mit_zero(transport, int(motor_id))
+    _send_zero_keepalive(transport, motor_ids)
 
 
 def _safe_zero_and_disable(transport, motor_ids: tuple[int, ...]) -> None:
@@ -111,6 +113,11 @@ def _send_mit_zero(transport, motor_id: int) -> bytes:
             torque=0.0,
         )
     return transport.send_zero_mit(int(motor_id))
+
+
+def _send_zero_keepalive(transport, motor_ids: tuple[int, ...]) -> None:
+    for motor_id in motor_ids:
+        _send_mit_zero(transport, int(motor_id))
 
 
 def _send_mit_round(transport, motor_ids: tuple[int, ...], control_output) -> None:
@@ -163,6 +170,14 @@ def _quality_from_safety(safety: FeedbackSafetyResult) -> MotorQuality:
         velocity_ok=safety.velocity_ok,
         feedback_recent=True,
         safety_ok=safety.safety_ok,
+    )
+
+
+def _missing_feedback_ids(feedback_mask: int) -> tuple[int, ...]:
+    return tuple(
+        joint_idx + 1
+        for joint_idx in range(Config.NUM_JOINTS)
+        if not (int(feedback_mask) & (1 << joint_idx))
     )
 
 
@@ -289,9 +304,13 @@ def rx_feedback_loop(
                 )
             if max_complete_rounds is not None and complete_rounds >= int(max_complete_rounds):
                 break
-        elif not saw_frame and now - feedback_round_start > feedback_timeout_s:
+        else:
+            _send_zero_keepalive(transport, motor_ids)
+
+        if feedback_mask != complete_feedback_mask and now - feedback_round_start > feedback_timeout_s:
             missing_feedback_mask = complete_feedback_mask ^ feedback_mask
-            reason = f"{feedback_timeout_s:.3f}s 内未凑齐 7 轴反馈"
+            missing_ids = _missing_feedback_ids(feedback_mask)
+            reason = f"{feedback_timeout_s:.3f}s 内未凑齐 7 轴反馈，缺失电机={missing_ids}"
             if rerun_recorder is not None:
                 rerun_recorder.log_abort(reason=reason, missing_feedback_mask=missing_feedback_mask)
             print(f"[USB2FDCAN Error] {reason}，进入安全停机。")

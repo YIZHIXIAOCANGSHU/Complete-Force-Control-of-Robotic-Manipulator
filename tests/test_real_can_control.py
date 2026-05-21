@@ -155,6 +155,7 @@ def test_can_thread_computes_and_sends_mit_torque_after_complete_feedback(monkey
     assert ("mit", 7, 0.77, 0.07, 70.0, 0.7, 1.7) in transport.commands
     assert len(rerun_logger.payloads) == 1
     assert rerun_logger.payloads[0]["tau_total"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    assert rerun_logger.payloads[0]["q_target"] == [0.11, 0.22, 0.33, 0.44, 0.55, 0.66, 0.77]
     assert transport.closed is True
 
 
