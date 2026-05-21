@@ -35,14 +35,14 @@ def test_spatial_logs_pose_trajectory_and_error_vector(monkeypatch):
     monkeypatch.setattr(spatial, "RERUN_AVAILABLE", True)
     monkeypatch.setattr(spatial, "rr", dummy)
 
-    spatial.log_ee_pose("/control_sim/spatial", 0.5, np.array([1.0, 2.0, 3.0]))
-    spatial.log_ee_trajectory("control_sim/spatial", np.zeros((2, 3)))
-    spatial.log_error_vector("control_sim/spatial", np.array([0.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]))
+    spatial.log_ee_pose("/param_id_sim/spatial", 0.5, np.array([1.0, 2.0, 3.0]))
+    spatial.log_ee_trajectory("param_id_sim/spatial", np.zeros((2, 3)))
+    spatial.log_error_vector("param_id_sim/spatial", np.array([0.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]))
 
     paths = [path for path, _payload in dummy.logs]
-    assert "control_sim/spatial/ee_pose" in paths
-    assert "control_sim/spatial/ee_trajectory" in paths
-    assert "control_sim/spatial/ee_error_vector" in paths
+    assert "param_id_sim/spatial/ee_pose" in paths
+    assert "param_id_sim/spatial/ee_trajectory" in paths
+    assert "param_id_sim/spatial/ee_error_vector" in paths
     assert dummy.times == [("time", 0.5)]
 
 
@@ -52,4 +52,3 @@ def test_spatial_validates_point_shapes(monkeypatch):
 
     with pytest.raises(ValueError, match="position"):
         spatial.log_ee_pose("x", 0.0, np.zeros(2))
-

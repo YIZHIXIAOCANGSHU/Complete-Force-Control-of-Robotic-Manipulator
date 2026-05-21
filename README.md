@@ -1,11 +1,10 @@
-# AM-D02 真机控制与全参辨识
+# AM-D02 参数辨识与载荷辨识
 
-四个入口：
+当前分支聚焦辨识入口：
 
-- `sim`：MuJoCo + Pinocchio 控制仿真。
-- `real`：真实硬件 SocketCAN USB2FDCAN 控制。
 - `param-id-sim`：仿真参数辨识。
 - `param-id-real`：实机参数辨识采集。
+- `payload-id-sim`：末端载荷辨识仿真。
 
 ## 快速开始
 
@@ -20,21 +19,18 @@ python -m pip install -r python/requirements.txt
 也可以直接启动：
 
 ```bash
-./run.sh sim
-./run.sh real
 ./run.sh param-id-sim
 ./run.sh param-id-real
+./run.sh payload-id-sim
 ```
 
 ## 目录
 
 - `src/robot_control/`：全部 Python 源码。
-- `src/robot_control/modes/`：四个运行模式入口，只负责编排启动流程。
-  - `control_real/`：真实硬件控制。
-  - `control_sim/`：MuJoCo + Pinocchio 控制仿真。
+- `src/robot_control/modes/`：辨识运行模式入口，只负责编排启动流程。
   - `param_id_real/`：实机参数辨识采集。
   - `param_id_sim/`：仿真参数辨识采集与候选验证。
-- `src/robot_control/control/`：控制算法、控制管线和控制类型。
+  - `payload_id_sim/`：仿真末端载荷辨识。
 - `src/robot_control/param_id/`：参数辨识算法库，包含激励轨迹、预处理、回归矩阵、求解、诊断和报告。
 - `src/robot_control/dynamics/`：Pinocchio 动力学和重力补偿后端。
 - `src/robot_control/hardware/usb2fdcan/`：USB2FDCAN 配置、协议、反馈解码、SocketCAN 传输和高层电机传输。
@@ -57,4 +53,4 @@ AM_D02_CAN_INTERFACE=can1 ./run.sh real
 AM_D02_CAN_INTERFACE=can1 ./run.sh param-id-real
 ```
 
-实机模式会驱动真实机械臂，启动前确认急停、机械限位、工作空间和 CAN 通信状态。
+实机辨识会驱动真实机械臂，启动前确认急停、机械限位、工作空间和 CAN 通信状态。

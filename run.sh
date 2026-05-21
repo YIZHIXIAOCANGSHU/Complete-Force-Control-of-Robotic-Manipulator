@@ -1,5 +1,5 @@
 #!/bin/bash
-# AM-D02 Pinocchio 四模式统一启动脚本
+# AM-D02 Pinocchio 参数辨识启动脚本
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -52,13 +52,12 @@ select_python() {
 
 show_main_menu() {
     echo "=========================================================="
-    echo "            AM-D02 四模式统一启动状态机"
+    echo "            AM-D02 参数辨识启动状态机"
     echo "=========================================================="
     echo "请选择启动模式："
-    echo "  1) sim           - 真机控制仿真 (MuJoCo + Pinocchio)"
-    echo "  2) real          - 真实硬件控制 (serial / USB2FDCAN)"
-    echo "  3) param-id-sim  - 全参辨识 PD 闭环仿真"
-    echo "  4) param-id-real - 全参辨识实机采集"
+    echo "  1) param-id-sim  - 全参辨识 PD 闭环仿真"
+    echo "  2) param-id-real - 全参辨识实机采集"
+    echo "  3) payload-id-sim - 末端载荷辨识仿真"
     echo "  q) 退出"
     echo "----------------------------------------------------------"
 }
@@ -69,10 +68,9 @@ select_mode_from_menu() {
         show_main_menu
         read -r -p "输入数字选择模式: " choice
         case "$choice" in
-            1) MODE="sim"; EXTRA_ARGS=(); break ;;
-            2) MODE="real"; EXTRA_ARGS=(); break ;;
-            3) MODE="param-id-sim"; EXTRA_ARGS=(); break ;;
-            4) MODE="param-id-real"; EXTRA_ARGS=(); break ;;
+            1) MODE="param-id-sim"; EXTRA_ARGS=(); break ;;
+            2) MODE="param-id-real"; EXTRA_ARGS=(); break ;;
+            3) MODE="payload-id-sim"; EXTRA_ARGS=(); break ;;
             q|Q) echo "已退出。"; exit 0 ;;
             *) PRINT_RED "无效选择: $choice" ;;
         esac
@@ -80,7 +78,7 @@ select_mode_from_menu() {
 }
 
 show_available_modes() {
-    echo "可用模式: sim, real, param-id-sim, param-id-real"
+    echo "可用模式: param-id-sim, param-id-real, payload-id-sim"
 }
 
 reject_removed_mode() {
@@ -97,11 +95,10 @@ if [ -z "$MODE" ] || [[ "$MODE" == -* ]]; then
 else
     shift 2>/dev/null || true
     case "$MODE" in
-        1|sim) MODE="sim" ;;
-        2|real) MODE="real" ;;
-        3|param-id-sim) MODE="param-id-sim" ;;
-        4|param-id-real) MODE="param-id-real" ;;
-        mc|monte-carlo|usbfdcan-sim|usb2fdcan-sim|mirror|param_id|param-id|param_id_sim|param_id_real) reject_removed_mode "$MODE" ;;
+        1|param-id-sim) MODE="param-id-sim" ;;
+        2|param-id-real) MODE="param-id-real" ;;
+        3|payload-id-sim|payload_id_sim|payload-id) MODE="payload-id-sim" ;;
+        sim|real|mc|monte-carlo|usbfdcan-sim|usb2fdcan-sim|mirror|param_id|param-id|param_id_sim|param_id_real|control-sim|control-real) reject_removed_mode "$MODE" ;;
         *) PRINT_RED "错误: 未知模式 '$MODE'。"; show_available_modes; exit 1 ;;
     esac
 fi
@@ -111,59 +108,14 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "=========================================================="
 case "$MODE" in
-    sim)           echo "    AM-D02 真机控制仿真 (Pinocchio SITL)            " ;;
-    real)          echo "    AM-D02 真实硬件控制 (Real)                      " ;;
     param-id-sim)  echo "    AM-D02 全参辨识 PD 闭环仿真                     " ;;
     param-id-real) echo "    AM-D02 全参辨识实机采集                         " ;;
+    payload-id-sim) echo "    AM-D02 末端载荷辨识仿真                         " ;;
 esac
 echo "=========================================================="
 PRINT_BLUE "[System] Python 解释器: $PYTHON_BIN"
 
-if [ "$MODE" == "sim" ]; then
-    PRINT_BLUE "[1/2] 启动后台 Python MuJoCo 物理仿真服务器..."
-    READY_FILE=$(mktemp /tmp/am_d02_server_ready.XXXXXX)
-    "$PYTHON_BIN" -m robot_control.modes.control_sim.main --ready-file "$READY_FILE" "${APP_ARGS[@]}" &
-    SERVER_PID=$!
-
-    cleanup() {
-        if [ ! -z "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-            kill "$SERVER_PID" 2>/dev/null || true
-            wait "$SERVER_PID" 2>/dev/null || true
-        fi
-        if [ ! -z "${READY_FILE:-}" ]; then rm -f "$READY_FILE"; fi
-    }
-    on_signal() {
-        echo -e "\n[Shutdown] 正在关闭后台仿真服务器..."
-        cleanup
-        echo "[Shutdown] 仿真会话已结束。"
-        exit 0
-    }
-    trap on_signal SIGINT SIGTERM
-    trap cleanup EXIT
-
-    for _ in $(seq 1 200); do
-        if [ -f "$READY_FILE" ]; then break; fi
-        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-            PRINT_RED "错误: Python 仿真服务器在就绪前已退出。"
-            wait "$SERVER_PID" || true
-            exit 1
-        fi
-        sleep 0.1
-    done
-    if [ ! -f "$READY_FILE" ]; then
-        PRINT_RED "错误: 等待 Python 仿真服务器就绪超时。"
-        exit 1
-    fi
-
-    PRINT_GREEN "[2/2] 启动 Python Pinocchio 仿真控制器..."
-    echo "----------------------------------------------------------"
-    set +e
-    "$PYTHON_BIN" -m robot_control.modes.control_sim.pinocchio_controller "${APP_ARGS[@]}"
-    APP_STATUS=$?
-    set -e
-    exit $APP_STATUS
-
-elif [ "$MODE" == "param-id-sim" ]; then
+if [ "$MODE" == "param-id-sim" ]; then
     : "${AM_D02_ENABLE_VIEWER:=1}"
     : "${AM_D02_ENABLE_RERUN:=0}"
     export AM_D02_ENABLE_VIEWER AM_D02_ENABLE_RERUN
@@ -180,22 +132,11 @@ elif [ "$MODE" == "param-id-real" ]; then
     echo "----------------------------------------------------------"
     "$PYTHON_BIN" -m robot_control.modes.param_id_real.main "${APP_ARGS[@]}"
 
-else  # real
-    : "${AM_D02_CAN_INTERFACE:=can0}"
-    : "${AM_D02_RERUN_LOG_STRIDE:=25}"
-    : "${AM_D02_REAL_VIEWER_FPS:=30}"
-    : "${AM_D02_RERUN_QUEUE_SIZE:=512}"
-    export AM_D02_CAN_INTERFACE AM_D02_RERUN_LOG_STRIDE AM_D02_REAL_VIEWER_FPS AM_D02_RERUN_QUEUE_SIZE
-    PRINT_BLUE "[System] 检查 SocketCAN 接口 ${AM_D02_CAN_INTERFACE}..."
-    if [ -e "/sys/class/net/${AM_D02_CAN_INTERFACE}" ]; then
-        CAN_STATE=$(cat "/sys/class/net/${AM_D02_CAN_INTERFACE}/operstate" 2>/dev/null || true)
-        if [ "$CAN_STATE" != "up" ]; then
-            PRINT_RED "警告: ${AM_D02_CAN_INTERFACE} 状态为 '${CAN_STATE:-unknown}'"
-        fi
-    else
-        PRINT_RED "警告: 未检测到 SocketCAN 接口 ${AM_D02_CAN_INTERFACE}"
-    fi
-    PRINT_GREEN "[1/1] 启动 Python 真实硬件控制回路..."
+else  # payload-id-sim
+    : "${AM_D02_ENABLE_VIEWER:=0}"
+    : "${AM_D02_ENABLE_RERUN:=0}"
+    export AM_D02_ENABLE_VIEWER AM_D02_ENABLE_RERUN
+    PRINT_BLUE "[1/1] 启动末端载荷辨识仿真模式..."
     echo "----------------------------------------------------------"
-    "$PYTHON_BIN" -m robot_control.modes.control_real.main "${APP_ARGS[@]}"
+    "$PYTHON_BIN" -m robot_control.modes.payload_id_sim.main "${APP_ARGS[@]}"
 fi

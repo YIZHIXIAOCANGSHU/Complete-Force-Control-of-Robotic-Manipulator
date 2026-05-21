@@ -3,21 +3,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-
-def test_control_contracts_validate_joint_vectors_and_build_zero_command():
-    from robot_control.control.controller import zero_command
-    from robot_control.control.types import ControlTarget
-
-    target = ControlTarget(q=np.arange(7, dtype=np.float64))
-    command = zero_command(target)
-
-    np.testing.assert_allclose(command.q_ref, np.arange(7, dtype=np.float64))
-    np.testing.assert_allclose(command.tau_ff, np.zeros(7))
-
-    with pytest.raises(ValueError, match="q must have shape"):
-        ControlTarget(q=np.zeros(6))
-
-
 def test_param_id_preprocessing_estimates_derivatives():
     from robot_control.param_id.preprocessing import estimate_qd_qdd, estimate_qdd_from_qd
 
@@ -39,3 +24,11 @@ def test_runtime_feedback_snapshot_validates_shapes():
 
     with pytest.raises(ValueError, match="qd must match q shape"):
         FeedbackSnapshot(q=np.zeros(7), qd=np.ones(6), tau=np.zeros(7), timestamp=0.0)
+
+
+def test_control_mode_packages_are_removed():
+    import importlib.util
+
+    assert importlib.util.find_spec("robot_control.control") is None
+    assert importlib.util.find_spec("robot_control.modes.control_real") is None
+    assert importlib.util.find_spec("robot_control.modes.control_sim") is None
