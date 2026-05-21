@@ -11,8 +11,8 @@ import numpy as np
 
 from robot_control.config import Config
 from robot_control.dynamics.pinocchio import PinocchioGravityBackend
-from robot_control.modes.control_real import can_feedback
-from robot_control.modes.control_real.runtime_config import (
+from robot_control.hardware.usb2fdcan import acquisition as can_feedback
+from robot_control.hardware.usb2fdcan.runtime import (
     CAN_FEEDBACK_TIMEOUT_S,
     open_can_transport,
 )

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from robot_control.config import Config
-from robot_control.modes.control_real import can_feedback
+from robot_control.hardware.usb2fdcan import acquisition as can_feedback
 from robot_control.modes.param_id_real import main as param_id_real
 
 

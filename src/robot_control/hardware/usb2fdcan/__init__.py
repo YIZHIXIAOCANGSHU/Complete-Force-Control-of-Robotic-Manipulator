@@ -37,12 +37,18 @@ from robot_control.hardware.usb2fdcan.socket_transport import (
     configure_can_interface,
     ensure_interface_ready,
 )
+from robot_control.hardware.usb2fdcan.runtime import (
+    CanRuntimeConfig,
+    build_can_runtime_config,
+    open_can_transport,
+)
 from robot_control.hardware.usb2fdcan.transport import Usb2FdcanTransport, Usb2FdcanZeroTransport
 
 __all__ = [
     "CANFD_BRS",
     "CANFD_MTU",
     "CAN_MTU",
+    "CanRuntimeConfig",
     "DEFAULT_MOTOR_CAN_IDS",
     "DEFAULT_MOTOR_IDS",
     "DEFAULT_MOTOR_MST_IDS",
@@ -56,6 +62,7 @@ __all__ = [
     "Usb2FdcanStats",
     "Usb2FdcanTransport",
     "Usb2FdcanZeroTransport",
+    "build_can_runtime_config",
     "build_control_cmd_frame",
     "build_mit_frame",
     "build_param_write_frame",
@@ -63,6 +70,7 @@ __all__ = [
     "decode_feedback",
     "ensure_interface_ready",
     "get_motor_limits",
+    "open_can_transport",
     "pack_canfd_frame",
     "pack_can_frame",
     "parse_motor_type",
