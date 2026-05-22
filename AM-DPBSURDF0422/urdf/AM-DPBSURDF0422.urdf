@@ -380,7 +380,7 @@
     <child
       link="AM-D02-J14_Link" />
     <axis
-      xyz="0 0 1" />
+      xyz="0 0 -1" />
     <limit
       lower="-2.26"
       upper="0.26"
@@ -438,7 +438,7 @@
     <child
       link="ArmL04_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
       lower="-1.65"
       upper="1.65"
@@ -554,7 +554,7 @@
     <child
       link="ArmL06_Link" />
     <axis
-      xyz="0 0 1" />
+      xyz="0 0 -1" />
     <limit
       lower="-1.57"
       upper="1.57"
@@ -623,22 +623,22 @@
     name="ArmL07Output_Link">
     <inertial>
       <origin
-        xyz="-7.71715413794283E-10 -0.0531454017557083 -0.0151797843192585"
+        xyz="7.71715413794283E-10 0.0531454017557083 -0.0151797843192585"
         rpy="0 0 0" />
       <mass
         value="0.130071892527266" />
       <inertia
         ixx="5.94030554789123E-05"
         ixy="-5.01007319996629E-13"
-        ixz="-3.38312867112602E-12"
+        ixz="3.38312867112602E-12"
         iyy="6.25184504536976E-05"
-        iyz="-1.8740342666896E-06"
+        iyz="1.8740342666896E-06"
         izz="5.85465949820439E-05" />
     </inertial>
     <visual>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="0 0 3.14159265358979" />
       <geometry>
         <mesh
           filename="package://AM-DPBSURDF0422/meshes/ArmL07Output_Link.STL" />
@@ -652,7 +652,7 @@
     <collision>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="0 0 3.14159265358979" />
       <geometry>
         <mesh
           filename="package://AM-DPBSURDF0422/meshes/ArmL07Output_Link.STL" />
@@ -781,7 +781,7 @@
     <child
       link="ArmR02_Link" />
     <axis
-      xyz="0 0 1" />
+      xyz="0 0 -1" />
     <limit
       lower="-2.35"
       upper="2.35"
@@ -839,7 +839,7 @@
     <child
       link="AM-D02R-J03_Link" />
     <axis
-      xyz="0 0 1" />
+      xyz="0 0 -1" />
     <limit
       lower="-0.26"
       upper="2.26"
@@ -897,7 +897,7 @@
     <child
       link="ArmR04_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
       lower="-1.65"
       upper="1.65"
@@ -955,7 +955,7 @@
     <child
       link="ArmR05_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
       lower="-2.268"
       upper="0"
@@ -1129,7 +1129,7 @@
     <child
       link="ArmR07Output_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
       lower="-1.37"
       upper="1.57"

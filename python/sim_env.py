@@ -62,14 +62,17 @@ class MujocoSimEnv:
         return np.array(joint_ids, dtype=np.int32), np.array(dof_ids, dtype=np.int32)
 
     def _resolve_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
-        joint_lower = np.full(Config.NUM_JOINTS, -np.inf, dtype=np.float64)
-        joint_upper = np.full(Config.NUM_JOINTS, np.inf, dtype=np.float64)
+        joint_limits = np.asarray(Config.JOINT_LIMITS_RAD, dtype=np.float64)
+        if joint_limits.shape != (Config.NUM_JOINTS, 2):
+            raise ValueError(
+                f"Config.JOINT_LIMITS_RAD 形状必须为 ({Config.NUM_JOINTS}, 2)"
+            )
+
+        joint_lower = joint_limits[:, 0].copy()
+        joint_upper = joint_limits[:, 1].copy()
         for i, jid in enumerate(self.joint_ids):
-            if not self.model.jnt_limited[jid]:
-                continue
-            lo, hi = self.model.jnt_range[jid]
-            joint_lower[i] = min(lo, hi)
-            joint_upper[i] = max(lo, hi)
+            self.model.jnt_limited[jid] = 1
+            self.model.jnt_range[jid] = [joint_lower[i], joint_upper[i]]
         return joint_lower, joint_upper
 
     def _apply_joint_sim_properties(self) -> None:

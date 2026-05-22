@@ -100,7 +100,7 @@ typedef struct {
 } RBDLModel;
 
 /* ================================================================
- *  AM-DPBSURDF0422 左臂模型常量
+ *  AM-D02-AemLURDF0413 模型常量
  * ================================================================ */
 
 extern const double AM_D02_JOINT_XYZ[NUM_JOINTS][3];
@@ -115,7 +115,7 @@ extern const double AM_D02_LINK_INERTIA[NUM_JOINTS][6];
  * ================================================================ */
 
 /**
- * @brief 构建 AM-DPBSURDF0422 左臂七轴 RBDL 动力学模型
+ * @brief 构建 AM-D02 机器人的原厂 URDF 对应的 RBDL 动力学模型
  */
 void build_am_d02_model(RBDLModel *model);
 
