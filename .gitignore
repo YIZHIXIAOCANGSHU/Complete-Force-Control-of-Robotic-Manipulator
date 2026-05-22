@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local build artifacts
+c_interface/c_main
+c_interface/serial_gravity_comp
