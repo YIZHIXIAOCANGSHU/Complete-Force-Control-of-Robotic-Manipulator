@@ -62,6 +62,14 @@ def _position_to_display_units(position: np.ndarray) -> np.ndarray:
     return np.asarray(position, dtype=np.float64) * _POSITION_DISPLAY_SCALE
 
 
+def _set_rerun_time_seconds(timeline: str, seconds: float) -> None:
+    """Set Rerun time while supporting both current and older SDK APIs."""
+    if hasattr(rr, "set_time"):
+        rr.set_time(timeline, duration=float(seconds))
+    else:
+        rr.set_time_seconds(timeline, float(seconds))
+
+
 def quaternion_to_euler(w, x, y, z):
     """
     四元数转欧拉角 (Roll, Pitch, Yaw) - ZYX 顺序
@@ -284,7 +292,7 @@ def setup_realtime_styles():
                static=True)
     
     # 增加初始数据点，确保 Viewer 启动时图表可见
-    rr.set_time_seconds("time", 0.0)
+    _set_rerun_time_seconds("time", 0.0)
     for axis in ('X', 'Y', 'Z'):
         rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(0.0))
         rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(0.0))
@@ -432,7 +440,7 @@ def log_realtime_step(
     if not RERUN_AVAILABLE: return
     if Config.RERUN_LOG_STRIDE > 1 and step_count % Config.RERUN_LOG_STRIDE != 0:
         return
-    rr.set_time_seconds("time", t)
+    _set_rerun_time_seconds("time", t)
     
     # Joint States
     if q is not None:

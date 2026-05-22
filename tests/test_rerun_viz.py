@@ -48,6 +48,14 @@ class DummyRR:
         return {"kind": "Arrows3D", **kwargs}
 
 
+class NewApiDummyRR(DummyRR):
+    def set_time(self, timeline: str, *, duration: float) -> None:
+        self.time_calls.append((timeline, duration))
+
+    def set_time_seconds(self, timeline: str, value: float) -> None:
+        raise AssertionError("set_time_seconds should not be used when set_time is available")
+
+
 class DummyRRB:
     @staticmethod
     def TimeSeriesView(name: str, origin: str):
@@ -118,6 +126,17 @@ def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
     assert names_by_origin["/tracking/pos/Z"] == "EE Position Z (mm)"
 
 
+def test_setup_realtime_styles_uses_new_rerun_time_api_when_available(monkeypatch):
+    dummy_rr = NewApiDummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+    monkeypatch.setattr(rerun_viz, "rrb", DummyRRB)
+
+    rerun_viz.setup_realtime_styles()
+
+    assert dummy_rr.time_calls == [("time", 0.0)]
+
+
 def test_log_realtime_step_logs_position_tracking_in_mm(monkeypatch):
     dummy_rr = DummyRR()
     monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
@@ -137,3 +156,22 @@ def test_log_realtime_step_logs_position_tracking_in_mm(monkeypatch):
     assert _logged_scalar(dummy_rr, "tracking/pos/X/actual") == 123.0
     assert _logged_scalar(dummy_rr, "tracking/pos/X/desired") == 100.0
     assert _logged_scalar(dummy_rr, "error/X") == 23.0
+
+
+def test_log_realtime_step_uses_new_rerun_time_api_when_available(monkeypatch):
+    dummy_rr = NewApiDummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+
+    rerun_viz.log_realtime_step(
+        t=0.25,
+        pos_actual=np.zeros(3),
+        pos_desired=np.zeros(3),
+        quat_actual=np.array([1.0, 0.0, 0.0, 0.0]),
+        quat_desired=np.array([1.0, 0.0, 0.0, 0.0]),
+        tau_total=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        cycle_time=1.25,
+        step_count=0,
+    )
+
+    assert dummy_rr.time_calls == [("time", 0.25)]
