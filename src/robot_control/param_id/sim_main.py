@@ -42,6 +42,7 @@ from robot_control.param_id.diagnostics import (
 )
 from robot_control.param_id.reporting import (
     _fmt_error_pct,
+    _log_final_result_bars,
     _log_rerun_step,
     _log_sim_realtime_step_from_env,
     _print_chinese_header,
@@ -49,12 +50,10 @@ from robot_control.param_id.reporting import (
     _setup_rerun,
     _sync_realtime,
     _viewer_context,
-    _write_html_report,
 )
 from robot_control.param_id.trajectory import (
     _apply_specialized_profile,
     _build_planned_trajectory,
-    _build_trajectory_records_from_env,
     _candidate_score,
     _compute_ee_poses_for_q_traj,
     _joint_coverage,
@@ -95,10 +94,10 @@ def main() -> None:
         qdd_traj,
         max_ee_speed,
         speed_scale,
-        excitation_overall,
-        excitation_distal,
+        _excitation_overall,
+        _excitation_distal,
         trajectory_labels,
-        trajectory_metadata,
+        _trajectory_metadata,
     ) = _select_excitation_trajectory(
         backend,
         env,
@@ -194,35 +193,6 @@ def main() -> None:
     # ---- 中文终端输出 ----
     _print_chinese_header()
     _print_identification_case(identified_case, true_masses, true_inertias, true_coms=true_coms)
-    report_metadata = {
-        **trajectory_metadata,
-        "stride": stride,
-        "rerun_log_stride": Config.RERUN_LOG_STRIDE,
-        "max_ee_speed": max_ee_speed,
-        "speed_scale": speed_scale,
-    }
-    trajectory_records = _build_trajectory_records_from_env(
-        env,
-        t_arr,
-        q_meas,
-        q_traj,
-        cycle_time_ms=Config.DT * 1000.0,
-    )
-    report_path = _write_html_report(
-        identified_case,
-        true_masses,
-        true_coms,
-        true_inertias,
-        t_arr,
-        q_meas,
-        qd_meas,
-        tau_meas,
-        rerun_ok,
-        report_metadata,
-        trajectory_records=trajectory_records,
-    )
-    if report_path:
-        print(f"HTML 报告已保存: {report_path}")
     print(f"\n辨识参数已计算，可用于后续导出/验证。")
     print("=" * 78)
 
@@ -238,6 +208,12 @@ def main() -> None:
             rr.log(f"param_id/result/Ixx/J{j+1}", rr.Scalars(float(identified_case["inertias"][j][0])))
             rr.log(f"param_id/result/Iyy/J{j+1}", rr.Scalars(float(identified_case["inertias"][j][1])))
             rr.log(f"param_id/result/Izz/J{j+1}", rr.Scalars(float(identified_case["inertias"][j][2])))
+        _log_final_result_bars(
+            rerun_ok,
+            identified_case["masses"],
+            identified_case["coms"],
+            identified_case["inertias"],
+        )
 
     backend.close()
     print("\n[辨识] 完成。")

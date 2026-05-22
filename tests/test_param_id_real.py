@@ -94,6 +94,14 @@ class FakeBackend:
         _ = q, qd
         return self.torque.copy()
 
+    def compute_fk(self, q):
+        q = np.asarray(q, dtype=np.float64)
+        return q[:3].tolist(), [1.0, 0.0, 0.0, 0.0]
+
+    def compute_jacobian(self, q):
+        _ = q
+        return np.zeros((6, Config.NUM_JOINTS), dtype=np.float64)
+
     def _check_safety(self, q, qd):
         _ = q, qd
         return self.safety_status
@@ -162,6 +170,10 @@ def test_feedback_timeout_reports_missing_motors_and_safe_stop_closes():
 
 def test_collect_real_param_id_data_records_feedback_and_sends_mit_commands(monkeypatch):
     monkeypatch.setattr(param_id_real.Config, "PARAM_ID_REAL_START_TOL_RAD", 0.1)
+    monkeypatch.setattr(param_id_real.Config, "CARTESIAN_KP", np.zeros(6, dtype=np.float64))
+    monkeypatch.setattr(param_id_real.Config, "CARTESIAN_KD", np.zeros(6, dtype=np.float64))
+    monkeypatch.setattr(param_id_real.Config, "NULLSPACE_KP", np.zeros(Config.NUM_JOINTS, dtype=np.float64))
+    monkeypatch.setattr(param_id_real.Config, "NULLSPACE_KD", np.zeros(Config.NUM_JOINTS, dtype=np.float64))
     frames = _feedback_round() + _feedback_round() + _feedback_round()
     transport = FakeCanTransport(frames)
     backend = FakeBackend(torque=np.full(Config.NUM_JOINTS, 0.02))
@@ -182,11 +194,16 @@ def test_collect_real_param_id_data_records_feedback_and_sends_mit_commands(monk
     assert data.samples == 3
     np.testing.assert_allclose(data.q_meas[0], q_traj[0])
     np.testing.assert_allclose(data.tau_meas[0], [0.01 * (i + 1) for i in range(Config.NUM_JOINTS)])
-    nonzero_pd = [
+    pure_torque = [
         cmd for cmd in transport.commands
-        if cmd[0] == "mit" and cmd[4] == 1.0 and cmd[-1] == 0.02
+        if cmd[0] == "mit"
+        and cmd[2] == 0.0
+        and cmd[3] == 0.0
+        and cmd[4] == 0.0
+        and cmd[5] == 0.0
+        and cmd[-1] == 0.02
     ]
-    assert len(nonzero_pd) == Config.NUM_JOINTS * 3
+    assert len(pure_torque) == Config.NUM_JOINTS * 3
 
 
 def test_collect_real_param_id_data_rejects_initial_pose_mismatch(monkeypatch):
@@ -208,24 +225,30 @@ def test_collect_real_param_id_data_rejects_initial_pose_mismatch(monkeypatch):
         )
 
 
-def test_collect_real_param_id_data_rejects_predicted_torque_over_limit(monkeypatch):
+def test_collect_real_param_id_data_clips_predicted_torque_before_sending(monkeypatch):
     monkeypatch.setattr(param_id_real.Config, "PARAM_ID_REAL_START_TOL_RAD", 0.1)
     monkeypatch.setattr(param_id_real.Config, "TORQUE_LIMITS", np.ones(Config.NUM_JOINTS) * 0.05)
-    transport = FakeCanTransport(_feedback_round())
+    monkeypatch.setattr(param_id_real.Config, "CARTESIAN_KP", np.zeros(6, dtype=np.float64))
+    monkeypatch.setattr(param_id_real.Config, "CARTESIAN_KD", np.zeros(6, dtype=np.float64))
+    monkeypatch.setattr(param_id_real.Config, "NULLSPACE_KP", np.zeros(Config.NUM_JOINTS, dtype=np.float64))
+    monkeypatch.setattr(param_id_real.Config, "NULLSPACE_KD", np.zeros(Config.NUM_JOINTS, dtype=np.float64))
+    transport = FakeCanTransport(_feedback_round() + _feedback_round())
     backend = FakeBackend(torque=np.ones(Config.NUM_JOINTS))
     t_arr = np.array([0.0, 0.01], dtype=np.float64)
     q_traj = np.array([[0.001 * (i + 1) for i in range(Config.NUM_JOINTS)]] * 2, dtype=np.float64)
     qd_traj = np.zeros_like(q_traj)
 
-    with pytest.raises(RuntimeError, match="exceeds limits"):
-        param_id_real._collect_real_param_id_data(
-            transport,
-            backend,
-            t_arr,
-            q_traj,
-            qd_traj,
-            feedback_timeout_s=1.0,
-        )
+    param_id_real._collect_real_param_id_data(
+        transport,
+        backend,
+        t_arr,
+        q_traj,
+        qd_traj,
+        feedback_timeout_s=1.0,
+    )
+
+    torque_commands = [cmd for cmd in transport.commands if cmd[0] == "mit" and cmd[-1] == 0.05]
+    assert len(torque_commands) == Config.NUM_JOINTS * 2
 
 
 def test_collect_real_param_id_data_preserves_original_backend_safety(monkeypatch):
@@ -252,7 +275,7 @@ def test_collect_real_param_id_data_preserves_original_backend_safety(monkeypatc
             )
         nonzero_pd = [
             cmd for cmd in transport.commands
-            if cmd[0] == "mit" and cmd[4] != 0.0
+            if cmd[0] == "mit" and (cmd[4] != 0.0 or cmd[5] != 0.0)
         ]
         assert nonzero_pd == []
 

@@ -10,11 +10,12 @@ except ImportError:
     rr = None
     RERUN_AVAILABLE = False
 
+from robot_control.shared.rerun.time import set_time_seconds
+
 
 def log_scalar(path: str, value: float, *, t: float | None = None) -> None:
     if not RERUN_AVAILABLE:
         return
     if t is not None:
-        rr.set_time_seconds("time", float(t))
+        set_time_seconds(rr, "time", float(t))
     rr.log(path, rr.Scalars(float(value)))
-

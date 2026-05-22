@@ -17,6 +17,7 @@ except ImportError:
     print("警告: rerun-sdk 未安装，将跳过 Rerun 可视化")
 
 from robot_control.config import Config
+from robot_control.shared.rerun.time import set_time_seconds
 
 _AXIS_COLORS = {
     'X':     [230, 80, 80],
@@ -305,7 +306,7 @@ def setup_realtime_styles():
                static=True)
     
     # 增加初始数据点，确保 Viewer 启动时图表可见
-    rr.set_time_seconds("time", 0.0)
+    set_time_seconds(rr, "time", 0.0)
     for axis in ('X', 'Y', 'Z'):
         rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(0.0))
         rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(0.0))
@@ -476,6 +477,9 @@ def setup_sim_realtime_styles():
         rr.log(f"joint_state/qd/J{i+1}",
                rr.SeriesLines(colors=[_JOINT_COLORS[i]], names=[f"J{i+1} velocity"], widths=[2]),
                static=True)
+        rr.log(f"joint_target/q/J{i+1}",
+               rr.SeriesLines(colors=[_JOINT_COLORS[i]], names=[f"J{i+1} target"], widths=[1.5]),
+               static=True)
         rr.log(f"sim/control/torque/J{i+1}/received",
                rr.SeriesLines(colors=[[170, 170, 170]], names=["Received torque"], widths=[1.0]),
                static=True)
@@ -487,7 +491,7 @@ def setup_sim_realtime_styles():
            rr.SeriesLines(colors=[[230, 100, 50]], names=["MuJoCo step time (ms)"], widths=[2]),
            static=True)
 
-    rr.set_time_seconds("time", 0.0)
+    set_time_seconds(rr, "time", 0.0)
     for axis in ('X', 'Y', 'Z'):
         rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(0.0))
         rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(0.0))
@@ -499,6 +503,7 @@ def setup_sim_realtime_styles():
     for i in range(Config.NUM_JOINTS):
         rr.log(f"joint_state/q/J{i+1}", rr.Scalars(0.0))
         rr.log(f"joint_state/qd/J{i+1}", rr.Scalars(0.0))
+        rr.log(f"joint_target/q/J{i+1}", rr.Scalars(0.0))
         rr.log(f"sim/control/torque/J{i+1}/received", rr.Scalars(0.0))
         rr.log(f"sim/control/torque/J{i+1}/applied", rr.Scalars(0.0))
     rr.log("sim/performance/step_time_ms", rr.Scalars(0.0))
@@ -533,6 +538,7 @@ def setup_sim_realtime_styles():
         for i in range(Config.NUM_JOINTS)
     ]
     joint_q_view = rrb.TimeSeriesView(name="Joint Positions (rad)", origin="/joint_state/q")
+    joint_target_q_view = rrb.TimeSeriesView(name="Target Joint Positions (q_ref, rad)", origin="/joint_target/q")
     joint_qd_view = rrb.TimeSeriesView(name="Joint Velocities (rad/s)", origin="/joint_state/qd")
     sim_step_time_view = rrb.TimeSeriesView(
         name="MuJoCo Step Time (ms)", origin="/sim/performance/step_time_ms"
@@ -552,7 +558,7 @@ def setup_sim_realtime_styles():
                     rrb.Horizontal(*rot_err_views),
                     name="EE Tracking Error",
                 ),
-                rrb.Vertical(joint_q_view, joint_qd_view, name="Joint States"),
+                rrb.Vertical(joint_q_view, joint_target_q_view, joint_qd_view, name="Joint States"),
                 rrb.Vertical(
                     rrb.Horizontal(*torque_views[:4], name="J1-J4 Torque"),
                     rrb.Horizontal(*torque_views[4:], name="J5-J7 Torque"),
@@ -592,7 +598,7 @@ def log_realtime_step(
     if not RERUN_AVAILABLE: return
     if Config.RERUN_LOG_STRIDE > 1 and step_count % Config.RERUN_LOG_STRIDE != 0:
         return
-    rr.set_time_seconds("time", t)
+    set_time_seconds(rr, "time", t)
     
     # Joint States
     if q is not None:
@@ -673,6 +679,7 @@ def log_sim_realtime_step(
     cycle_time: float,
     q: np.ndarray = None,
     qd: np.ndarray = None,
+    q_target: np.ndarray = None,
     step_count: int = 0,
 ):
     """记录 UDP/MuJoCo 仿真的必要控制数据。"""
@@ -680,7 +687,7 @@ def log_sim_realtime_step(
         return
     if Config.RERUN_LOG_STRIDE > 1 and step_count % Config.RERUN_LOG_STRIDE != 0:
         return
-    rr.set_time_seconds("time", t)
+    set_time_seconds(rr, "time", t)
 
     if q is not None:
         for i in range(len(q)):
@@ -688,6 +695,9 @@ def log_sim_realtime_step(
     if qd is not None:
         for i in range(len(qd)):
             rr.log(f"joint_state/qd/J{i+1}", rr.Scalars(float(qd[i])))
+    if q_target is not None:
+        for i in range(len(q_target)):
+            rr.log(f"joint_target/q/J{i+1}", rr.Scalars(float(q_target[i])))
     pos_actual_display = _position_to_display_units(pos_actual)
     pos_desired_display = _position_to_display_units(pos_desired)
     pos_err = pos_actual_display - pos_desired_display

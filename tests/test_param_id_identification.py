@@ -1,9 +1,6 @@
-import csv
 import inspect
-import json
 import sys
 import types
-from pathlib import Path
 
 import numpy as np
 import robot_control.param_id.sim_main as sim_main
@@ -301,6 +298,25 @@ def test_sim_main_reports_single_joint_inclusive_result():
     assert "inertial_case" not in source
 
 
+def test_viewer_context_degrades_when_viewer_preflight_fails(monkeypatch, capsys):
+    class DummyEnv:
+        model = object()
+        data = object()
+
+    def fail_launch(_model, _data):
+        raise RuntimeError("GLFW OpenGL context is not available")
+
+    monkeypatch.setattr(reporting.Config, "ENABLE_VIEWER", True)
+    monkeypatch.setattr(reporting, "launch_passive_viewer", fail_launch)
+
+    with reporting._viewer_context(DummyEnv()) as viewer:
+        assert viewer is None
+
+    output = capsys.readouterr().out
+    assert "MuJoCo 窗口不可用" in output
+    assert "改为无窗口运行" in output
+
+
 class _DummyRerun(types.ModuleType):
     def __init__(self):
         super().__init__("rerun")
@@ -324,6 +340,9 @@ class _DummyRerun(types.ModuleType):
     def Scalars(self, value):
         return value
 
+    def BarChart(self, values, **kwargs):
+        return {"kind": "BarChart", "values": np.asarray(values, dtype=np.float64), **kwargs}
+
     def SeriesLines(self, **kwargs):
         return {"kind": "SeriesLines", **kwargs}
 
@@ -341,6 +360,10 @@ class _DummyBlueprint:
     @staticmethod
     def TimeSeriesView(name, origin):
         return {"kind": "TimeSeriesView", "name": name, "origin": origin}
+
+    @staticmethod
+    def BarChartView(name, origin):
+        return {"kind": "BarChartView", "name": name, "origin": origin}
 
     @staticmethod
     def Spatial3DView(name, origin):
@@ -376,7 +399,7 @@ def _iter_blueprint_nodes(node):
 def _install_dummy_rerun(monkeypatch):
     dummy_rr = _DummyRerun()
     blueprint_module = types.ModuleType("rerun.blueprint")
-    for name in ("TimeSeriesView", "Spatial3DView", "Horizontal", "Vertical", "Tabs", "Blueprint"):
+    for name in ("TimeSeriesView", "BarChartView", "Spatial3DView", "Horizontal", "Vertical", "Tabs", "Blueprint"):
         setattr(blueprint_module, name, getattr(_DummyBlueprint, name))
     dummy_rr.blueprint = blueprint_module
     monkeypatch.setitem(sys.modules, "rerun", dummy_rr)
@@ -451,12 +474,37 @@ def test_param_id_rerun_setup_uses_common_init_and_keeps_sim_views(monkeypatch):
     origins = {
         node["origin"]
         for node in _iter_blueprint_nodes(dummy_rr.blueprint)
-        if node.get("kind") in {"TimeSeriesView", "Spatial3DView"}
+        if node.get("kind") in {"TimeSeriesView", "BarChartView", "Spatial3DView"}
     }
     assert init_calls == ["AM-D02 参数辨识 (Sim)"]
     assert "/param_id/excitation_q_rad/J1" in origins
     assert "/tracking/pos/X" in origins
     assert "/trajectory_3d" in origins
+
+
+def test_param_id_rerun_setup_can_use_pd_sim_prefix(monkeypatch):
+    dummy_rr = _install_dummy_rerun(monkeypatch)
+    monkeypatch.setattr(sim_main.Config, "ENABLE_RERUN", True)
+    init_calls = []
+
+    def fake_init(app_name):
+        init_calls.append(app_name)
+        return True
+
+    monkeypatch.setattr(reporting.rerun_viz, "init_rerun", fake_init)
+
+    assert reporting._setup_rerun(app_name="AM-D02 参数辨识 (PD Sim)", param_prefix="param_id_sim_pd")
+
+    origins = {
+        node["origin"]
+        for node in _iter_blueprint_nodes(dummy_rr.blueprint)
+        if node.get("kind") in {"TimeSeriesView", "BarChartView", "Spatial3DView"}
+    }
+    logged = {path for path, _payload, _static in dummy_rr.logs}
+    assert init_calls == ["AM-D02 参数辨识 (PD Sim)"]
+    assert "/param_id_sim_pd/excitation_q_rad/J1" in origins
+    assert "/param_id_sim_pd/result_bar/mass" in origins
+    assert "param_id_sim_pd/excitation_q_rad/J1" in logged
 
 
 def test_param_id_rerun_setup_degrades_when_common_init_fails(monkeypatch, capsys):
@@ -668,201 +716,3 @@ def test_trajectory_profiles_include_combined_com_and_inertia_t7(monkeypatch):
 
     assert t7["with_com_gravity"]
     assert t7["with_inertia_burst"]
-
-
-def test_param_id_html_report_writes_core_tables(tmp_path, monkeypatch):
-    monkeypatch.setattr(sim_main.Config, "RESULTS_DIR", str(tmp_path))
-    q = np.zeros((3, 7), dtype=np.float64)
-    qd = np.ones((3, 7), dtype=np.float64)
-    tau = np.ones((3, 7), dtype=np.float64) * 2.0
-
-    report_path = reporting._write_html_report(
-        _minimal_identified_case(),
-        true_masses=np.ones(7),
-        true_coms=np.zeros((7, 3)),
-        true_inertias=np.ones((7, 3)) * 0.01,
-        t_arr=np.array([0.0, 0.1, 0.2]),
-        q_meas=q,
-        qd_meas=qd,
-        tau_meas=tau,
-        rerun_ok=True,
-        trajectory_metadata={"profile": "T0", "seed": 43},
-    )
-
-    assert report_path is not None
-    html = Path(report_path).read_text(encoding="utf-8")
-    assert "参数辨识报告（仿真模式）" in html
-    assert "J1" in html and "J7" in html
-    assert "训练/验证 RMS" in html
-    assert "质量" in html
-    assert "COM" in html
-    assert "惯量" in html
-    assert "关节项" in html
-    assert "力矩RMS" in html
-    assert "相对先验" in html
-    assert "最大参数误差项" in html
-    assert "Mass: Identified vs URDF" in html
-    assert "Izz: Identified vs URDF" in html
-
-
-def test_param_id_html_report_degrades_without_plotly(tmp_path, monkeypatch):
-    monkeypatch.setattr(sim_main.Config, "RESULTS_DIR", str(tmp_path))
-    monkeypatch.setitem(sys.modules, "plotly", None)
-    monkeypatch.setitem(sys.modules, "plotly.graph_objects", None)
-
-    report_path = reporting._write_html_report(
-        _minimal_identified_case(),
-        true_masses=np.ones(7),
-        true_coms=np.zeros((7, 3)),
-        true_inertias=np.ones((7, 3)) * 0.01,
-        t_arr=np.array([0.0, 0.1]),
-        q_meas=np.zeros((2, 7)),
-        qd_meas=np.zeros((2, 7)),
-        tau_meas=np.zeros((2, 7)),
-        rerun_ok=False,
-        trajectory_metadata={},
-    )
-
-    assert report_path is not None
-    html = Path(report_path).read_text(encoding="utf-8")
-    assert "plotly 未安装" in html
-    assert "参数表" in html
-
-
-def _sample_trajectory_records():
-    return [
-        {
-            "time": 0.0,
-            "step": 0,
-            "actual_x": 0.100,
-            "actual_y": 0.200,
-            "actual_z": 0.300,
-            "expected_x": 0.099,
-            "expected_y": 0.201,
-            "expected_z": 0.300,
-            "actual_roll": 1.0,
-            "actual_pitch": 2.0,
-            "actual_yaw": 3.0,
-            "expected_roll": 0.5,
-            "expected_pitch": 2.5,
-            "expected_yaw": 1.0,
-            "error_x_mm": 1.0,
-            "error_y_mm": -1.0,
-            "error_z_mm": 0.0,
-            "error_roll_deg": 0.5,
-            "error_pitch_deg": -0.5,
-            "error_yaw_deg": 2.0,
-            "cycle_time_ms": 2.0,
-        },
-        {
-            "time": 0.1,
-            "step": 1,
-            "actual_x": 0.110,
-            "actual_y": 0.210,
-            "actual_z": 0.310,
-            "expected_x": 0.113,
-            "expected_y": 0.209,
-            "expected_z": 0.309,
-            "actual_roll": 2.0,
-            "actual_pitch": 3.0,
-            "actual_yaw": 4.0,
-            "expected_roll": 1.0,
-            "expected_pitch": 2.0,
-            "expected_yaw": 1.5,
-            "error_x_mm": -3.0,
-            "error_y_mm": 1.0,
-            "error_z_mm": 1.0,
-            "error_roll_deg": 1.0,
-            "error_pitch_deg": 1.0,
-            "error_yaw_deg": 2.5,
-            "cycle_time_ms": 2.1,
-        },
-    ]
-
-
-def test_param_id_html_report_writes_offline_summary_artifacts(tmp_path, monkeypatch):
-    monkeypatch.setattr(sim_main.Config, "RESULTS_DIR", str(tmp_path))
-
-    report_path = reporting._write_html_report(
-        _minimal_identified_case(),
-        true_masses=np.ones(7),
-        true_coms=np.zeros((7, 3)),
-        true_inertias=np.ones((7, 3)) * 0.01,
-        t_arr=np.array([0.0, 0.1]),
-        q_meas=np.zeros((2, 7)),
-        qd_meas=np.zeros((2, 7)),
-        tau_meas=np.zeros((2, 7)),
-        rerun_ok=False,
-        trajectory_metadata={"profile": "T0", "seed": 43},
-        trajectory_records=_sample_trajectory_records(),
-    )
-
-    report_dir = Path(report_path).parent
-    trajectory_csv = report_dir / "trajectory_log.csv"
-    summary_json = report_dir / "identification_summary.json"
-
-    assert trajectory_csv.exists()
-    assert summary_json.exists()
-
-    with trajectory_csv.open(newline="", encoding="utf-8") as fh:
-        rows = list(csv.DictReader(fh))
-    assert rows[0]["error_x_mm"] == "1.000000"
-    assert rows[1]["error_y_mm"] == "1.000000"
-
-    summary = json.loads(summary_json.read_text(encoding="utf-8"))
-    assert summary["run_id"] == report_dir.name
-    assert summary["sample_count"] == 2
-    assert summary["worst_dof"] == "X"
-    assert np.isclose(summary["rms_error_by_dof"]["X"], np.sqrt(5.0))
-    assert np.isclose(summary["max_error_by_dof"]["Yaw"], 2.5)
-    assert "joint_term_error_summary" in summary
-    assert "torque_rms" in summary["joint_term_error_summary"]
-    assert summary["joint_term_error_summary"]["reference"] == "PARAM_ID_JOINT_PRIORS"
-    assert summary["trajectory_metadata"]["profile"] == "T0"
-    assert "ok" in Path(report_path).read_text(encoding="utf-8")
-
-
-def test_param_id_html_report_uses_friction_reading_order_and_6dof_sections(tmp_path, monkeypatch):
-    monkeypatch.setattr(sim_main.Config, "RESULTS_DIR", str(tmp_path))
-
-    report_path = reporting._write_html_report(
-        _minimal_identified_case(),
-        true_masses=np.ones(7),
-        true_coms=np.zeros((7, 3)),
-        true_inertias=np.ones((7, 3)) * 0.01,
-        t_arr=np.array([0.0, 0.1]),
-        q_meas=np.zeros((2, 7)),
-        qd_meas=np.zeros((2, 7)),
-        tau_meas=np.zeros((2, 7)),
-        rerun_ok=False,
-        trajectory_metadata={},
-        trajectory_records=_sample_trajectory_records(),
-    )
-
-    html = Path(report_path).read_text(encoding="utf-8")
-    section_titles = [
-        "Executive Summary",
-        "Identification Result",
-        "Before / After Comparison",
-        "Trajectory Overview",
-        "6DoF Error Summary",
-        "Position Error Curves",
-        "Rotation Error Curves",
-        "Actual vs Expected Detail",
-        "Identification Diagnostics",
-        "Data Notes",
-    ]
-    positions = [html.index(title) for title in section_titles]
-    assert positions == sorted(positions)
-
-    for title in (
-        "X Error over Time (mm)",
-        "Y Error over Time (mm)",
-        "Z Error over Time (mm)",
-        "Roll Error over Time (deg)",
-        "Pitch Error over Time (deg)",
-        "Yaw Error over Time (deg)",
-    ):
-        assert title in html
-    assert "Before data not available" in html
-    assert "actual - expected" in html

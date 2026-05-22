@@ -63,6 +63,33 @@ def select_payload_regressor(
     return np.asarray(y_stack, dtype=np.float64)[:, cols], names
 
 
+def subtract_known_body_torque(
+    y_stack: np.ndarray,
+    tau_stack: np.ndarray,
+    param_names: list[str],
+    baseline: dict[str, float],
+    *,
+    link_index: int = PAYLOAD_LINK_INDEX,
+) -> np.ndarray:
+    """Remove known non-payload inertial torque so only payload residual remains."""
+    y = np.asarray(y_stack, dtype=np.float64)
+    tau = np.asarray(tau_stack, dtype=np.float64).reshape(-1)
+    if y.ndim != 2:
+        raise ValueError(f"regressor must be 2D, got {y.shape}")
+    if y.shape[0] != tau.shape[0]:
+        raise ValueError(f"tau length {tau.shape[0]} must match regressor rows {y.shape[0]}")
+    if y.shape[1] != len(param_names):
+        raise ValueError(f"param_names length {len(param_names)} must match regressor columns {y.shape[1]}")
+
+    payload_cols = np.asarray(payload_column_indices(param_names, link_index=link_index), dtype=np.int64)
+    other_cols = np.setdiff1d(np.arange(y.shape[1], dtype=np.int64), payload_cols)
+    if other_cols.size == 0:
+        return tau.copy()
+
+    theta_other = np.array([float(baseline.get(param_names[index], 0.0)) for index in other_cols], dtype=np.float64)
+    return tau - y[:, other_cols] @ theta_other
+
+
 def validate_payload_regressor(
     y_payload: np.ndarray,
     *,

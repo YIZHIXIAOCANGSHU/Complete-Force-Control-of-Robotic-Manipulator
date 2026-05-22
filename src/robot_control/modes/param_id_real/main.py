@@ -10,12 +10,14 @@ from dataclasses import dataclass
 import numpy as np
 
 from robot_control.config import Config
+from robot_control.dynamics.cartesian_impedance import CartesianImpedanceController
 from robot_control.dynamics.pinocchio import PinocchioGravityBackend
 from robot_control.hardware.usb2fdcan import acquisition as can_feedback
 from robot_control.hardware.usb2fdcan.runtime import (
     CAN_FEEDBACK_TIMEOUT_S,
     open_can_transport,
 )
+from robot_control.param_id.diagnostics import _extract_ground_truth
 from robot_control.param_id.excitation import fourier_trajectory
 from robot_control.param_id.identification import (
     compute_condition_number,
@@ -26,6 +28,8 @@ from robot_control.param_id.identification import (
 )
 from robot_control.param_id.preprocessing import estimate_qdd_from_qd
 from robot_control.param_id.regressor import build_stacked_regressor
+from robot_control.param_id.reporting import _print_identified_params
+from robot_control.shared.rerun.time import set_time_seconds
 
 
 @dataclass(frozen=True)
@@ -37,36 +41,11 @@ class RealParamIdData:
     samples: int
 
 
-def _extract_ground_truth(backend: PinocchioGravityBackend):
-    model = backend._model
-    masses, coms, inertias = [], [], []
-    for i in range(1, 8):
-        inert = model.inertias[i]
-        masses.append(float(inert.mass))
-        com = inert.lever
-        coms.append([float(com[0]), float(com[1]), float(com[2])])
-        I = inert.inertia
-        inertias.append([float(I[0, 0]), float(I[1, 1]), float(I[2, 2])])
-    return masses, coms, inertias
-
-
 def _print_chinese_header():
     print()
     print("=" * 78)
     print("                    参数辨识结果（实机模式）")
     print("=" * 78)
-
-
-def _print_identified_params(masses, coms, inertias):
-    print(f"\n{'关节':<6} {'质量(kg)':>10}  {'质心 COM (m)':<36} {'惯量对角 (kg·m²)':<42}")
-    print("-" * 78)
-    for j in range(7):
-        print(
-            f" J{j + 1:<5} {masses[j]:>10.4f}  "
-            f"[{coms[j][0]: .4f} {coms[j][1]: .4f} {coms[j][2]: .4f}]"
-            f"{'':>6}"
-            f"[{inertias[j][0]:.6f}  {inertias[j][1]:.6f}  {inertias[j][2]:.6f}]"
-        )
 
 
 def _setup_rerun():
@@ -104,37 +83,28 @@ def _log_rerun_step(rerun_ok, t, q, qd, tau):
         return
     import rerun as rr
 
-    rr.set_time_seconds("time", t)
+    set_time_seconds(rr, "time", t)
     for i in range(7):
         rr.log(f"param_id_real/关节位置 q (rad)/J{i+1}", rr.Scalars(float(q[i])))
         rr.log(f"param_id_real/关节速度 qd (rad/s)/J{i+1}", rr.Scalars(float(qd[i])))
         rr.log(f"param_id_real/关节力矩 tau (N·m)/J{i+1}", rr.Scalars(float(tau[i])))
 
 
-def _real_joint_gains(backend: PinocchioGravityBackend) -> tuple[np.ndarray, np.ndarray]:
-    kp = np.asarray(getattr(backend, "_joint_kp"), dtype=np.float64)
-    kd = np.asarray(getattr(backend, "_joint_kd"), dtype=np.float64)
-    return kp.copy(), kd.copy()
-
-
 def _send_param_id_command(
     transport,
     motor_ids,
     *,
-    q_ref,
-    qd_ref,
-    kp,
-    kd,
-    tau_ff,
+    tau_total,
 ) -> None:
+    tau = np.asarray(tau_total, dtype=np.float64)
     for index, motor_id in enumerate(motor_ids):
         transport.send_mit_command(
             int(motor_id),
-            position=float(q_ref[index]),
-            velocity=float(qd_ref[index]),
-            kp=float(kp[index]),
-            kd=float(kd[index]),
-            torque=float(tau_ff[index]),
+            position=0.0,
+            velocity=0.0,
+            kp=0.0,
+            kd=0.0,
+            torque=float(tau[index]),
         )
 
 
@@ -220,7 +190,7 @@ def _collect_real_param_id_data(
 
     motor_ids = tuple(range(1, Config.NUM_JOINTS + 1))
     dt = float(t_arr[1] - t_arr[0]) if len(t_arr) > 1 else float(Config.DT)
-    kp, kd = _real_joint_gains(backend)
+    controller = CartesianImpedanceController(backend)
     q_meas = np.zeros_like(q_ref_traj)
     qd_meas = np.zeros_like(q_ref_traj)
     tau_meas = np.zeros_like(q_ref_traj)
@@ -251,9 +221,8 @@ def _collect_real_param_id_data(
         qd = snapshot.qd
         tau_actual = snapshot.tau
         _assert_original_safety_checks(backend, q, qd, q_ref_traj[step])
-        tau_ff = np.asarray(backend.compute_nonlinear_effects(q, qd), dtype=np.float64)
-        _assert_torque_within_limits(tau_ff)
-        tau_total = kp * (q_ref_traj[step] - q) + kd * (qd_ref_traj[step] - qd) + tau_ff
+        control = controller.compute_from_joint_reference(q, qd, q_ref_traj[step], qd_ref_traj[step])
+        tau_total = control.tau_total
         _assert_original_safety_checks(backend, q, qd, q_ref_traj[step], tau_total=tau_total)
         _assert_torque_within_limits(tau_total)
 
@@ -265,11 +234,7 @@ def _collect_real_param_id_data(
         _send_param_id_command(
             transport,
             motor_ids,
-            q_ref=q_ref_traj[step],
-            qd_ref=qd_ref_traj[step],
-            kp=kp,
-            kd=kd,
-            tau_ff=tau_ff,
+            tau_total=tau_total,
         )
 
         target_time = start_wall + float(t_arr[step]) + dt

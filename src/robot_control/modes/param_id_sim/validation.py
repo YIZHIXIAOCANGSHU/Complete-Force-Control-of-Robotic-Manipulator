@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PD validation and inertial-case selection for parameter-identification simulation mode."""
+"""Closed-loop validation and inertial-case selection for parameter-identification simulation."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from robot_control.param_id import diagnostics as _diag
 from robot_control.param_id import trajectory as _traj
 from robot_control.param_id.excitation import limit_ee_speed
 from robot_control.param_id.regressor import build_stacked_regressor
-from robot_control.modes.param_id_sim.acquisition import _collect_pd_data
+from robot_control.modes.param_id_sim.acquisition import _collect_cartesian_impedance_data
 from robot_control.modes.param_id_sim.pd_controller import PDController, _as_joint_vector
 
 
@@ -554,7 +554,7 @@ def _candidate_return_tuple(candidate: dict, metadata_extra: dict | None = None)
         "description": candidate["description"],
         "seed": candidate["seed"],
         "score": candidate["score"],
-        "selection_mode": "pd_closed_loop",
+        "selection_mode": "cartesian_impedance_closed_loop",
     }
     if metadata_extra:
         metadata.update(metadata_extra)
@@ -579,7 +579,7 @@ def _select_excitation_trajectory_pd(
     q0,
     limits,
 ) -> tuple[np.ndarray, ...]:
-    """Select an excitation trajectory with SVD pre-screening and PD validation."""
+    """Select an excitation trajectory with SVD pre-screening and closed-loop validation."""
     true_masses, true_coms, true_inertias = _diag._extract_ground_truth(backend)
     candidates = []
     for profile in _traj._trajectory_profiles():
@@ -658,12 +658,17 @@ def _select_excitation_trajectory_pd(
     validation_grid = _pd_validation_grid()
     validation_cases = []
     validation_errors = []
-    print(f"[辨识-PD] SVD 初筛完成，使用 PD 闭环验证 top-{top_n} 候选...")
+    print(f"[辨识-笛卡尔阻抗] SVD 初筛完成，使用笛卡尔阻抗闭环验证 top-{top_n} 候选...")
     for cand in ranked[:top_n]:
         try:
             env.reset(cand["q"][0])
             env.forward()
-            q_meas_raw, qd_meas_raw, tau_cmd = _collect_pd_data(env, controller, cand["q"], cand["qd"])
+            q_meas_raw, qd_meas_raw, tau_cmd = _collect_cartesian_impedance_data(
+                env,
+                controller,
+                cand["q"],
+                cand["qd"],
+            )
             prep = _prepare_pd_identification_data(q_meas_raw, qd_meas_raw, tau_cmd, Config.HOME_QPOS)
             q_meas = prep["q_meas"]
             qd_meas = prep["qd_meas"]
@@ -675,7 +680,7 @@ def _select_excitation_trajectory_pd(
             for mass_lambda, com_lambda, inertia_lambda, joint_lambda in validation_grid:
                 case = _solve_hierarchical_pd_case(
                     (
-                        f"PD候选验证 {cand['profile']} seed={cand['seed']} "
+                    f"笛卡尔阻抗候选验证 {cand['profile']} seed={cand['seed']} "
                         f"λm={mass_lambda:.2g} λc={com_lambda:.2g} "
                         f"λI={inertia_lambda:.2g} λj={joint_lambda:.2g}"
                     ),
@@ -700,21 +705,22 @@ def _select_excitation_trajectory_pd(
                 case["pd_clipping"] = clipping
                 case["pd_prep_diag"] = prep_diag
                 case["pd_gains"] = {
-                    "kp": controller.kp.tolist(),
-                    "kd": controller.kd.tolist(),
+                    "cartesian_kp": controller.kp.tolist(),
+                    "cartesian_kd": controller.kd.tolist(),
+                    "nullspace_q_ref": Config.NULLSPACE_Q_REF.tolist(),
                     "torque_limits": controller.torque_limits.tolist(),
                 }
                 validation_cases.append(case)
         except Exception as exc:
             validation_errors.append(f"{cand['profile']} seed={cand['seed']}: {exc}")
-            print(f"[辨识-PD] 候选 {cand['profile']} seed={cand['seed']} 验证失败，跳过: {exc}")
+            print(f"[辨识-笛卡尔阻抗] 候选 {cand['profile']} seed={cand['seed']} 验证失败，跳过: {exc}")
 
     if validation_cases:
         validated = sorted(validation_cases, key=_diag._case_selection_key)
         best_case = validated[0]
         best_candidate = best_case["candidate"]
         if Config.PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS:
-            print("[辨识-PD] PD 验证矩阵Top:")
+            print("[辨识-笛卡尔阻抗] 闭环验证矩阵Top:")
             for case in validated[:top_n]:
                 cand = case["candidate"]
                 summary = case["mass_summary"]
@@ -733,18 +739,18 @@ def _select_excitation_trajectory_pd(
         best_clip = best_case.get("pd_clipping", {})
         best_sel = best_case.get("selection", {})
         print(
-            f"[辨识-PD] 选择激励 {best_candidate['profile']} ({best_candidate['description']}) "
+            f"[辨识-笛卡尔阻抗] 选择激励 {best_candidate['profile']} ({best_candidate['description']}) "
             f"seed={best_candidate['seed']}, 验证最大误差={best_case['mass_summary']['max_abs']:.2f}%, "
             f"跟踪RMS={best_tracking.get('joint_rms_rad', float('nan')):.4f} rad"
         )
         if best_prep:
             print(
-                f"[辨识-PD] qdd RMS mean={best_prep.get('qdd_rms_mean', float('nan')):.4f} "
+                f"[辨识-笛卡尔阻抗] qdd RMS mean={best_prep.get('qdd_rms_mean', float('nan')):.4f} "
                 f"tau_prior_ratio={best_prep.get('tau_joint_prior_to_cmd_ratio', float('nan')):.3f} "
                 f"applied={best_prep.get('tau_joint_prior_applied_to_cmd_ratio', float('nan')):.3f}"
             )
         if best_clip.get("clipped_any_pct", 0.0) > 1.0:
-            print(f"[辨识-PD] 验证力矩饱和: {best_clip['clipped_any_pct']:.1f}% 时间步")
+            print(f"[辨识-笛卡尔阻抗] 验证力矩饱和: {best_clip['clipped_any_pct']:.1f}% 时间步")
         return _candidate_return_tuple(
             best_candidate,
             {
@@ -765,11 +771,11 @@ def _select_excitation_trajectory_pd(
         )
 
     if validation_errors:
-        raise RuntimeError("PD validation failed for all top candidates: " + "; ".join(validation_errors))
+        raise RuntimeError("Cartesian impedance validation failed for all top candidates: " + "; ".join(validation_errors))
 
     fallback = ranked[0]
     print(
-        f"[辨识-PD] PD 验证没有可用结果，回退到 SVD 最优激励 {fallback['profile']} "
+        f"[辨识-笛卡尔阻抗] 闭环验证没有可用结果，回退到 SVD 最优激励 {fallback['profile']} "
         f"seed={fallback['seed']}."
     )
     return _candidate_return_tuple(fallback, {"pd_validation_rms": None})

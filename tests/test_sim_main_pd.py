@@ -1,9 +1,15 @@
 import contextlib
+import sys
+import types
+
 import numpy as np
 import robot_control.param_id.diagnostics as param_diag
 import robot_control.param_id.trajectory as param_traj
-import robot_control.modes.param_id_sim.main as sim_pd
+from robot_control.config import Config
+import robot_control.modes.param_id_sim.main as sim_pd_main
+from robot_control.modes.param_id_sim import acquisition as sim_pd_acquisition
 import robot_control.modes.param_id_sim.validation as sim_pd_validation
+from robot_control.modes.param_id_sim.pd_controller import PDController
 
 
 class _FakeBackend:
@@ -56,7 +62,7 @@ class _PointMassEnv:
 
 
 def test_pd_controller_torque_within_limits():
-    controller = sim_pd.PDController(
+    controller = PDController(
         _FakeBackend(feedforward=np.ones(7) * 0.25),
         kp=np.ones(7) * 100.0,
         kd=np.zeros(7),
@@ -72,7 +78,7 @@ def test_pd_controller_torque_within_limits():
 
 def test_collect_pd_data_produces_reasonable_tracking():
     env = _PointMassEnv(dt=0.01)
-    controller = sim_pd.PDController(
+    controller = PDController(
         _FakeBackend(),
         kp=np.ones(7) * 10.0,
         kd=np.ones(7) * 6.0,
@@ -81,7 +87,7 @@ def test_collect_pd_data_produces_reasonable_tracking():
     q_traj = np.full((300, 7), 0.1, dtype=np.float64)
     qd_traj = np.zeros_like(q_traj)
 
-    q_meas, qd_meas, tau_meas = sim_pd._collect_pd_data(env, controller, q_traj, qd_traj)
+    q_meas, qd_meas, tau_meas = sim_pd_acquisition._collect_pd_data(env, controller, q_traj, qd_traj)
 
     assert q_meas.shape == qd_meas.shape == tau_meas.shape == (300, 7)
     assert env.step_count == 300
@@ -95,9 +101,9 @@ def test_pd_identification_torque_subtracts_joint_effect_model():
     tau_cmd = np.full((2, 7), 10.0, dtype=np.float64)
     priors = [{"fc": 1.0, "k": 2.0, "fv": 3.0, "fo": 4.0} for _ in range(7)]
 
-    tau_id = sim_pd._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors, scale=1.0)
+    tau_id = sim_pd_validation._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors, scale=1.0)
 
-    expected_joint = np.tanh(0.1 / sim_pd.Config.PARAM_ID_COULOMB_EPS) + 2.0 * 0.2 + 3.0 * 0.1 + 4.0
+    expected_joint = np.tanh(0.1 / Config.PARAM_ID_COULOMB_EPS) + 2.0 * 0.2 + 3.0 * 0.1 + 4.0
     assert np.allclose(tau_id, 10.0 - expected_joint)
 
 
@@ -107,9 +113,9 @@ def test_pd_joint_prior_scale_defaults_to_no_subtraction():
     tau_cmd = np.full((2, 7), 10.0, dtype=np.float64)
     priors = [{"fc": 1.0, "k": 2.0, "fv": 3.0, "fo": 4.0} for _ in range(7)]
 
-    tau_id = sim_pd._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors)
+    tau_id = sim_pd_validation._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors)
 
-    assert sim_pd.Config.PARAM_ID_PD_JOINT_PRIOR_SCALE == 0.0
+    assert Config.PARAM_ID_PD_JOINT_PRIOR_SCALE == 0.0
     assert np.allclose(tau_id, tau_cmd)
 
 
@@ -117,7 +123,7 @@ def test_estimate_qdd_from_measured_velocity():
     t = np.arange(6, dtype=np.float64) * 0.01
     qd = np.outer(t, np.arange(1, 8, dtype=np.float64))
 
-    qdd = sim_pd._estimate_qdd_from_qd(qd, dt=0.01)
+    qdd = sim_pd_validation._estimate_qdd_from_qd(qd, dt=0.01)
 
     assert np.allclose(qdd, np.arange(1, 8, dtype=np.float64))
 
@@ -131,7 +137,7 @@ def test_estimate_qdd_uses_filtered_derivative_for_noisy_velocity():
     expected = np.tile(t[:, None], (1, 7))
     raw = np.gradient(qd, dt, axis=0, edge_order=2)
 
-    filtered = sim_pd._estimate_qdd_from_qd(qd, dt=dt)
+    filtered = sim_pd_validation._estimate_qdd_from_qd(qd, dt=dt)
 
     raw_rms = float(np.sqrt(np.mean((raw - expected) ** 2)))
     filtered_rms = float(np.sqrt(np.mean((filtered - expected) ** 2)))
@@ -157,10 +163,10 @@ def test_solve_hierarchical_pd_case_marks_distal_refinement(monkeypatch):
         return y, param_names
 
     monkeypatch.setattr(sim_pd_validation, "build_stacked_regressor", fake_build_stacked_regressor)
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_DISTAL_LINK_START", 5)
-    labels = np.asarray(["dynamic"] * (rows // sim_pd.Config.NUM_JOINTS), dtype=object)
+    monkeypatch.setattr(Config, "PARAM_ID_DISTAL_LINK_START", 5)
+    labels = np.asarray(["dynamic"] * (rows // Config.NUM_JOINTS), dtype=object)
 
-    case = sim_pd._solve_hierarchical_pd_case(
+    case = sim_pd_validation._solve_hierarchical_pd_case(
         "hierarchical smoke",
         backend=None,
         q_meas=np.zeros((len(labels), 7)),
@@ -185,35 +191,112 @@ def test_solve_hierarchical_pd_case_marks_distal_refinement(monkeypatch):
 
 
 def test_pd_inertia_summary_uses_stricter_target(monkeypatch):
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_INERTIA_ERROR_TARGET_PCT", 5.0)
+    monkeypatch.setattr(Config, "PARAM_ID_PD_INERTIA_ERROR_TARGET_PCT", 5.0)
     inertias = np.ones((7, 3), dtype=np.float64)
     true_inertias = np.ones((7, 3), dtype=np.float64)
     inertias[6, 2] = 1.06
 
-    summary = sim_pd._pd_inertia_error_summary(inertias, true_inertias)
+    summary = sim_pd_validation._pd_inertia_error_summary(inertias, true_inertias)
 
     assert summary["target_pct"] == 5.0
     assert not summary["passes_target"]
 
 
 def test_pd_regularization_grid_adds_strict_inertia_candidate(monkeypatch):
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_STRICT_MASS_PRIOR_LAMBDA", 64.0)
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_STRICT_COM_PRIOR_LAMBDA", 1.6)
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_STRICT_INERTIA_PRIOR_LAMBDA", 6.4)
+    monkeypatch.setattr(Config, "PARAM_ID_PD_STRICT_MASS_PRIOR_LAMBDA", 64.0)
+    monkeypatch.setattr(Config, "PARAM_ID_PD_STRICT_COM_PRIOR_LAMBDA", 1.6)
+    monkeypatch.setattr(Config, "PARAM_ID_PD_STRICT_INERTIA_PRIOR_LAMBDA", 6.4)
 
-    grid = sim_pd._pd_regularization_grid()
+    grid = sim_pd_validation._pd_regularization_grid()
 
-    assert grid[0] == (64.0, 1.6, 6.4, sim_pd.Config.PARAM_ID_PRIOR_LAMBDA_JOINT)
+    assert grid[0] == (64.0, 1.6, 6.4, Config.PARAM_ID_PRIOR_LAMBDA_JOINT)
     assert len(grid) == len(set(grid))
 
 
-def test_viewer_simulation_returns_same_shape_as_collect(monkeypatch):
-    monkeypatch.setattr(sim_pd._base, "_viewer_context", lambda env: contextlib.nullcontext(None))
-    monkeypatch.setattr(sim_pd._base, "_sync_realtime", lambda start_wall, t_target: None)
-    monkeypatch.setattr(sim_pd._base, "_log_rerun_step", lambda *args, **kwargs: None)
-    monkeypatch.setattr(sim_pd._base, "_log_sim_realtime_step_from_env", lambda *args, **kwargs: None)
+def test_pd_sim_rerun_final_result_uses_pd_prefix(monkeypatch):
+    class DummyRR(types.ModuleType):
+        def __init__(self):
+            super().__init__("rerun")
+            self.logs = []
+
+        def log(self, path, payload, static=False):
+            self.logs.append((path, payload, static))
+
+        def Scalars(self, value):
+            return value
+
+        def BarChart(self, values, **kwargs):
+            return {"kind": "BarChart", "values": np.asarray(values, dtype=np.float64), **kwargs}
+
+    dummy_rr = DummyRR()
+    monkeypatch.setitem(sys.modules, "rerun", dummy_rr)
+    case = {
+        "masses": np.arange(1, 8, dtype=np.float64),
+        "coms": np.ones((7, 3), dtype=np.float64) * 0.01,
+        "inertias": np.ones((7, 3), dtype=np.float64) * 0.02,
+    }
+
+    sim_pd_main._log_final_rerun_result(True, case)
+
+    logged = {path for path, _payload, _static in dummy_rr.logs}
+    assert "param_id_sim_pd/result/mass/J1" in logged
+    assert "param_id_sim_pd/result/Izz/J7" in logged
+    assert "param_id_sim_pd/result_bar/mass" in logged
+    assert "param_id_sim_pd/result_bar/Izz" in logged
+    assert "param_id/result/mass/J1" not in logged
+
+
+def test_pd_viewer_simulation_logs_rerun_target_joints(monkeypatch):
+    monkeypatch.setattr(sim_pd_acquisition._base, "_viewer_context", lambda env: contextlib.nullcontext(None))
+    monkeypatch.setattr(sim_pd_acquisition._base, "_sync_realtime", lambda start_wall, t_target: None)
+    monkeypatch.setattr(sim_pd_acquisition._base, "_log_rerun_step", lambda *args, **kwargs: None)
+    logged = []
+
+    def fake_log_sim_realtime_step_from_env(**kwargs):
+        logged.append(kwargs)
+
+    monkeypatch.setattr(
+        sim_pd_acquisition._base,
+        "_log_sim_realtime_step_from_env",
+        fake_log_sim_realtime_step_from_env,
+    )
+    monkeypatch.setattr(Config, "RERUN_LOG_STRIDE", 2)
     env = _PointMassEnv(dt=0.01)
-    controller = sim_pd.PDController(
+    controller = PDController(
+        _FakeBackend(),
+        kp=np.ones(7) * 10.0,
+        kd=np.ones(7),
+        torque_limits=np.ones(7) * 100.0,
+    )
+    t_arr = np.arange(4, dtype=np.float64) * 0.01
+    q_traj = np.arange(28, dtype=np.float64).reshape(4, 7) * 0.01
+    qd_traj = np.zeros_like(q_traj)
+    ee_pos = np.zeros((4, 3), dtype=np.float64)
+    ee_quat = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (4, 1))
+
+    sim_pd_acquisition._run_pd_simulation_with_viewer(
+        env,
+        controller,
+        t_arr,
+        q_traj,
+        qd_traj,
+        rerun_ok=True,
+        ee_pos_desired_all=ee_pos,
+        ee_quat_desired_all=ee_quat,
+    )
+
+    assert len(logged) == 2
+    assert np.allclose(logged[0]["q_desired"], q_traj[0])
+    assert np.allclose(logged[1]["q_desired"], q_traj[2])
+
+
+def test_viewer_simulation_returns_same_shape_as_collect(monkeypatch):
+    monkeypatch.setattr(sim_pd_acquisition._base, "_viewer_context", lambda env: contextlib.nullcontext(None))
+    monkeypatch.setattr(sim_pd_acquisition._base, "_sync_realtime", lambda start_wall, t_target: None)
+    monkeypatch.setattr(sim_pd_acquisition._base, "_log_rerun_step", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sim_pd_acquisition._base, "_log_sim_realtime_step_from_env", lambda *args, **kwargs: None)
+    env = _PointMassEnv(dt=0.01)
+    controller = PDController(
         _FakeBackend(),
         kp=np.ones(7) * 10.0,
         kd=np.ones(7),
@@ -225,7 +308,7 @@ def test_viewer_simulation_returns_same_shape_as_collect(monkeypatch):
     ee_pos = np.zeros((5, 3), dtype=np.float64)
     ee_quat = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (5, 1))
 
-    q_meas, qd_meas, tau_meas = sim_pd._run_pd_simulation_with_viewer(
+    q_meas, qd_meas, tau_meas = sim_pd_acquisition._run_pd_simulation_with_viewer(
         env,
         controller,
         t_arr,
@@ -278,9 +361,9 @@ def test_select_excitation_trajectory_pd_validates_top_svd_candidate(monkeypatch
             "selection": {},
         }
 
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_TRAJECTORY_CANDIDATES", 1)
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_VALIDATION_TOP_N", 1)
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS", False)
+    monkeypatch.setattr(Config, "PARAM_ID_TRAJECTORY_CANDIDATES", 1)
+    monkeypatch.setattr(Config, "PARAM_ID_VALIDATION_TOP_N", 1)
+    monkeypatch.setattr(Config, "PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS", False)
     monkeypatch.setattr(param_diag, "_extract_ground_truth", lambda backend: ([1.0] * 7, [[0.0] * 3] * 7, [[1.0] * 3] * 7))
     monkeypatch.setattr(param_traj, "_trajectory_profiles", lambda: profiles)
     monkeypatch.setattr(param_traj, "_trajectory_seeds", lambda: [43])
@@ -297,9 +380,9 @@ def test_select_excitation_trajectory_pd_validates_top_svd_candidate(monkeypatch
     monkeypatch.setattr(param_diag, "_case_selection_key", lambda case: case["validation_rms"])
 
     env = _PointMassEnv(dt=0.01)
-    controller = sim_pd.PDController(_FakeBackend(), kp=np.ones(7), kd=np.zeros(7))
+    controller = PDController(_FakeBackend(), kp=np.ones(7), kd=np.zeros(7))
 
-    result = sim_pd._select_excitation_trajectory_pd(
+    result = sim_pd_validation._select_excitation_trajectory_pd(
         env,
         _FakeBackend(),
         controller,
@@ -321,7 +404,7 @@ def test_prepare_pd_identification_data_filters_and_returns_arrays():
     qd = 0.5 * np.ones((200, 7), dtype=np.float64)
     tau_cmd = np.full((200, 7), 5.0, dtype=np.float64)
 
-    prep = sim_pd._prepare_pd_identification_data(q, qd, tau_cmd, np.zeros(7), dt=dt)
+    prep = sim_pd_validation._prepare_pd_identification_data(q, qd, tau_cmd, np.zeros(7), dt=dt)
 
     assert prep["q_meas"].shape == (200, 7)
     assert prep["qd_meas"].shape == (200, 7)
@@ -345,9 +428,9 @@ def test_prepare_pd_identification_data_filters_and_returns_arrays():
 
 
 def test_pd_validation_grid_uses_full_grid_by_default(monkeypatch):
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_REG_SWEEP", True)
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_VALIDATION_REG_GRID_LIMIT", 0)
-    grid = sim_pd._pd_validation_grid()
+    monkeypatch.setattr(Config, "PARAM_ID_REG_SWEEP", True)
+    monkeypatch.setattr(Config, "PARAM_ID_PD_VALIDATION_REG_GRID_LIMIT", 0)
+    grid = sim_pd_validation._pd_validation_grid()
     base_grid = list(param_diag._regularization_grid())
     assert len(grid) >= len(base_grid)
     for item in base_grid:
@@ -356,8 +439,8 @@ def test_pd_validation_grid_uses_full_grid_by_default(monkeypatch):
 
 
 def test_pd_validation_grid_respects_limit(monkeypatch):
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_PD_VALIDATION_REG_GRID_LIMIT", 2)
-    grid = sim_pd._pd_validation_grid()
+    monkeypatch.setattr(Config, "PARAM_ID_PD_VALIDATION_REG_GRID_LIMIT", 2)
+    grid = sim_pd_validation._pd_validation_grid()
     assert len(grid) == 2
 
 
@@ -367,9 +450,9 @@ def test_pd_identification_torque_respects_joint_prior_scale():
     tau_cmd = np.full((2, 7), 10.0, dtype=np.float64)
     priors = [{"fc": 1.0, "k": 2.0, "fv": 3.0, "fo": 4.0} for _ in range(7)]
 
-    tau_default = sim_pd._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors, scale=1.0)
-    tau_zero = sim_pd._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors, scale=0.0)
-    tau_half = sim_pd._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors, scale=0.5)
+    tau_default = sim_pd_validation._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors, scale=1.0)
+    tau_zero = sim_pd_validation._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors, scale=0.0)
+    tau_half = sim_pd_validation._pd_identification_torque(tau_cmd, q, qd, np.zeros(7), priors=priors, scale=0.5)
 
     assert np.allclose(tau_zero, tau_cmd)
     assert not np.allclose(tau_default, tau_cmd)
@@ -382,7 +465,7 @@ def test_pd_clipping_summary_reports_percentages():
     tau = np.zeros((10, 7), dtype=np.float64)
     tau[:, 0] = 1.0
     limits = np.ones(7, dtype=np.float64) * 1.0
-    summary = sim_pd._pd_clipping_summary(tau, limits)
+    summary = sim_pd_validation._pd_clipping_summary(tau, limits)
     assert abs(summary["clipped_pct_J1"] - 100.0) < 0.1
     assert abs(summary["clipped_pct_J2"] - 0.0) < 0.1
     assert abs(summary["clipped_any_pct"] - 100.0) < 0.1
@@ -394,7 +477,7 @@ def test_pd_tracking_summary_includes_per_joint_and_velocity():
     qd = np.full((100, 7), 0.5, dtype=np.float64)
     qd_ref = np.zeros_like(qd)
 
-    summary = sim_pd._pd_tracking_summary(q, q_ref, qd, qd_ref)
+    summary = sim_pd_validation._pd_tracking_summary(q, q_ref, qd, qd_ref)
     assert abs(summary["joint_rms_rad"] - 0.1) < 1e-10
     assert abs(summary["velocity_rms_rad_s"] - 0.5) < 1e-10
     for j in range(7):
@@ -434,9 +517,9 @@ def test_candidate_validation_metadata_includes_new_diagnostics(monkeypatch):
             "selection": {"mass_prior_lambda": 32.0, "com_prior_lambda": 1.2, "inertia_prior_lambda": 2.4},
         }
 
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_TRAJECTORY_CANDIDATES", 1)
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_VALIDATION_TOP_N", 1)
-    monkeypatch.setattr(sim_pd.Config, "PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS", False)
+    monkeypatch.setattr(Config, "PARAM_ID_TRAJECTORY_CANDIDATES", 1)
+    monkeypatch.setattr(Config, "PARAM_ID_VALIDATION_TOP_N", 1)
+    monkeypatch.setattr(Config, "PARAM_ID_TRAJECTORY_PROFILE_DIAGNOSTICS", False)
     monkeypatch.setattr(param_diag, "_extract_ground_truth", lambda backend: ([1.0] * 7, [[0.0] * 3] * 7, [[1.0] * 3] * 7))
     monkeypatch.setattr(param_traj, "_trajectory_profiles", lambda: profiles)
     monkeypatch.setattr(param_traj, "_trajectory_seeds", lambda: [43])
@@ -453,9 +536,9 @@ def test_candidate_validation_metadata_includes_new_diagnostics(monkeypatch):
     monkeypatch.setattr(param_diag, "_case_selection_key", lambda case: case["validation_rms"])
 
     env = _PointMassEnv(dt=0.01)
-    controller = sim_pd.PDController(_FakeBackend(), kp=np.ones(7), kd=np.zeros(7))
+    controller = PDController(_FakeBackend(), kp=np.ones(7), kd=np.zeros(7))
 
-    result = sim_pd._select_excitation_trajectory_pd(
+    result = sim_pd_validation._select_excitation_trajectory_pd(
         env,
         _FakeBackend(),
         controller,
@@ -484,7 +567,7 @@ def test_end_to_end_pd_pipeline_composes(monkeypatch):
     qd = np.full((n_steps, 7), 0.05, dtype=np.float64)
     tau_cmd = np.full((n_steps, 7), 5.0, dtype=np.float64)
 
-    prep = sim_pd._prepare_pd_identification_data(q, qd, tau_cmd, np.zeros(7))
+    prep = sim_pd_validation._prepare_pd_identification_data(q, qd, tau_cmd, np.zeros(7))
 
     param_names = [
         f"L{link}_{suffix}"
@@ -530,7 +613,7 @@ def test_end_to_end_pd_pipeline_composes(monkeypatch):
     monkeypatch.setattr(param_diag, "get_last_diagnostics", lambda: {"rank": 49.0, "num_params": 49.0, "data_rank": 49.0})
 
     labels = np.array(["dynamic"] * n_steps, dtype=object)
-    case = sim_pd._best_pd_inertial_case(
+    case = sim_pd_validation._best_pd_inertial_case(
         "e2e-test",
         None,
         prep["q_meas"],

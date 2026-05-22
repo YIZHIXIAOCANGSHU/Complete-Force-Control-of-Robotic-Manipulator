@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PD controller primitives for parameter-identification simulation mode."""
+"""Closed-loop torque controller primitives for parameter-identification modes."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Iterable
 import numpy as np
 
 from robot_control.config import Config
+from robot_control.dynamics.cartesian_impedance import CartesianImpedanceController
 from robot_control.dynamics.pinocchio import PinocchioGravityBackend
 
 
@@ -35,7 +36,12 @@ def _validate_trajectory_pair(q_traj, qd_traj) -> tuple[np.ndarray, np.ndarray]:
 
 
 class PDController:
-    """Lightweight PD + nonlinear-effects feedforward torque controller."""
+    """Compatibility wrapper for Cartesian impedance torque control.
+
+    Existing identification code passes joint reference trajectories. The
+    actual control law converts those references to TCP pose/twist targets and
+    computes Cartesian impedance + nonlinear-effects + nullspace torque.
+    """
 
     def __init__(
         self,
@@ -45,22 +51,34 @@ class PDController:
         torque_limits: Iterable[float] | None = None,
     ) -> None:
         self.backend = backend
-        backend_kp = getattr(backend, "_joint_kp", _DEFAULT_KP)
-        backend_kd = getattr(backend, "_joint_kd", _DEFAULT_KD)
         backend_limits = getattr(backend, "_torque_limits", Config.TORQUE_LIMITS)
-        self.kp = _as_joint_vector(backend_kp if kp is None else kp, "kp")
-        self.kd = _as_joint_vector(backend_kd if kd is None else kd, "kd")
         limits = backend_limits if torque_limits is None else torque_limits
         self.torque_limits = _as_joint_vector(limits, "torque_limits")
+        self.kp = np.asarray(Config.CARTESIAN_KP, dtype=np.float64)
+        self.kd = np.asarray(Config.CARTESIAN_KD, dtype=np.float64)
+        self._legacy_joint_kp = _as_joint_vector(
+            getattr(backend, "_joint_kp", _DEFAULT_KP) if kp is None else kp,
+            "kp",
+        )
+        self._legacy_joint_kd = _as_joint_vector(
+            getattr(backend, "_joint_kd", _DEFAULT_KD) if kd is None else kd,
+            "kd",
+        )
+        self._cartesian = CartesianImpedanceController(
+            backend,
+            torque_limits=self.torque_limits,
+        )
+        self.last_output = None
 
     def compute_torque(self, q, qd, q_ref, qd_ref) -> np.ndarray:
         q_arr = _as_joint_vector(q, "q")
         qd_arr = _as_joint_vector(qd, "qd")
         q_ref_arr = _as_joint_vector(q_ref, "q_ref")
         qd_ref_arr = _as_joint_vector(qd_ref, "qd_ref")
-        tau_ff = _as_joint_vector(
-            self.backend.compute_nonlinear_effects(q_arr, qd_arr),
-            "tau_ff",
-        )
-        tau = self.kp * (q_ref_arr - q_arr) + self.kd * (qd_ref_arr - qd_arr) + tau_ff
+        if all(hasattr(self.backend, name) for name in ("compute_fk", "compute_jacobian")):
+            self.last_output = self._cartesian.compute_from_joint_reference(q_arr, qd_arr, q_ref_arr, qd_ref_arr)
+            return self.last_output.tau_total.copy()
+
+        tau_ff = _as_joint_vector(self.backend.compute_nonlinear_effects(q_arr, qd_arr), "tau_ff")
+        tau = self._legacy_joint_kp * (q_ref_arr - q_arr) + self._legacy_joint_kd * (qd_ref_arr - qd_arr) + tau_ff
         return np.clip(tau, -self.torque_limits, self.torque_limits)

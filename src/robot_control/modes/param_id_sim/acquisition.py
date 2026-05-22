@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PD closed-loop data acquisition for parameter-identification simulation mode."""
+"""Cartesian-impedance closed-loop acquisition for parameter-identification simulation."""
 
 from __future__ import annotations
 
@@ -11,10 +11,19 @@ import numpy as np
 from robot_control.config import Config
 from robot_control.param_id import sim_main as _base
 from robot_control.shared.mujoco.ghost import create_mujoco_ghost_if_enabled
+from robot_control.shared.rerun.mode_param_id import param_id_prefix
 from robot_control.modes.param_id_sim.pd_controller import PDController, _validate_trajectory_pair
 
 
-def _simulate_pd_step(env, controller: PDController, q_ref, qd_ref) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+_PD_RERUN_PREFIX = param_id_prefix(simulated_pd=True)
+
+
+def _simulate_cartesian_impedance_step(
+    env,
+    controller: PDController,
+    q_ref,
+    qd_ref,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run one closed-loop MuJoCo step and return pre-step state plus torque."""
     q = env.get_qpos()
     qd = env.get_qvel()
@@ -26,8 +35,13 @@ def _simulate_pd_step(env, controller: PDController, q_ref, qd_ref) -> tuple[np.
     return q, qd, tau
 
 
-def _collect_pd_data(env, controller: PDController, q_traj, qd_traj) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Run a headless PD simulation and return ``(q_meas, qd_meas, tau_cmd)``."""
+def _collect_cartesian_impedance_data(
+    env,
+    controller: PDController,
+    q_traj,
+    qd_traj,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Run a headless Cartesian impedance simulation and return measurements."""
     q_ref_traj, qd_ref_traj = _validate_trajectory_pair(q_traj, qd_traj)
     n_steps = len(q_ref_traj)
     q_meas = np.zeros((n_steps, Config.NUM_JOINTS), dtype=np.float64)
@@ -35,11 +49,19 @@ def _collect_pd_data(env, controller: PDController, q_traj, qd_traj) -> tuple[np
     tau_meas = np.zeros_like(q_meas)
 
     for step in range(n_steps):
-        q, qd, tau = _simulate_pd_step(env, controller, q_ref_traj[step], qd_ref_traj[step])
+        q, qd, tau = _simulate_cartesian_impedance_step(env, controller, q_ref_traj[step], qd_ref_traj[step])
         q_meas[step] = q
         qd_meas[step] = qd
         tau_meas[step] = tau
     return q_meas, qd_meas, tau_meas
+
+
+def _simulate_pd_step(env, controller: PDController, q_ref, qd_ref) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return _simulate_cartesian_impedance_step(env, controller, q_ref, qd_ref)
+
+
+def _collect_pd_data(env, controller: PDController, q_traj, qd_traj) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return _collect_cartesian_impedance_data(env, controller, q_traj, qd_traj)
 
 
 def _viewer_sync_stride() -> int:
@@ -96,14 +118,19 @@ def _run_pd_simulation_with_viewer(
         start_wall = time.perf_counter()
         for step in range(len(q_ref_traj)):
             if step % 250 == 0:
-                sys.stdout.write(f"\r  PD 进度: {step}/{len(q_ref_traj)} ({100 * step // max(len(q_ref_traj), 1)}%)")
+                sys.stdout.write(f"\r  笛卡尔阻抗进度: {step}/{len(q_ref_traj)} ({100 * step // max(len(q_ref_traj), 1)}%)")
                 sys.stdout.flush()
 
             _set_desired_pose(env, ee_pos_desired_all[step], ee_quat_desired_all[step])
             if ghost is not None:
                 ghost.update_from_qpos(q_ref_traj[step])
                 ghost.update_from_pose(ee_pos_desired_all[step], ee_quat_desired_all[step])
-            q, qd, tau = _simulate_pd_step(env, controller, q_ref_traj[step], qd_ref_traj[step])
+            q, qd, tau = _simulate_cartesian_impedance_step(
+                env,
+                controller,
+                q_ref_traj[step],
+                qd_ref_traj[step],
+            )
             q_meas[step] = q
             qd_meas[step] = qd
             tau_meas[step] = tau
@@ -112,7 +139,7 @@ def _run_pd_simulation_with_viewer(
                 viewer.sync()
 
             if step % Config.RERUN_LOG_STRIDE == 0:
-                _base._log_rerun_step(rerun_ok, t_arr[step], q, qd, tau)
+                _base._log_rerun_step(rerun_ok, t_arr[step], q, qd, tau, param_prefix=_PD_RERUN_PREFIX)
                 _base._log_sim_realtime_step_from_env(
                     rerun_ok=rerun_ok,
                     env=env,

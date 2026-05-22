@@ -30,6 +30,8 @@ sys.path = [p for p in sys.path if not any(m in p for m in _EXCLUDE_MARKERS)]
 
 import pinocchio as pin  # noqa: E402
 
+from robot_control.config import Config  # noqa: E402
+
 
 # =========================================================================
 # Quaternion / rotation utilities
@@ -185,6 +187,7 @@ class PinocchioGravityBackend:
 
         # --- Controller state ---
         self._reset_controller_state()
+        self._cartesian_controller = None
 
     def _reset_controller_state(self) -> None:
         self._path_s: float = 0.0
@@ -241,6 +244,11 @@ class PinocchioGravityBackend:
         pin.computeJointJacobians(self._model, self._data, q8)
         pin.updateFramePlacements(self._model, self._data)
 
+        pl_ee_world = self._data.oMf[self._ee_frame_id]
+        pl_wtb = self._data.oMf[self._wtb_frame_id]
+        pl_ee_body = pl_wtb.actInv(pl_ee_world)
+        tcp_delta_body = pl_ee_body.rotation @ self._tcp_offset
+
         # LOCAL_WORLD_ALIGNED gives velocity at EE in world-aligned axes
         J_lwa = pin.getFrameJacobian(
             self._model, self._data, self._ee_frame_id,
@@ -250,6 +258,7 @@ class PinocchioGravityBackend:
         for j in range(7):
             J_body[:3, j] = self._R_wtb_T @ J_lwa[:3, j]
             J_body[3:, j] = self._R_wtb_T @ J_lwa[3:, j]
+            J_body[:3, j] += np.cross(J_body[3:, j], tcp_delta_body)
         return J_body
 
     # ------------------------------------------------------------------
@@ -302,7 +311,7 @@ class PinocchioGravityBackend:
             t_end = time.perf_counter()
             return MitControlOutput(
                 tau_total=[0.0] * 7, q_ref=q7.tolist(), qd_ref=[0.0] * 7,
-                kp=self._joint_kp.tolist(), kd=self._joint_kd.tolist(),
+                kp=[0.0] * 7, kd=[0.0] * 7,
                 tau_ff=[0.0] * 7,
                 ee_pos=ee_pos.tolist(), ee_quat=ee_quat.tolist(),
                 status=-1, path_progress=self._path_s,
@@ -310,31 +319,11 @@ class PinocchioGravityBackend:
                 calc_time_ms=(t_end - t_start) * 1000.0,
             )
 
-        # Target changed → restart path
-        if self._target_changed(tgt_pos_s, tgt_quat_s):
-            self._start_path(ee_pos, ee_quat, tgt_pos_s, tgt_quat_s)
-
-        # Evaluate path
-        if self._path_valid:
-            ref_pos, ref_quat = self._evaluate_round_path()
-        else:
-            ref_pos, ref_quat = tgt_pos_s.copy(), tgt_quat_s.copy()
-
-        # DLS IK
-        ik_ok, q_ref = self._compute_q_ref(q7, ref_pos, ref_quat)
-        if ik_ok:
-            qd_ref = self._compute_qd_ref(q_ref)
-        else:
-            qd_ref = np.zeros(7)
-            if not self._q_ref_is_safe(q_ref):
-                q_ref = q7.copy()
-            status = 1
-
-        # Nonlinear effects → tau_ff
-        tau_ff = self.compute_nonlinear_effects(q7, qd_filt)
-
-        # Equivalent torque
-        tau_total = self._compute_equivalent_tau(q7, qd_filt, q_ref, qd_ref, tau_ff)
+        q_ref = Config.NULLSPACE_Q_REF.copy()
+        qd_ref = np.zeros(7)
+        out = self._get_cartesian_controller().compute(q7, qd_filt, tgt_pos_s, tgt_quat_s, np.zeros(6))
+        tau_ff = out.tau_gc
+        tau_total = out.tau_total
 
         # Joint safety
         if self._check_joint_safety(q7, qd_filt, tau_total) == 0:
@@ -350,7 +339,7 @@ class PinocchioGravityBackend:
         return MitControlOutput(
             tau_total=tau_total.tolist(), q_ref=q_ref.tolist(),
             qd_ref=qd_ref.tolist(),
-            kp=self._joint_kp.tolist(), kd=self._joint_kd.tolist(),
+            kp=[0.0] * 7, kd=[0.0] * 7,
             tau_ff=tau_ff.tolist(),
             ee_pos=ee_pos.tolist(), ee_quat=ee_quat.tolist(),
             status=status, path_progress=self._path_s,
@@ -560,6 +549,13 @@ class PinocchioGravityBackend:
             tau[i] = self._joint_kp[i] * e + self._joint_kd[i] * (qd_ref[i] - qd[i]) + tau_ff[i]
             tau[i] = max(-self._torque_limits[i], min(self._torque_limits[i], tau[i]))
         return tau
+
+    def _get_cartesian_controller(self):
+        if self._cartesian_controller is None:
+            from robot_control.dynamics.cartesian_impedance import CartesianImpedanceController
+
+            self._cartesian_controller = CartesianImpedanceController(self)
+        return self._cartesian_controller
 
     # ------------------------------------------------------------------
     # Cleanup

@@ -55,7 +55,7 @@ show_main_menu() {
     echo "            AM-D02 参数辨识启动状态机"
     echo "=========================================================="
     echo "请选择启动模式："
-    echo "  1) param-id-sim  - 全参辨识 PD 闭环仿真"
+    echo "  1) param-id-sim  - 全参辨识笛卡尔阻抗闭环仿真"
     echo "  2) param-id-real - 全参辨识实机采集"
     echo "  3) payload-id-sim - 末端载荷辨识仿真"
     echo "  q) 退出"
@@ -81,12 +81,6 @@ show_available_modes() {
     echo "可用模式: param-id-sim, param-id-real, payload-id-sim"
 }
 
-reject_removed_mode() {
-    PRINT_RED "错误: 模式 '$1' 已删除。"
-    show_available_modes
-    exit 1
-}
-
 # —— 参数解析 ——
 MODE=${1:-}
 EXTRA_ARGS=()
@@ -97,8 +91,7 @@ else
     case "$MODE" in
         1|param-id-sim) MODE="param-id-sim" ;;
         2|param-id-real) MODE="param-id-real" ;;
-        3|payload-id-sim|payload_id_sim|payload-id) MODE="payload-id-sim" ;;
-        sim|real|mc|monte-carlo|usbfdcan-sim|usb2fdcan-sim|mirror|param_id|param-id|param_id_sim|param_id_real|control-sim|control-real) reject_removed_mode "$MODE" ;;
+        3|payload-id-sim) MODE="payload-id-sim" ;;
         *) PRINT_RED "错误: 未知模式 '$MODE'。"; show_available_modes; exit 1 ;;
     esac
 fi
@@ -108,7 +101,7 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "=========================================================="
 case "$MODE" in
-    param-id-sim)  echo "    AM-D02 全参辨识 PD 闭环仿真                     " ;;
+    param-id-sim)  echo "    AM-D02 全参辨识笛卡尔阻抗闭环仿真               " ;;
     param-id-real) echo "    AM-D02 全参辨识实机采集                         " ;;
     payload-id-sim) echo "    AM-D02 末端载荷辨识仿真                         " ;;
 esac
@@ -117,9 +110,10 @@ PRINT_BLUE "[System] Python 解释器: $PYTHON_BIN"
 
 if [ "$MODE" == "param-id-sim" ]; then
     : "${AM_D02_ENABLE_VIEWER:=1}"
-    : "${AM_D02_ENABLE_RERUN:=0}"
+    : "${AM_D02_ENABLE_RERUN:=1}"
     export AM_D02_ENABLE_VIEWER AM_D02_ENABLE_RERUN
-    PRINT_BLUE "[1/1] 启动全参辨识 PD 闭环仿真模式..."
+    PRINT_BLUE "[1/1] 启动全参辨识笛卡尔阻抗闭环仿真模式..."
+    PRINT_BLUE "[Config] MuJoCo Viewer=$AM_D02_ENABLE_VIEWER, Rerun=$AM_D02_ENABLE_RERUN"
     echo "----------------------------------------------------------"
     "$PYTHON_BIN" -m robot_control.modes.param_id_sim.main "${APP_ARGS[@]}"
 

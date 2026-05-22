@@ -33,6 +33,20 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_float_array(name: str, default) -> np.ndarray:
+    value = os.getenv(name)
+    if value is None:
+        return np.asarray(default, dtype=np.float64)
+    try:
+        parts = [float(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError:
+        return np.asarray(default, dtype=np.float64)
+    default_arr = np.asarray(default, dtype=np.float64)
+    if len(parts) != default_arr.size:
+        return default_arr
+    return np.asarray(parts, dtype=np.float64)
+
+
 class Config:
     # === 路径配置 (Paths) ===
     PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -53,7 +67,6 @@ class Config:
     MUJOCO_GHOST_ALPHA = max(0.0, min(1.0, _env_float("AM_D02_MUJOCO_GHOST_ALPHA", 0.25)))
     RERUN_LOG_STRIDE = max(1, _env_int("AM_D02_RERUN_LOG_STRIDE", 10))
     REAL_VIEWER_FPS = max(1.0, _env_float("AM_D02_REAL_VIEWER_FPS", 60.0))
-    RERUN_QUEUE_SIZE = max(8, _env_int("AM_D02_RERUN_QUEUE_SIZE", 256))
     
     # === 关节配置 (Joints) ===
     NUM_JOINTS = 7
@@ -75,18 +88,36 @@ class Config:
     
     # 力矩限制 (N·m)
     TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0])
+
+    # === 末端笛卡尔阻抗 + 零空间控制配置 ===
+    CARTESIAN_KP = _env_float_array(
+        "AM_D02_CARTESIAN_KP",
+        [60.0, 60.0, 60.0, 2.0, 2.0, 2.0],
+    )
+    CARTESIAN_KD = _env_float_array(
+        "AM_D02_CARTESIAN_KD",
+        [60.0, 60.0, 60.0, 0.03, 0.03, 0.03],
+    )
+    NULLSPACE_KP = _env_float_array(
+        "AM_D02_NULLSPACE_KP",
+        [0.005, 0.005, 0.005, 0.005, 0.00125, 0.00125, 0.00125],
+    )
+    NULLSPACE_KD = _env_float_array(
+        "AM_D02_NULLSPACE_KD",
+        [0.0025, 0.0025, 0.0025, 0.0025, 0.0005, 0.0005, 0.0005],
+    )
+    NULLSPACE_DAMPING = max(1e-8, _env_float("AM_D02_NULLSPACE_DAMPING", 0.2))
+    NULLSPACE_Q_REF = _env_float_array(
+        "AM_D02_NULLSPACE_Q_REF",
+        [0.0, 0.0, 0.0, np.pi / 2.0, 0.0, 0.0, 0.0],
+    )
     
     # === 仿真参数 ===
     DT = 0.002  # MuJoCo 仿真步长 (秒)
-    SIM_REALTIME = _env_bool("AM_D02_SIM_REALTIME", True)
     
     # === 初始位置 ===
     # 机械臂仿真实际起始关节角
     HOME_QPOS = np.array([0.0, 0.0, 0.0, np.pi/3, 0.0, 0.0, 0.0])
-
-    # 用户希望机械臂最终到达的构型（用于FK计算方块的初始摆放位置）
-    # 修改此参数来改变方块的初始位置
-    INIT_QPOS = np.array([np.pi/9, -np.pi/9, np.pi/9, np.pi/9, np.pi/9, np.pi/9, np.pi/9])
 
     # === 参数辨识配置 ===
     PARAM_ID_JOINT_PRIORS = [
@@ -98,7 +129,7 @@ class Config:
         {"fc": 0.083, "k": 242.287, "fv": 0.072, "fo": 0.009},
         {"fc": 0.172, "k": 7.888, "fv": 0.084, "fo": -0.059},
     ]
-    PARAM_ID_MAX_EE_SPEED = 3.0
+    PARAM_ID_MAX_EE_SPEED = max(1e-6, _env_float("AM_D02_PARAM_ID_MAX_EE_SPEED", 0.2))
     PARAM_ID_REALTIME = _env_bool("AM_D02_PARAM_ID_REALTIME", True)
     PARAM_ID_COULOMB_EPS = 0.02
     PARAM_ID_TRAJECTORY_CANDIDATES = max(1, _env_int("AM_D02_PARAM_ID_TRAJECTORY_CANDIDATES", 1))
@@ -136,9 +167,3 @@ class Config:
     PARAM_ID_DISTAL_WEIGHT = max(0.0, _env_float("AM_D02_PARAM_ID_DISTAL_WEIGHT", 2.0))
     PARAM_ID_DISTAL_LINK_START = min(7, max(1, _env_int("AM_D02_PARAM_ID_DISTAL_LINK_START", 5)))
     PARAM_ID_MAX_SAMPLES = max(50, _env_int("AM_D02_PARAM_ID_MAX_SAMPLES", 700))
-    PARAM_ID_ENABLE_HTML_REPORT = _env_bool("AM_D02_PARAM_ID_HTML", True)
-    PARAM_ID_HTML_OPEN_BROWSER = _env_bool("AM_D02_PARAM_ID_HTML_OPEN_BROWSER", False)
-
-    # === 目标位置 (Target Posture) ===
-    # 用于重力补偿与 PD 控制的目标位置 (rad)
-    TARGET_Q = np.array([0, -np.pi/4, 0.0, np.pi/4, 0.0, 0.0, 0.0])

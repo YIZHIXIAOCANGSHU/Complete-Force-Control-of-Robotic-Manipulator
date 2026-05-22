@@ -38,7 +38,7 @@ python -m pip install -r python/requirements.txt
 - `assets/robot_model/`：URDF、mesh、ROS launch/config 资源。
 - `outputs/`：运行输出。
 - `tests/`：测试。
-- `run.sh`：四模式启动脚本。
+- `run.sh`：三模式启动脚本。
 
 ## SocketCAN
 
@@ -49,7 +49,6 @@ sudo ip link set can0 up
 ```
 
 ```bash
-AM_D02_CAN_INTERFACE=can1 ./run.sh real
 AM_D02_CAN_INTERFACE=can1 ./run.sh param-id-real
 ```
 

@@ -57,3 +57,33 @@ def test_solve_payload_only_rejects_low_excitation():
 
     with pytest.raises(RuntimeError, match="payload excitation"):
         payload.solve_payload_only(y_payload, np.ones(20), names)
+
+
+def test_subtract_known_body_torque_preserves_payload_residual():
+    rng = np.random.default_rng(11)
+    full_names = [
+        f"L{link}_{suffix}"
+        for link in range(7)
+        for suffix in ("mass", "mcx", "mcy", "mcz", "Ixx", "Iyy", "Izz")
+    ]
+    y_full = rng.normal(size=(100, len(full_names)))
+    payload_names = payload.payload_param_names()
+    payload_cols = payload.payload_column_indices(full_names)
+    other_cols = np.setdiff1d(np.arange(len(full_names)), payload_cols)
+    theta_payload = np.array([2.0, 0.2, -0.1, 0.06, 0.03, 0.04, 0.05], dtype=np.float64)
+    theta_other = rng.normal(size=other_cols.size)
+    prior = {full_names[index]: float(value) for index, value in zip(other_cols, theta_other)}
+    tau = y_full[:, payload_cols] @ theta_payload + y_full[:, other_cols] @ theta_other
+
+    tau_payload = payload.subtract_known_body_torque(y_full, tau, full_names, prior)
+    result = payload.solve_payload_only(
+        y_full[:, payload_cols],
+        tau_payload,
+        payload_names,
+        prior=dict(zip(payload_names, theta_payload)),
+        inertial_prior_lambda=0.0,
+    )
+
+    np.testing.assert_allclose(tau_payload, y_full[:, payload_cols] @ theta_payload, rtol=1e-10, atol=1e-10)
+    assert result.mass == pytest.approx(2.0, rel=1e-8)
+    np.testing.assert_allclose(result.inertia_diag, [0.03, 0.04, 0.05], rtol=1e-8, atol=1e-10)

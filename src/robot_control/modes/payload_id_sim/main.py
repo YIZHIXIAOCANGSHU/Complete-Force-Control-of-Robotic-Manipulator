@@ -7,16 +7,32 @@ import numpy as np
 
 from robot_control.config import Config
 from robot_control.dynamics.pinocchio import PinocchioGravityBackend
-from robot_control.modes.param_id_sim.acquisition import _collect_pd_data
+from robot_control.modes.param_id_sim.acquisition import _collect_cartesian_impedance_data
 from robot_control.modes.param_id_sim.pd_controller import PDController
 from robot_control.param_id.excitation import fourier_trajectory
 from robot_control.param_id.payload import (
-    build_payload_regressor,
     payload_prior_from_link_params,
+    select_payload_regressor,
     solve_payload_only,
+    subtract_known_body_torque,
 )
+from robot_control.param_id.identification import make_prior_from_link_params
 from robot_control.param_id.preprocessing import estimate_qdd_from_qd
+from robot_control.param_id.regressor import build_stacked_regressor
 from robot_control.shared.mujoco.env import MujocoSimEnv
+
+
+def _extract_body_truth(backend: PinocchioGravityBackend):
+    masses, coms, inertias = [], [], []
+    for body_index in range(1, Config.NUM_JOINTS + 1):
+        inert = backend._model.inertias[body_index]
+        mass = float(inert.mass)
+        com = np.asarray(inert.lever, dtype=np.float64)
+        inertia = np.asarray(inert.inertia, dtype=np.float64)
+        masses.append(mass)
+        coms.append([float(com[0]), float(com[1]), float(com[2])])
+        inertias.append([float(inertia[0, 0]), float(inertia[1, 1]), float(inertia[2, 2])])
+    return masses, coms, inertias
 
 
 def _extract_payload_truth(backend: PinocchioGravityBackend):
@@ -97,21 +113,26 @@ def main() -> None:
         print(f"[payload-id] 轨迹: {len(t_arr)} 步 @ {Config.DT * 1000:.0f}ms, 共 {t_arr[-1]:.1f}s")
 
         print("[payload-id] 执行仿真采集...")
-        q_meas, qd_meas, tau_cmd = _collect_pd_data(env, controller, q_traj, qd_traj)
+        q_meas, qd_meas, tau_cmd = _collect_cartesian_impedance_data(env, controller, q_traj, qd_traj)
         qdd_meas = estimate_qdd_from_qd(qd_meas, Config.DT)
         stride = max(1, len(q_meas) // Config.PARAM_ID_MAX_SAMPLES)
-        y_payload, payload_names = build_payload_regressor(
+        y_full, full_names = build_stacked_regressor(
             backend,
             q_meas,
             qd_meas,
             qdd_meas,
             stride=stride,
+            include_joint_terms=False,
         )
+        y_payload, payload_names = select_payload_regressor(y_full, full_names)
         tau_stack = tau_cmd[::stride, :].ravel()
+        true_masses, true_coms, true_inertias = _extract_body_truth(backend)
+        body_prior = make_prior_from_link_params(full_names, true_masses, true_coms, true_inertias, None)
+        tau_payload = subtract_known_body_torque(y_full, tau_stack, full_names, body_prior)
         prior = payload_prior_from_link_params(true_mass, true_com, true_inertia)
         result = solve_payload_only(
             y_payload,
-            tau_stack,
+            tau_payload,
             payload_names,
             prior=prior,
             inertial_prior_lambda=Config.PARAM_ID_PRIOR_LAMBDA_INERTIAL,

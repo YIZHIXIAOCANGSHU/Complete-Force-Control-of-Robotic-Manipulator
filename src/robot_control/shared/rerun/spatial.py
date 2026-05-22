@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from robot_control.shared.rerun.time import set_time_seconds
+
 try:
     import rerun as rr
 
@@ -34,7 +36,7 @@ def _as_points(value, name: str) -> np.ndarray:
 def log_ee_pose(prefix: str, t: float, position, quat=None) -> None:
     if not RERUN_AVAILABLE:
         return
-    rr.set_time_seconds("time", float(t))
+    set_time_seconds(rr, "time", float(t))
     path = f"{_clean_prefix(prefix)}/ee_pose"
     rr.log(path, rr.Points3D([_as_point3(position, "position")], radii=[0.01]))
     if quat is not None:
@@ -80,4 +82,3 @@ def log_workspace_points(prefix: str, points, *, max_points: int = 2000) -> None
         indices = np.linspace(0, len(arr) - 1, int(max_points), dtype=np.int64)
         arr = arr[indices]
     rr.log(f"{_clean_prefix(prefix)}/workspace_points", rr.Points3D(arr, radii=[0.003]))
-

@@ -28,6 +28,8 @@ done
 command -v find >/dev/null 2>&1 || { echo "Missing required command: find" >&2; exit 1; }
 command -v file >/dev/null 2>&1 || { echo "Missing required command: file" >&2; exit 1; }
 command -v awk >/dev/null 2>&1 || { echo "Missing required command: awk" >&2; exit 1; }
+command -v grep >/dev/null 2>&1 || { echo "Missing required command: grep" >&2; exit 1; }
+command -v mktemp >/dev/null 2>&1 || { echo "Missing required command: mktemp" >&2; exit 1; }
 
 cd "$PROJECT_ROOT"
 
@@ -100,7 +102,18 @@ while IFS= read -r -d '' path; do
 done < "$TMP_FILES" > "$TMP_COUNTS"
 
 REPORT="$(
-awk -F '\t' '
+awk -F '\t' -v root="$PROJECT_ROOT" '
+    function print_table_header(title, width, line) {
+        line = ""
+        while (length(line) < width) {
+            line = line "-"
+        }
+        printf "%-" width "s %8s %10s %10s %10s\n", title, "文件数", "总行数", "非空行", "空行"
+        printf "%-" width "s %8s %10s %10s %10s\n", line, "--------", "----------", "----------", "----------"
+    }
+    function print_table_row(name, files, lines, blanks, width) {
+        printf "%-" width "s %8d %10d %10d %10d\n", name, files, lines, lines - blanks, blanks
+    }
     function extname(path, base, n, parts) {
         base = path
         sub(/^.*\//, "", base)
@@ -110,6 +123,62 @@ awk -F '\t' '
         n = split(base, parts, ".")
         return "." parts[n]
     }
+    function py_category(path, rel, n, parts) {
+        if (path ~ /^\.\/src\/robot_control\//) {
+            rel = path
+            sub(/^\.\/src\/robot_control\//, "", rel)
+            n = split(rel, parts, "/")
+            if (n == 1) {
+                return "src/robot_control"
+            }
+            if (parts[1] == "hardware" && n >= 3) {
+                return "src/robot_control/hardware/" parts[2]
+            }
+            if (parts[1] == "hardware") {
+                return "src/robot_control/hardware"
+            }
+            if (parts[1] == "modes" && n >= 3) {
+                return "src/robot_control/modes/" parts[2]
+            }
+            if (parts[1] == "modes") {
+                return "src/robot_control/modes"
+            }
+            if (parts[1] == "shared" && n >= 3) {
+                return "src/robot_control/shared/" parts[2]
+            }
+            if (parts[1] == "shared") {
+                return "src/robot_control/shared"
+            }
+            return "src/robot_control/" parts[1]
+        }
+        if (path ~ /^\.\/tests\//) {
+            return "tests"
+        }
+        rel = path
+        sub(/^\.\//, "", rel)
+        if (rel !~ /\//) {
+            return "[repo_root]"
+        }
+        sub(/\/[^\/]+$/, "", rel)
+        return rel
+    }
+    function sort_keys_by_lines(values, keys,    key, count, i, j, current) {
+        delete keys
+        count = 0
+        for (key in values) {
+            keys[++count] = key
+        }
+        for (i = 2; i <= count; i++) {
+            current = keys[i]
+            j = i - 1
+            while (j >= 1 && (values[keys[j]] < values[current] || (values[keys[j]] == values[current] && keys[j] > current))) {
+                keys[j + 1] = keys[j]
+                j--
+            }
+            keys[j + 1] = current
+        }
+        return count
+    }
     {
         ext = extname($1)
         files++
@@ -117,6 +186,13 @@ awk -F '\t' '
         blanks += $3
         ext_files[ext]++
         ext_lines[ext] += $2
+        ext_blanks[ext] += $3
+        if (ext == ".py") {
+            category = py_category($1)
+            py_files[category]++
+            py_lines[category] += $2
+            py_blanks[category] += $3
+        }
     }
     END {
         nonblank = lines - blanks
@@ -128,20 +204,25 @@ awk -F '\t' '
         printf "总行数:   %d\n", lines
         printf "非空行:   %d\n", nonblank
         printf "空行:     %d\n\n", blanks
-        printf "按扩展名统计（行数降序）:\n"
-        printf "%-12s %8s %10s\n", "扩展名", "文件数", "行数"
-        printf "%-12s %8s %10s\n", "------------", "--------", "----------"
-        for (ext in ext_lines) {
-            printf "%s\t%d\t%d\n", ext, ext_files[ext], ext_lines[ext] | "sort -t\"\t\" -k3,3nr -k1,1"
+
+        printf "按 Python 文件分类统计（行数降序）:\n"
+        print_table_header("分类", 40)
+        py_count = sort_keys_by_lines(py_lines, py_keys)
+        for (i = 1; i <= py_count; i++) {
+            category = py_keys[i]
+            print_table_row(category, py_files[category], py_lines[category], py_blanks[category], 40)
         }
-        close("sort -t\"\t\" -k3,3nr -k1,1")
+        printf "\n"
+
+        printf "按扩展名统计（行数降序）:\n"
+        print_table_header("扩展名", 12)
+        ext_count = sort_keys_by_lines(ext_lines, ext_keys)
+        for (i = 1; i <= ext_count; i++) {
+            ext = ext_keys[i]
+            print_table_row(ext, ext_files[ext], ext_lines[ext], ext_blanks[ext], 12)
+        }
     }
-' root="$PROJECT_ROOT" "$TMP_COUNTS" |
-awk -F '\t' '
-    NF == 3 && $1 ~ /^(\.|\\[no_ext\\])$/ { next }
-    NF == 3 { printf "%-12s %8d %10d\n", $1, $2, $3; next }
-    { print }
-'
+' "$TMP_COUNTS"
 )"
 
 printf '%s\n' "$REPORT"

@@ -32,3 +32,13 @@ def test_control_mode_packages_are_removed():
     assert importlib.util.find_spec("robot_control.control") is None
     assert importlib.util.find_spec("robot_control.modes.control_real") is None
     assert importlib.util.find_spec("robot_control.modes.control_sim") is None
+
+
+def test_unused_shared_runtime_helpers_are_removed():
+    import importlib.util
+
+    assert importlib.util.find_spec("robot_control.shared.state") is None
+    assert importlib.util.find_spec("robot_control.shared.runtime.lifecycle") is None
+    assert importlib.util.find_spec("robot_control.shared.runtime.mode_config") is None
+    assert importlib.util.find_spec("robot_control.shared.runtime.timing") is None
+    assert importlib.util.find_spec("robot_control.shared.rerun.async_logger") is None

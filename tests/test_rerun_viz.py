@@ -42,6 +42,40 @@ class DummyRR:
         return {"kind": "Arrows3D", **kwargs}
 
 
+class DummyModernRR:
+    def __init__(self) -> None:
+        self.logs: list[tuple[str, object, bool]] = []
+        self.blueprint = None
+        self.time_calls: list[tuple[str, float | None, int | None, object | None]] = []
+
+    def init(self, *_args, **_kwargs):
+        return None
+
+    def set_time(self, timeline: str, *, duration=None, sequence=None, timestamp=None) -> None:
+        self.time_calls.append((timeline, duration, sequence, timestamp))
+
+    def log(self, path: str, payload, static: bool = False) -> None:
+        self.logs.append((path, payload, static))
+
+    def Scalars(self, value: float) -> float:
+        return value
+
+    def SeriesLines(self, **kwargs):
+        return {"kind": "SeriesLines", **kwargs}
+
+    def TextLog(self, text: str):
+        return {"kind": "TextLog", "text": text}
+
+    def Points3D(self, points, **kwargs):
+        return {"kind": "Points3D", "points": points, **kwargs}
+
+    def LineStrips3D(self, strips, **kwargs):
+        return {"kind": "LineStrips3D", "strips": strips, **kwargs}
+
+    def Arrows3D(self, **kwargs):
+        return {"kind": "Arrows3D", **kwargs}
+
+
 class DummyRRB:
     @staticmethod
     def TimeSeriesView(name: str, origin: str):
@@ -144,6 +178,7 @@ def test_setup_sim_realtime_styles_groups_joint_torques_as_small_views(monkeypat
     assert "J5-J7 Torque" in layout_names
     assert "UART Protocol" not in layout_names
     assert "Performance Rates" not in layout_names
+    assert names_by_origin["/joint_target/q"] == "Target Joint Positions (q_ref, rad)"
 
     for joint_idx in range(rerun_viz.Config.NUM_JOINTS):
         origin = f"/sim/control/torque/J{joint_idx + 1}"
@@ -157,6 +192,7 @@ def test_setup_sim_realtime_styles_groups_joint_torques_as_small_views(monkeypat
     }
     assert static_line_names["sim/control/torque/J1/received"] == ["Received torque"]
     assert static_line_names["sim/control/torque/J1/applied"] == ["Applied after limit"]
+    assert static_line_names["joint_target/q/J1"] == ["J1 target"]
 
 
 def test_log_realtime_step_logs_position_tracking_in_mm(monkeypatch):
@@ -178,6 +214,25 @@ def test_log_realtime_step_logs_position_tracking_in_mm(monkeypatch):
     assert _logged_scalar(dummy_rr, "tracking/pos/X/actual") == 123.0
     assert _logged_scalar(dummy_rr, "tracking/pos/X/desired") == 100.0
     assert _logged_scalar(dummy_rr, "error/X") == 23.0
+
+
+def test_log_realtime_step_uses_modern_rerun_set_time_api(monkeypatch):
+    dummy_rr = DummyModernRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+
+    rerun_viz.log_realtime_step(
+        t=0.1,
+        pos_actual=np.array([0.123, 0.0, -0.001]),
+        pos_desired=np.array([0.100, -0.002, -0.003]),
+        quat_actual=np.array([1.0, 0.0, 0.0, 0.0]),
+        quat_desired=np.array([1.0, 0.0, 0.0, 0.0]),
+        tau_total=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        cycle_time=1.25,
+        step_count=0,
+    )
+
+    assert dummy_rr.time_calls == [("time", 0.1, None, None)]
 
 
 def test_log_realtime_step_logs_target_joint_positions(monkeypatch):
@@ -229,3 +284,29 @@ def test_log_sim_realtime_step_logs_received_and_applied_torque_per_joint(monkey
     assert _logged_scalar(dummy_rr, "sim/control/torque/J3/received") == 30.0
     assert _logged_scalar(dummy_rr, "sim/control/torque/J3/applied") == 27.0
     assert _logged_scalar(dummy_rr, "sim/performance/step_time_ms") == 1.25
+
+
+def test_log_sim_realtime_step_logs_target_joint_positions(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+
+    q_target = np.array([0.11, 0.22, 0.33, 0.44, 0.55, 0.66, 0.77])
+
+    rerun_viz.log_sim_realtime_step(
+        t=0.1,
+        pos_actual=np.array([0.123, 0.0, -0.001]),
+        pos_desired=np.array([0.100, -0.002, -0.003]),
+        quat_actual=np.array([1.0, 0.0, 0.0, 0.0]),
+        quat_desired=np.array([1.0, 0.0, 0.0, 0.0]),
+        tau_received=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        tau_applied=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        cycle_time=1.25,
+        q=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        qd=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        q_target=q_target,
+        step_count=0,
+    )
+
+    assert _logged_scalar(dummy_rr, "joint_target/q/J1") == 0.11
+    assert _logged_scalar(dummy_rr, "joint_target/q/J7") == 0.77
