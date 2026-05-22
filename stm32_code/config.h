@@ -2,6 +2,7 @@
  * AM-D02 机器人控制器 - 配置参数
  * 集中管理参数，方便在 STM32H7 上进行调优。
  */
+ 
 
 #ifndef CONFIG_LIB_H
 #define CONFIG_LIB_H
