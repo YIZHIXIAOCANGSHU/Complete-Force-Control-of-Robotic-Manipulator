@@ -88,4 +88,4 @@ class Config:
 
     # === 目标位置 (Target Posture) ===
     # 用于重力补偿与 PD 控制的目标位置 (rad)
-    TARGET_Q = np.array([0, -np.pi/4, 0.0, np.pi/4, 0.0, 0.0, 0.0])
+    TARGET_Q = np.array([0, 0, 0.0, np.pi/4, 0.0, 0.0, 0.0])

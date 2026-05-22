@@ -11,7 +11,7 @@ import numpy as np
 
 from config import Config
 from common.gravity_backend import GravityCompTool
-from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
+from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer, viewer_unavailable_reason
 
 
 DEFAULT_MC_SAMPLES = 20000
@@ -657,7 +657,8 @@ def _show_monte_carlo_workspace_viewer(
     max_hull_points: int = DEFAULT_MC_MAX_HULL_POINTS,
 ) -> None:
     if not VIEWER_AVAILABLE:
-        print("[MC Viewer] MuJoCo viewer 不可用，跳过窗口显示。")
+        reason = viewer_unavailable_reason() or "unknown viewer error"
+        print(f"[MC Viewer] MuJoCo viewer 不可用，跳过窗口显示: {reason}")
         return
     if len(points) == 0:
         print("[MC Viewer] 没有采样点，跳过窗口显示。")

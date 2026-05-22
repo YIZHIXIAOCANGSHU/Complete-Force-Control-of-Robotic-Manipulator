@@ -18,7 +18,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from config import Config, _env_bool, _env_float, _env_int
-from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
+from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer, viewer_unavailable_reason
 from common.gravity_backend import GravityCompTool
 from common.shared_state import SharedRobotState
 from usb2fdcan_send.damiao import Usb2FdcanConfig, Usb2FdcanZeroTransport
@@ -321,7 +321,8 @@ def rx_feedback_loop(
 
 def run_viewer_loop(shared_state: SharedRobotState) -> None:
     if not VIEWER_AVAILABLE:
-        print("[USB2FDCAN Warning] MuJoCo viewer 不可用，仅运行 CAN 反馈镜像线程。")
+        reason = viewer_unavailable_reason() or "unknown viewer error"
+        print(f"[USB2FDCAN Warning] MuJoCo viewer 不可用，仅运行 CAN 反馈镜像线程: {reason}")
         while not shutdown_event.is_set():
             time.sleep(0.1)
         return

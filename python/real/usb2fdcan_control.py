@@ -18,7 +18,7 @@ for path in (PYTHON_ROOT, PROJECT_ROOT):
 from config import Config, _env_bool, _env_float, _env_int
 from common.coord_transforms import RobotMujocoTransformer
 from common.gravity_backend import GravityCompTool
-from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
+from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer, viewer_unavailable_reason
 from common.rerun_async import RerunLogger
 from common.shared_state import SharedRobotState
 from usb2fdcan_send.damiao import Usb2FdcanConfig, Usb2FdcanTransport
@@ -389,7 +389,8 @@ def main() -> None:
         from sim.env import MujocoSimEnv
 
         if not VIEWER_AVAILABLE:
-            raise RuntimeError("MuJoCo viewer is not available")
+            reason = viewer_unavailable_reason() or "MuJoCo viewer is not available"
+            raise RuntimeError(reason)
 
         env = MujocoSimEnv()
         env.reset(Config.HOME_QPOS)

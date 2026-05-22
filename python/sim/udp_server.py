@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from config import Config
-from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
+from common.mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer, viewer_unavailable_reason
 from common import rerun_viz
 from sim.state_packets import STATE_PACKET_SIZE
 
@@ -84,6 +84,9 @@ def run_udp_server(ready_file: str | None = None) -> None:
         viewer = launch_passive_viewer(env.model, env.data)
         viewer.sync()
         print("[UDP Server] 可视化窗口已打开。此时等待 C 端客户端发送请求...")
+    elif Config.ENABLE_VIEWER:
+        reason = viewer_unavailable_reason() or "unknown viewer error"
+        print(f"[UDP Server Warning] MuJoCo viewer 不可用，继续无窗口仿真: {reason}")
 
     _write_ready_file(ready_file)
 
