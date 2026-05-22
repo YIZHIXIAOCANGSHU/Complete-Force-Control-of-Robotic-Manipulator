@@ -11,14 +11,18 @@ static int sock = -1;
 static struct sockaddr_in server_addr;
 static socklen_t addr_len = sizeof(server_addr);
 
-// 缓存仿真状态
-// 依次为: qpos(7), qvel(7), ee_pos(3), ee_quat(4), target_pos(3),
-// target_quat(4) 共 28 个 double (28 * 8 = 224 bytes)
-static double cached_state[28];
+enum {
+  CONTROL_INPUT_PACKET_DOUBLES = 22,
+  TORQUE_OUTPUT_PACKET_DOUBLES = 7,
+};
+
+// 缓存 Python 转发给 C 闭环控制器的输入：
+// qpos(7), qvel(7), target_pos_base(3), target_quat_base(4), dt_s(1)
+static double cached_state[CONTROL_INPUT_PACKET_DOUBLES];
 
 // 辅助函数，阻塞等待接收28个double
-static int wait_for_state() {
-  int expected = 28 * sizeof(double);
+static int wait_for_state(void) {
+  int expected = CONTROL_INPUT_PACKET_DOUBLES * sizeof(double);
   int n = recvfrom(sock, cached_state, expected, 0, NULL, NULL);
   if (n < 0) {
     printf("[sim_interface] recvfrom failed while waiting for state: %s\n",
@@ -82,28 +86,40 @@ int sim_init(const char *ip, int port) {
 
 void sim_get_state(double *qpos, double *qvel, double *ee_pos, double *ee_quat,
                    double *target_pos, double *target_quat) {
+  double unused_dt = 0.0;
+  sim_get_control_input(qpos, qvel, target_pos, target_quat, &unused_dt);
+  if (ee_pos)
+    memset(ee_pos, 0, 3 * sizeof(double));
+  if (ee_quat) {
+    ee_quat[0] = 1.0;
+    ee_quat[1] = 0.0;
+    ee_quat[2] = 0.0;
+    ee_quat[3] = 0.0;
+  }
+}
+
+void sim_get_control_input(double *qpos, double *qvel, double *target_pos,
+                           double *target_quat, double *dt_s) {
   if (qpos)
     memcpy(qpos, cached_state, 7 * sizeof(double));
   if (qvel)
     memcpy(qvel, cached_state + 7, 7 * sizeof(double));
-  if (ee_pos)
-    memcpy(ee_pos, cached_state + 14, 3 * sizeof(double));
-  if (ee_quat)
-    memcpy(ee_quat, cached_state + 17, 4 * sizeof(double));
   if (target_pos)
-    memcpy(target_pos, cached_state + 21, 3 * sizeof(double));
+    memcpy(target_pos, cached_state + 14, 3 * sizeof(double));
   if (target_quat)
-    memcpy(target_quat, cached_state + 24, 4 * sizeof(double));
+    memcpy(target_quat, cached_state + 17, 4 * sizeof(double));
+  if (dt_s)
+    *dt_s = cached_state[21];
 }
 
 int sim_apply_torque(const double *tau) {
   if (sock < 0)
     return -1;
 
-  // 发送 7个 double (56 bytes) 到服务器
-  int n = sendto(sock, tau, 7 * sizeof(double), 0,
+  // 发送 7 个 double 到服务器：C 闭环控制器输出的七轴力矩。
+  int n = sendto(sock, tau, TORQUE_OUTPUT_PACKET_DOUBLES * sizeof(double), 0,
                  (const struct sockaddr *)&server_addr, addr_len);
-  if (n != 7 * sizeof(double)) {
+  if (n != TORQUE_OUTPUT_PACKET_DOUBLES * sizeof(double)) {
     return -1;
   }
 

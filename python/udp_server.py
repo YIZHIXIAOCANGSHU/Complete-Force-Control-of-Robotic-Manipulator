@@ -13,7 +13,7 @@ import numpy as np
 from config import Config
 from mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
 import rerun_viz
-from state_packets import STATE_PACKET_SIZE
+from state_packets import CONTROL_INPUT_PACKET_SIZE, TORQUE_OUTPUT_PACKET_SIZE
 
 
 DEFAULT_MC_SAMPLES = 20000
@@ -936,8 +936,9 @@ def run_udp_server(ready_file: str | None = None) -> None:
     _write_ready_file(ready_file)
 
     step_count = 0
-    state_packet = np.empty(STATE_PACKET_SIZE, dtype=np.float64)
+    state_packet = np.empty(CONTROL_INPUT_PACKET_SIZE, dtype=np.float64)
     state_packet_view = memoryview(state_packet).cast("B")
+    expected_torque_bytes = TORQUE_OUTPUT_PACKET_SIZE * np.dtype("<f8").itemsize
 
     try:
         while True:
@@ -954,7 +955,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
                     sock.sendto(state_packet_view, addr)
                     continue
 
-                if len(data) != 56:
+                if len(data) != expected_torque_bytes:
                     print(f"[UDP Server] 收到未知长度的数据: {len(data)} bytes")
                     continue
 

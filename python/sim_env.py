@@ -9,6 +9,7 @@ import numpy as np
 
 from config import Config
 from sim_scene import build_enhanced_model
+from state_packets import CONTROL_INPUT_PACKET_SIZE, fill_control_input_packet
 
 
 class MujocoSimEnv:
@@ -167,17 +168,26 @@ class MujocoSimEnv:
         )
 
     def write_state_packet(self, state_packet: np.ndarray) -> None:
-        """直接将当前状态写入预分配 UDP 包，避免中间数组拼装。"""
-        state_packet[0:7] = self.data.qpos[self.dof_ids]
-        state_packet[7:14] = self.data.qvel[self.dof_ids]
-        state_packet[14:17] = self.data.xpos[self.ee_body_id]
-        state_packet[17:21] = self.data.xquat[self.ee_body_id]
+        """直接将当前反馈和 base_link 目标写入预分配 C 控制输入包。"""
+        if state_packet.shape[0] != CONTROL_INPUT_PACKET_SIZE:
+            raise ValueError(
+                f"control input packet must contain {CONTROL_INPUT_PACKET_SIZE} doubles"
+            )
         if self.target_mocap_id >= 0:
-            state_packet[21:24] = self.data.mocap_pos[self.target_mocap_id]
-            state_packet[24:28] = self.data.mocap_quat[self.target_mocap_id]
+            target_pos = self.data.mocap_pos[self.target_mocap_id]
+            target_quat = self.data.mocap_quat[self.target_mocap_id]
         else:
-            state_packet[21:24] = self._zero_pos
-            state_packet[24:28] = self._unit_quat
+            target_pos = self._zero_pos
+            target_quat = self._unit_quat
+
+        fill_control_input_packet(
+            state_packet,
+            self.data.qpos[self.dof_ids],
+            self.data.qvel[self.dof_ids],
+            target_pos,
+            target_quat,
+            Config.DT,
+        )
 
     def get_jacobian(self) -> tuple[np.ndarray, np.ndarray]:
         """

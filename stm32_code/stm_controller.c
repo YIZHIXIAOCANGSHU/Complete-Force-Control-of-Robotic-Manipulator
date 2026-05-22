@@ -1,21 +1,21 @@
 #include "stm_controller.h"
 
 #include "control_logic.h"
-#include "trajectory_lib.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 typedef struct {
   double traj_t;
-  double path_t;
   int step_count;
   int initialized;
-  int path_valid;
+  int target_valid;
+  int ref_valid;
   stm_platform_hooks_t hooks;
-  LinearPathPlanner path;
-  double latched_target_pos[3];
-  double latched_target_quat[4];
+  double target_pos[3];
+  double target_quat[4];
+  double ref_pos[3];
+  double ref_quat[4];
 } StmControllerState;
 
 static StmControllerState g_controller = {0};
@@ -41,6 +41,13 @@ static int stm_controller_is_finite_vec(const double *values, int count) {
   return 1;
 }
 
+static double stm_controller_step_dt(const stm_input_t *in) {
+  if (isfinite(in->dt_s) && in->dt_s > 0.0 && in->dt_s < 1.0) {
+    return in->dt_s;
+  }
+  return CONTROL_DT;
+}
+
 static void stm_controller_sanitize_target_pose(const stm_input_t *in,
                                                 const double fallback_pos[3],
                                                 const double fallback_quat[4],
@@ -52,8 +59,8 @@ static void stm_controller_sanitize_target_pose(const stm_input_t *in,
 
   if (pos_valid) {
     memcpy(target_pos, in->target_pos, sizeof(double) * 3);
-  } else if (g_controller.path_valid) {
-    memcpy(target_pos, g_controller.latched_target_pos, sizeof(double) * 3);
+  } else if (g_controller.target_valid) {
+    memcpy(target_pos, g_controller.target_pos, sizeof(double) * 3);
   } else {
     memcpy(target_pos, fallback_pos, sizeof(double) * 3);
   }
@@ -69,52 +76,61 @@ static void stm_controller_sanitize_target_pose(const stm_input_t *in,
     for (int i = 0; i < 4; ++i) {
       target_quat[i] = in->target_quat[i] * quat_norm_inv;
     }
-  } else if (g_controller.path_valid) {
-    memcpy(target_quat, g_controller.latched_target_quat, sizeof(double) * 4);
+  } else if (g_controller.target_valid) {
+    memcpy(target_quat, g_controller.target_quat, sizeof(double) * 4);
   } else {
     memcpy(target_quat, fallback_quat, sizeof(double) * 4);
   }
 }
 
-static int stm_controller_target_changed(const double target_pos[3],
-                                         const double target_quat[4]) {
-  const double pos_thresh = 1e-4;
-  const double quat_dot_thresh = 0.99999;
-  double pos_delta_sq = 0.0;
-  double quat_dot = 0.0;
+static void stm_controller_update_reference(const double current_pos[3],
+                                            const double current_quat[4],
+                                            const double target_pos[3],
+                                            const double target_quat[4],
+                                            double dt_s, double ref_pos[3],
+                                            double ref_quat[4]) {
+  double delta[3];
+  double distance;
+  double ratio;
 
-  if (!g_controller.path_valid) {
-    return 1;
+  memcpy(g_controller.target_pos, target_pos, sizeof(double) * 3);
+  memcpy(g_controller.target_quat, target_quat, sizeof(double) * 4);
+  g_controller.target_valid = 1;
+
+  if (!g_controller.ref_valid) {
+    memcpy(g_controller.ref_pos, current_pos, sizeof(double) * 3);
+    memcpy(g_controller.ref_quat, current_quat, sizeof(double) * 4);
+    g_controller.ref_valid = 1;
   }
 
   for (int i = 0; i < 3; ++i) {
-    double delta = target_pos[i] - g_controller.latched_target_pos[i];
-    pos_delta_sq += delta * delta;
+    delta[i] = target_pos[i] - g_controller.ref_pos[i];
   }
-  if (pos_delta_sq > pos_thresh * pos_thresh) {
-    return 1;
+  distance = sqrt(delta[0] * delta[0] + delta[1] * delta[1] +
+                  delta[2] * delta[2]);
+
+  if (distance <= 1e-9) {
+    ratio = 1.0;
+    memcpy(g_controller.ref_pos, target_pos, sizeof(double) * 3);
+  } else {
+    double max_step = TRAJ_PLAN_SPEED * dt_s;
+    ratio = max_step / distance;
+    if (ratio > 1.0) {
+      ratio = 1.0;
+    }
+    if (ratio < 0.0 || !isfinite(ratio)) {
+      ratio = 0.0;
+    }
+    for (int i = 0; i < 3; ++i) {
+      g_controller.ref_pos[i] += ratio * delta[i];
+    }
   }
 
-  for (int i = 0; i < 4; ++i) {
-    quat_dot += target_quat[i] * g_controller.latched_target_quat[i];
-  }
-  if (fabs(quat_dot) < quat_dot_thresh) {
-    return 1;
-  }
+  quat_slerp(g_controller.ref_quat, target_quat, ratio,
+             g_controller.ref_quat);
 
-  return 0;
-}
-
-static void stm_controller_start_path(const double current_pos[3],
-                                      const double current_quat[4],
-                                      const double target_pos[3],
-                                      const double target_quat[4]) {
-  linear_path_init(&g_controller.path, current_pos, current_quat, target_pos,
-                   target_quat, TRAJ_PLAN_SPEED, TRAJ_PLAN_ACCEL);
-  memcpy(g_controller.latched_target_pos, target_pos, sizeof(double) * 3);
-  memcpy(g_controller.latched_target_quat, target_quat, sizeof(double) * 4);
-  g_controller.path_t = 0.0;
-  g_controller.path_valid = 1;
+  memcpy(ref_pos, g_controller.ref_pos, sizeof(double) * 3);
+  memcpy(ref_quat, g_controller.ref_quat, sizeof(double) * 4);
 }
 
 static void stm_controller_prepare_output(stm_output_t *out) {
@@ -166,12 +182,13 @@ void stm_controller_set_platform_hooks(const stm_platform_hooks_t *hooks) {
 
 void stm_controller_reset(void) {
   g_controller.traj_t = 0.0;
-  g_controller.path_t = 0.0;
   g_controller.step_count = 0;
-  g_controller.path_valid = 0;
-  memset(&g_controller.path, 0, sizeof(g_controller.path));
-  memset(g_controller.latched_target_pos, 0, sizeof(g_controller.latched_target_pos));
-  memset(g_controller.latched_target_quat, 0, sizeof(g_controller.latched_target_quat));
+  g_controller.target_valid = 0;
+  g_controller.ref_valid = 0;
+  memset(g_controller.target_pos, 0, sizeof(g_controller.target_pos));
+  memset(g_controller.target_quat, 0, sizeof(g_controller.target_quat));
+  memset(g_controller.ref_pos, 0, sizeof(g_controller.ref_pos));
+  memset(g_controller.ref_quat, 0, sizeof(g_controller.ref_quat));
 }
 
 void stm_controller_init(void) {
@@ -190,6 +207,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   double target_quat[4];
   double ref_pos[3];
   double ref_quat[4];
+  double dt_s;
   double start_ms;
   double end_ms;
 
@@ -203,6 +221,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
 
   stm_controller_prepare_output(out);
   start_ms = stm_controller_now_ms();
+  dt_s = stm_controller_step_dt(in);
 
   control_filter_velocities(in->qd, filtered_qd);
   control_get_fk_with_offset(in->q, out->ee_pos, out->ee_quat);
@@ -214,18 +233,8 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
     goto finalize_step;
   }
 
-  if (stm_controller_target_changed(target_pos, target_quat)) {
-    stm_controller_start_path(out->ee_pos, out->ee_quat, target_pos,
-                              target_quat);
-  }
-
-  if (g_controller.path_valid) {
-    linear_path_evaluate(&g_controller.path, g_controller.path_t, ref_pos,
-                         ref_quat);
-  } else {
-    memcpy(ref_pos, target_pos, sizeof(ref_pos));
-    memcpy(ref_quat, target_quat, sizeof(ref_quat));
-  }
+  stm_controller_update_reference(out->ee_pos, out->ee_quat, target_pos,
+                                  target_quat, dt_s, ref_pos, ref_quat);
 
   control_step_v2(ref_pos, ref_quat, in->q, filtered_qd, out->tau);
 
@@ -236,8 +245,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   }
 
 finalize_step:
-  g_controller.traj_t += CONTROL_DT;
-  g_controller.path_t += CONTROL_DT;
+  g_controller.traj_t += dt_s;
   g_controller.step_count++;
   out->traj_t = g_controller.traj_t;
   out->step_count = g_controller.step_count;

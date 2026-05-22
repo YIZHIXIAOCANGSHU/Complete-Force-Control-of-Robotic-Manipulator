@@ -4,13 +4,12 @@
  * 
  * This file handles simulation-specific tasks:
  * 1. Connecting to the MuJoCo server.
- * 2. Bridging coordinate systems (Z-up vs Y-up).
- * 3. Calling the portable Robot Controller (main_stm).
+ * 2. Forwarding MuJoCo feedback/target packets to the C closed loop.
+ * 3. Applying the seven joint torques returned by main_stm.
  */
 
 #include "main_stm.h"
 #include "sim_interface.h"
-#include "sim_bridge.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -35,8 +34,8 @@ int main(void) {
 
   /* 状态变量 */
   double q[7], qd[7];
-  double ee_pos[3], ee_quat[4];
   double target_pos[3], target_quat[4];
+  double dt_s;
   
   stm_input_t stm_in;
   stm_output_t stm_out;
@@ -47,13 +46,15 @@ int main(void) {
    *  主控制循环
    * ================================================================ */
   while (1) {
-    /* -- 3a. 获取仿真状态 (MuJoCo 坐标系: Z-up) -- */
-    sim_get_state(q, qd, ee_pos, ee_quat, target_pos, target_quat);
+    /* -- 3a. 获取 Python 转发的反馈和 base_link 目标 -- */
+    sim_get_control_input(q, qd, target_pos, target_quat, &dt_s);
 
-    /* -- 3b. 坐标系桥接: MuJoCo -> Robot Coord (URDF/RBDL) -- */
+    /* -- 3b. C 控制器执行完整闭环，Python 不参与控制逻辑 -- */
     memcpy(stm_in.q, q, sizeof(q));
     memcpy(stm_in.qd, qd, sizeof(qd));
-    control_mujoco_to_rbdl(target_pos, target_quat, stm_in.target_pos, stm_in.target_quat);
+    memcpy(stm_in.target_pos, target_pos, sizeof(target_pos));
+    memcpy(stm_in.target_quat, target_quat, sizeof(target_quat));
+    stm_in.dt_s = dt_s;
 
     /* -- 3c. 执行底层控制步进 (Portable Logic) -- */
     stm_step(&stm_in, &stm_out);

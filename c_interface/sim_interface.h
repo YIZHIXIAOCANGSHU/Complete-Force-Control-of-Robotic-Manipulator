@@ -14,17 +14,19 @@ extern "C" {
 int sim_init(const char *ip, int port);
 
 /**
- * 获取最新状态
+ * 获取最新 C 控制输入
  * 所有参数均为输出数组。如果不需要某个值可以传 NULL。
  * 状态在底层通过 sim_apply_torque 时会自动与 Python 端同步并缓存。
  *
  * @param qpos 关节位置 (7维)
  * @param qvel 关节速度 (7维)
- * @param ee_pos 末端当前位置 (3维)
- * @param ee_quat 末端当前姿态四元数 (4维)
- * @param target_pos 目标末端位置 (3维)
- * @param target_quat 目标末端姿态四元数 (4维)
+ * @param target_pos 目标 TCP 位置 (URDF base_link 坐标, 3维)
+ * @param target_quat 目标 TCP 姿态四元数 [w,x,y,z] (URDF base_link 坐标, 4维)
+ * @param dt_s Python/MuJoCo 仿真步长 (秒)
  */
+void sim_get_control_input(double *qpos, double *qvel, double *target_pos,
+                           double *target_quat, double *dt_s);
+
 void sim_get_state(double *qpos, double *qvel, double *ee_pos, double *ee_quat,
                    double *target_pos, double *target_quat);
 
