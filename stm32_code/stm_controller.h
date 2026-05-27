@@ -10,7 +10,9 @@ extern "C" {
 typedef struct {
   double q[NUM_JOINTS];
   double qd[NUM_JOINTS];
-  /* Target TCP pose in the AM-DPBSURDF0422 URDF base_link frame. */
+  /* Sim-only Body0422 torso command: Waist01, Waist02, Body0422. */
+  double body_q[NUM_BODY_JOINTS];
+  /* Target TCP pose in the Body0422 dynamic target frame. */
   double target_pos[NUM_ARMS][3];
   double target_quat[NUM_ARMS][4];
   double dt_s;

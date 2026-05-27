@@ -248,6 +248,9 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   stm_controller_prepare_output(out);
   start_ms = stm_controller_now_ms();
   dt_s = stm_controller_step_dt(in);
+  if (stm_controller_is_finite_vec(in->body_q, NUM_BODY_JOINTS)) {
+    control_update_body_gravity(in->body_q);
+  }
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
     int offset = arm * ARM_JOINTS;

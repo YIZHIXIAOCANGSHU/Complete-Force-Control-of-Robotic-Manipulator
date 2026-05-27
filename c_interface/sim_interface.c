@@ -12,25 +12,27 @@ static struct sockaddr_in server_addr;
 static socklen_t addr_len = sizeof(server_addr);
 
 enum {
-  CONTROL_INPUT_PACKET_DOUBLES = 43,
+  CONTROL_INPUT_PACKET_DOUBLES = 46,
   TORQUE_OUTPUT_PACKET_DOUBLES = 14,
   NUM_ARMS_SIM = 2,
   ARM_JOINTS_SIM = 7,
   NUM_JOINTS_SIM = 14,
+  NUM_BODY_JOINTS_SIM = 3,
   Q_OFFSET = 0,
   QD_OFFSET = 14,
-  LEFT_TARGET_POS_OFFSET = 28,
-  LEFT_TARGET_QUAT_OFFSET = 31,
-  RIGHT_TARGET_POS_OFFSET = 35,
-  RIGHT_TARGET_QUAT_OFFSET = 38,
-  DT_OFFSET = 42,
+  BODY_Q_OFFSET = 28,
+  LEFT_TARGET_POS_OFFSET = 31,
+  LEFT_TARGET_QUAT_OFFSET = 34,
+  RIGHT_TARGET_POS_OFFSET = 38,
+  RIGHT_TARGET_QUAT_OFFSET = 41,
+  DT_OFFSET = 45,
 };
 
 // 缓存 Python 转发给 C 闭环控制器的输入：
-// qpos(14), qvel(14), left_pos(3), left_quat(4), right_pos(3), right_quat(4), dt_s(1)
+// qpos(14), qvel(14), body_q(3), left_pos(3), left_quat(4), right_pos(3), right_quat(4), dt_s(1)
 static double cached_state[CONTROL_INPUT_PACKET_DOUBLES];
 
-// 辅助函数，阻塞等待接收28个double
+// 辅助函数，阻塞等待接收控制输入包
 static int wait_for_state(void) {
   int expected = CONTROL_INPUT_PACKET_DOUBLES * sizeof(double);
   int n = recvfrom(sock, cached_state, expected, 0, NULL, NULL);
@@ -98,7 +100,7 @@ void sim_get_state(double *qpos, double *qvel, double ee_pos[2][3],
                    double ee_quat[2][4], double target_pos[2][3],
                    double target_quat[2][4]) {
   double unused_dt = 0.0;
-  sim_get_control_input(qpos, qvel, target_pos, target_quat, &unused_dt);
+  sim_get_control_input(qpos, qvel, NULL, target_pos, target_quat, &unused_dt);
   if (ee_pos)
     memset(ee_pos, 0, NUM_ARMS_SIM * 3 * sizeof(double));
   if (ee_quat) {
@@ -108,12 +110,16 @@ void sim_get_state(double *qpos, double *qvel, double ee_pos[2][3],
   }
 }
 
-void sim_get_control_input(double *qpos, double *qvel, double target_pos[2][3],
+void sim_get_control_input(double *qpos, double *qvel, double *body_q,
+                           double target_pos[2][3],
                            double target_quat[2][4], double *dt_s) {
   if (qpos)
     memcpy(qpos, cached_state + Q_OFFSET, NUM_JOINTS_SIM * sizeof(double));
   if (qvel)
     memcpy(qvel, cached_state + QD_OFFSET, NUM_JOINTS_SIM * sizeof(double));
+  if (body_q)
+    memcpy(body_q, cached_state + BODY_Q_OFFSET,
+           NUM_BODY_JOINTS_SIM * sizeof(double));
   if (target_pos) {
     memcpy(target_pos[0], cached_state + LEFT_TARGET_POS_OFFSET, 3 * sizeof(double));
     memcpy(target_pos[1], cached_state + RIGHT_TARGET_POS_OFFSET, 3 * sizeof(double));

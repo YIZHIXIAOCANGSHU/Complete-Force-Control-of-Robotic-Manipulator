@@ -56,6 +56,32 @@ def _rpy_to_rotation_matrix(rpy: str) -> np.ndarray:
     return rotation_z @ rotation_y @ rotation_x
 
 
+def _quat_wxyz_to_rotmat(quat: np.ndarray) -> np.ndarray:
+    w, x, y, z = np.asarray(quat, dtype=np.float64)
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_multiply_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    w1, x1, y1, z1 = np.asarray(q1, dtype=np.float64)
+    w2, x2, y2, z2 = np.asarray(q2, dtype=np.float64)
+    return np.array(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dtype=np.float64,
+    )
+
+
 def _read_dual_urdf_zero_pose_axes() -> dict[str, np.ndarray]:
     tree = ET.parse(_repo_root() / "AM-DPBSURDF0422" / "urdf" / "AM-DPBSURDF0422.urdf")
     children_by_parent: dict[str, list[tuple[str, str, np.ndarray, np.ndarray]]] = {}
@@ -163,6 +189,13 @@ def test_config_controls_both_arms():
         "ArmR07Output_Link",
     ]
     assert Config.JOINT_NAMES == Config.LEFT_JOINT_NAMES + Config.RIGHT_JOINT_NAMES
+    assert Config.NUM_BODY_JOINTS == 3
+    assert Config.BODY_JOINT_NAMES == ["Waist01_Joint", "Waist02_Joint", "Body0422_Joint"]
+    np.testing.assert_allclose(
+        Config.BODY_JOINT_LIMITS_RAD,
+        [[0.0, 2.09], [-2.09, 0.0], [-1.57, 1.57]],
+    )
+    assert Config.ENABLE_BODY_GUI is True
     assert Config.TORQUE_LIMITS.tolist() == REAL_LEFT_ARM_TORQUE_LIMITS + REAL_RIGHT_ARM_TORQUE_LIMITS
     expected_limits_deg = np.vstack(
         [
@@ -273,7 +306,7 @@ def test_mujoco_initial_tcp_frames_are_aligned_between_arms():
     )
 
 
-def test_target_frame_marker_uses_body_origin_and_identity_axes():
+def test_target_frame_marker_uses_body_origin_and_zero_pose_axes():
     pytest.importorskip("mujoco")
 
     import mujoco
@@ -295,6 +328,7 @@ def test_target_frame_marker_uses_body_origin_and_identity_axes():
         Config.TARGET_FRAME_ORIGIN_BASE_ZERO,
         atol=1e-12,
     )
+    np.testing.assert_allclose(env.get_target_frame_rotmat_base(), np.eye(3), atol=1e-12)
     np.testing.assert_allclose(
         env.data.xpos[marker_id],
         Config.TARGET_FRAME_ORIGIN_BASE_ZERO,
@@ -329,6 +363,75 @@ def test_target_pose_is_stored_in_body0422_coordinates_and_displayed_in_world():
     )
 
 
+def test_target_frame_rotates_with_body0422_relative_to_zero_pose():
+    pytest.importorskip("mujoco")
+
+    import mujoco
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    env.reset(Config.INIT_QPOS)
+    env.forward()
+
+    body_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, Config.TARGET_FRAME_BODY_NAME)
+    marker_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, Config.TARGET_FRAME_MARKER_BODY)
+    body_zero = env.data.xmat[body_id].reshape(3, 3).copy()
+
+    env.set_body_qpos(np.array([0.2, -0.3, 0.4], dtype=np.float64))
+    env.forward()
+
+    body_current = env.data.xmat[body_id].reshape(3, 3).copy()
+    expected_rot = body_current @ body_zero.T
+    target_body = np.array([0.12, -0.03, 0.08], dtype=np.float64)
+    target_quat_body = np.array([0.9238795325, 0.0, 0.0, 0.3826834324], dtype=np.float64)
+    env.set_target_pose(target_body, target_quat_body, arm=Config.RIGHT_ARM)
+    target_world_pos, target_world_quat = env.get_all_target_poses_base()
+
+    np.testing.assert_allclose(env.get_target_frame_rotmat_base(), expected_rot, atol=1e-12)
+    np.testing.assert_allclose(env.data.xpos[marker_id], env.data.xpos[body_id], atol=1e-12)
+    np.testing.assert_allclose(env.data.xmat[marker_id].reshape(3, 3), expected_rot, atol=1e-12)
+    np.testing.assert_allclose(
+        env.data.mocap_pos[env.target_mocap_ids[Config.RIGHT_ARM]],
+        env.get_target_frame_origin_base() + expected_rot @ target_body,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(target_world_pos[Config.RIGHT_ARM], env.get_target_frame_origin_base() + expected_rot @ target_body)
+    np.testing.assert_allclose(
+        _quat_wxyz_to_rotmat(target_world_quat[Config.RIGHT_ARM]),
+        expected_rot @ _quat_wxyz_to_rotmat(target_quat_body),
+        atol=1e-9,
+    )
+
+
+def test_dragged_target_mocap_updates_body0422_target_coordinates():
+    pytest.importorskip("mujoco")
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    env.reset(Config.INIT_QPOS)
+    env.forward()
+
+    env.set_target_pose(np.array([0.1, 0.0, 0.0], dtype=np.float64), arm=Config.LEFT_ARM)
+    env.set_body_qpos(np.array([0.2, -0.3, 0.4], dtype=np.float64))
+    env.forward()
+    target_rot = env.get_target_frame_rotmat_base()
+    dragged_world = env.get_target_frame_origin_base() + target_rot @ np.array([0.2, -0.1, 0.05])
+    mocap_id = int(env.target_mocap_ids[Config.LEFT_ARM])
+    env.data.mocap_pos[mocap_id] = dragged_world
+
+    env.forward()
+
+    pos_body, _ = env.get_target_pose(Config.LEFT_ARM)
+    np.testing.assert_allclose(
+        pos_body,
+        target_rot.T @ (dragged_world - env.get_target_frame_origin_base()),
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(env.data.mocap_pos[mocap_id], dragged_world, atol=1e-12)
+
+
 def test_target_pose_follows_body0422_translation_when_unfixed():
     pytest.importorskip("mujoco")
 
@@ -357,8 +460,7 @@ def test_target_pose_follows_body0422_translation_when_unfixed():
         env.set_target_pose(target_body, arm=Config.RIGHT_ARM)
         before_body_target, _ = env.get_target_pose(Config.RIGHT_ARM)
 
-        # Body0422_Joint 是默认 17 DOF 模型中的第三个未受控关节。
-        env.data.qpos[2] = 0.4
+        env.set_body_qpos(np.array([0.2, -0.3, 0.4], dtype=np.float64))
         env.forward()
 
         origin = env.data.xpos[body_id].copy()
@@ -387,9 +489,8 @@ def test_target_pose_follows_body0422_translation_when_unfixed():
         for line in result.stdout.strip().splitlines()
     }
     target_body = np.array([0.12, -0.03, 0.08], dtype=np.float64)
-    np.testing.assert_allclose(rows["target_world"], rows["origin"] + target_body, atol=1e-12)
+    np.testing.assert_allclose(rows["target_world"], rows["origin"] + rows["marker_rot"].reshape(3, 3) @ target_body, atol=1e-12)
     np.testing.assert_allclose(rows["marker_world"], rows["origin"], atol=1e-12)
-    np.testing.assert_allclose(rows["marker_rot"].reshape(3, 3), np.eye(3), atol=1e-12)
     np.testing.assert_allclose(rows["before"], target_body, atol=1e-12)
     np.testing.assert_allclose(rows["after"], target_body, atol=1e-12)
 
@@ -449,7 +550,7 @@ def test_mujoco_env_uses_real_machine_joint_limits_for_clipping():
     np.testing.assert_allclose(env.get_qpos(), expected_limits[:, 1])
 
 
-def test_mujoco_env_fixes_uncontrolled_joints_by_default():
+def test_mujoco_env_keeps_body_joints_for_gui_by_default():
     pytest.importorskip("mujoco")
 
     import mujoco
@@ -458,23 +559,63 @@ def test_mujoco_env_fixes_uncontrolled_joints_by_default():
 
     env = MujocoSimEnv()
 
-    assert env.model.nv == Config.NUM_JOINTS
-    assert env.model.njnt == Config.NUM_JOINTS
+    assert env.model.nv == Config.NUM_JOINTS + Config.NUM_BODY_JOINTS
+    assert env.has_body_joints()
+    assert env.locked_dof_ids.size == 0
+    assert env.locked_qpos_ids.size == 0
     assert [
         mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
         for joint_id in range(env.model.njnt)
-    ] == Config.JOINT_NAMES
-    assert env.locked_dof_ids.size == 0
-    assert env.locked_qpos_ids.size == 0
+    ] == Config.BODY_JOINT_NAMES + Config.JOINT_NAMES
 
     env.reset(Config.INIT_QPOS)
+    body_q = np.array([0.3, -0.4, 0.2], dtype=np.float64)
+    env.set_body_qpos(body_q)
     env.forward()
+    np.testing.assert_allclose(env.get_body_qpos(), body_q)
+    np.testing.assert_allclose(env.data.qvel[env.body_dof_ids], 0.0)
+    np.testing.assert_allclose(env.data.qacc[env.body_dof_ids], 0.0)
     env.apply_torque(env.get_qfrc_bias())
-    env.forward()
+    env.step()
+    np.testing.assert_allclose(env.get_body_qpos(), body_q)
+    np.testing.assert_allclose(env.data.qvel[env.body_dof_ids], 0.0)
+    np.testing.assert_allclose(env.data.qacc[env.body_dof_ids], 0.0)
     np.testing.assert_allclose(env.data.qacc[env.dof_ids], 0.0, atol=1e-9)
 
 
-def test_mujoco_env_can_keep_full_dual_arm_dofs_when_fixing_disabled():
+def test_mujoco_env_fixes_uncontrolled_joints_when_body_gui_disabled():
+    pytest.importorskip("mujoco")
+
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.path.insert(0, "python")
+        from config import Config
+        from sim_env import MujocoSimEnv
+
+        env = MujocoSimEnv()
+        print(Config.ENABLE_BODY_GUI)
+        print(env.model.nv)
+        print(env.has_body_joints())
+        print(env.locked_dof_ids.size)
+        """
+    )
+    env = os.environ.copy()
+    env["AM_D02_ENABLE_BODY_GUI"] = "0"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    lines = result.stdout.strip().splitlines()
+
+    assert lines == ["False", "14", "False", "0"]
+
+
+def test_mujoco_env_keeps_body_gui_joints_commanded_when_fixing_disabled():
     pytest.importorskip("mujoco")
 
     script = textwrap.dedent(
@@ -486,7 +627,9 @@ def test_mujoco_env_can_keep_full_dual_arm_dofs_when_fixing_disabled():
 
         env = MujocoSimEnv()
         print(Config.FIX_UNCONTROLLED_JOINTS)
+        print(Config.ENABLE_BODY_GUI)
         print(env.model.nv)
+        print(env.has_body_joints())
         print(env.locked_dof_ids.size)
         """
     )
@@ -502,4 +645,4 @@ def test_mujoco_env_can_keep_full_dual_arm_dofs_when_fixing_disabled():
     )
     lines = result.stdout.strip().splitlines()
 
-    assert lines == ["False", "17", "3"]
+    assert lines == ["False", "True", "17", "True", "0"]

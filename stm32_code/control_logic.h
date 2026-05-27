@@ -24,9 +24,12 @@ extern "C" {
 /* 初始化控制器和底层模型 */
 void control_init(void);
 void control_init_arm(int side);
+void control_update_body_gravity(const double body_q[NUM_BODY_JOINTS]);
+void control_get_body_gravity(double gravity_out[3]);
 
 /* 步进 V2: 规划 + 双空间阻抗控制
- * 注意: 传入的 target_pos 和 target_quat 必须位于 URDF Base 坐标系下。
+ * 注意: target_pos 使用 Body0422 动态目标坐标系；该坐标系原点跟随 Body0422_Link
+ * 平移，坐标轴保持初始 URDF/base 方向。target_quat 仍使用同一固定方向坐标轴。
  */
 /**
  * @brief 核心控制逻辑: 双空间阻抗控制 (基于位置姿态误差计算各关节输出力矩)
@@ -34,8 +37,8 @@ void control_init_arm(int side);
  * 将当前机械臂末端与目标末端的差异投射到关节空间，同时在零空间(Null-space)维护首选姿态，
  * 最终输出经过重力与科氏力补偿的控制力矩 tau_out。
  *
- * @param target_pos 目标笛卡尔空间位置 [x, y, z] (相对于基座)
- * @param target_quat 目标姿态四元数 [w, x, y, z] (相对于基座)
+ * @param target_pos 目标笛卡尔空间位置 [x, y, z] (Body0422 动态目标坐标)
+ * @param target_quat 目标姿态四元数 [w, x, y, z]
  * @param current_q 当前各关节角度 [q1..q7]
  * @param current_qd 当前各关节角速度 [qd1..qd7]
  * @param tau_out 传出计算得到的关节期望力矩 [tau1..tau7]

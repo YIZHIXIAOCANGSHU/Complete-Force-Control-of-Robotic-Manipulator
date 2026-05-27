@@ -45,14 +45,30 @@ class Config:
     ENABLE_RERUN = _env_bool("AM_D02_ENABLE_RERUN", True)
     RERUN_LOG_STRIDE = max(1, _env_int("AM_D02_RERUN_LOG_STRIDE", 10))
     FIX_UNCONTROLLED_JOINTS = _env_bool("AM_D02_FIX_UNCONTROLLED_JOINTS", True)
+    ENABLE_BODY_GUI = _env_bool("AM_D02_ENABLE_BODY_GUI", True)
     
     # === 关节配置 (Joints) ===
     ARM_JOINTS = 7
     NUM_ARMS = 2
     NUM_JOINTS = ARM_JOINTS * NUM_ARMS
+    NUM_BODY_JOINTS = 3
     ARM_NAMES = ("left", "right")
     LEFT_ARM = 0
     RIGHT_ARM = 1
+    BODY_JOINT_NAMES = [
+        "Waist01_Joint",
+        "Waist02_Joint",
+        "Body0422_Joint",
+    ]
+    BODY_JOINT_LIMITS_RAD = np.array(
+        [
+            [0.0, 2.09],
+            [-2.09, 0.0],
+            [-1.57, 1.57],
+        ],
+        dtype=np.float64,
+    )
+    BODY_INIT_QPOS = np.zeros(NUM_BODY_JOINTS, dtype=np.float64)
     LEFT_JOINT_NAMES = [
         "ArmL02_Joint",
         "AM-D02-J14_Joint",
@@ -87,6 +103,12 @@ class Config:
     LEFT_TCP_FRAME_QUAT = np.array([0.0, 0.0, 0.0, 1.0])
     RIGHT_TCP_FRAME_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
     TCP_FRAME_QUATS = np.vstack([LEFT_TCP_FRAME_QUAT, RIGHT_TCP_FRAME_QUAT])
+
+    # 目标方块位置坐标系：原点跟随 Body0422_Link 平移，坐标轴保持初始 URDF/base 方向。
+    TARGET_FRAME_BODY_NAME = "Body0422_Link"
+    TARGET_FRAME_MARKER_BODY = "target_frame_body0422"
+    TARGET_FRAME_ORIGIN_BASE_ZERO = np.array([0.0, 0.0715607946769668, 0.213])
+    TARGET_FRAME_QUAT_BASE = np.array([1.0, 0.0, 0.0, 0.0])
     
     # 力矩限制 (N·m)
     LEFT_TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0])

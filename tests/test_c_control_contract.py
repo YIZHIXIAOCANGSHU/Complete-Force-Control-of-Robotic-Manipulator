@@ -73,12 +73,14 @@ def test_c_fk_matches_mujoco_tcp_pose_in_body0422_frame(tmp_path: Path):
         ],
         dtype=np.float64,
     )
+    body_q = np.array([0.2, -0.3, 0.4], dtype=np.float64)
     source = textwrap.dedent(
         """
         #include "control_logic.h"
         #include <stdio.h>
 
         int main(void) {
+          double body_q[3] = {0.2, -0.3, 0.4};
           double q[][7] = {
             {0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0},
             {0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0},
@@ -86,6 +88,7 @@ def test_c_fk_matches_mujoco_tcp_pose_in_body0422_frame(tmp_path: Path):
             {-0.3, 0.1, -0.2, 1.0, 0.15, -0.2, 0.3},
           };
           control_init();
+          control_update_body_gravity(body_q);
           for (int i = 0; i < 4; ++i) {
             for (int arm = 0; arm < 2; ++arm) {
               double pos[3];
@@ -109,6 +112,7 @@ def test_c_fk_matches_mujoco_tcp_pose_in_body0422_frame(tmp_path: Path):
     for index, arm_q in enumerate(arm_samples):
         q = np.tile(arm_q, Config.NUM_ARMS)
         env.reset(q)
+        env.set_body_qpos(body_q)
         env.forward()
         for arm in range(Config.NUM_ARMS):
             row = c_rows[index * Config.NUM_ARMS + arm]
@@ -118,19 +122,30 @@ def test_c_fk_matches_mujoco_tcp_pose_in_body0422_frame(tmp_path: Path):
                 env.base_to_target_frame_pos(env.get_ee_pos(arm)),
                 atol=2e-3,
             )
-            _quat_equiv(row[4:8], env.get_ee_quat(arm), atol=2e-3)
+            _quat_equiv(row[4:8], env.base_to_target_frame_quat(env.get_ee_quat(arm)), atol=2e-3)
 
 
 def test_python_to_c_control_packet_contains_feedback_target_and_dt():
-    from state_packets import CONTROL_INPUT_PACKET_SIZE, fill_control_input_packet
+    from state_packets import (
+        BODY_Q_OFFSET,
+        CONTROL_INPUT_PACKET_SIZE,
+        DT_OFFSET,
+        LEFT_TARGET_POS_OFFSET,
+        LEFT_TARGET_QUAT_OFFSET,
+        QD_OFFSET,
+        RIGHT_TARGET_POS_OFFSET,
+        RIGHT_TARGET_QUAT_OFFSET,
+        fill_control_input_packet,
+    )
 
-    assert CONTROL_INPUT_PACKET_SIZE == 43
+    assert CONTROL_INPUT_PACKET_SIZE == 46
 
     packet = np.empty(CONTROL_INPUT_PACKET_SIZE, dtype=np.float64)
     fill_control_input_packet(
         packet,
         np.arange(14, dtype=np.float64),
         np.arange(20, 34, dtype=np.float64),
+        np.array([0.1, -0.2, 0.3], dtype=np.float64),
         np.array([0.1, 0.2, 0.3], dtype=np.float64),
         np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
         np.array([-0.1, -0.2, -0.3], dtype=np.float64),
@@ -138,13 +153,14 @@ def test_python_to_c_control_packet_contains_feedback_target_and_dt():
         0.01,
     )
 
-    np.testing.assert_allclose(packet[0:14], np.arange(14, dtype=np.float64))
-    np.testing.assert_allclose(packet[14:28], np.arange(20, 34, dtype=np.float64))
-    np.testing.assert_allclose(packet[28:31], [0.1, 0.2, 0.3])
-    np.testing.assert_allclose(packet[31:35], [1.0, 0.0, 0.0, 0.0])
-    np.testing.assert_allclose(packet[35:38], [-0.1, -0.2, -0.3])
-    np.testing.assert_allclose(packet[38:42], [0.0, 1.0, 0.0, 0.0])
-    assert packet[42] == pytest.approx(0.01)
+    np.testing.assert_allclose(packet[0:QD_OFFSET], np.arange(14, dtype=np.float64))
+    np.testing.assert_allclose(packet[QD_OFFSET:BODY_Q_OFFSET], np.arange(20, 34, dtype=np.float64))
+    np.testing.assert_allclose(packet[BODY_Q_OFFSET:LEFT_TARGET_POS_OFFSET], [0.1, -0.2, 0.3])
+    np.testing.assert_allclose(packet[LEFT_TARGET_POS_OFFSET:LEFT_TARGET_QUAT_OFFSET], [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(packet[LEFT_TARGET_QUAT_OFFSET:RIGHT_TARGET_POS_OFFSET], [1.0, 0.0, 0.0, 0.0])
+    np.testing.assert_allclose(packet[RIGHT_TARGET_POS_OFFSET:RIGHT_TARGET_QUAT_OFFSET], [-0.1, -0.2, -0.3])
+    np.testing.assert_allclose(packet[RIGHT_TARGET_QUAT_OFFSET:DT_OFFSET], [0.0, 1.0, 0.0, 0.0])
+    assert packet[DT_OFFSET] == pytest.approx(0.01)
 
 
 def test_mujoco_state_packet_sends_target_pose_not_actual_tcp():
@@ -152,7 +168,16 @@ def test_mujoco_state_packet_sends_target_pose_not_actual_tcp():
 
     from config import Config
     from sim_env import MujocoSimEnv
-    from state_packets import CONTROL_INPUT_PACKET_SIZE
+    from state_packets import (
+        BODY_Q_OFFSET,
+        CONTROL_INPUT_PACKET_SIZE,
+        DT_OFFSET,
+        LEFT_TARGET_POS_OFFSET,
+        LEFT_TARGET_QUAT_OFFSET,
+        QD_OFFSET,
+        RIGHT_TARGET_POS_OFFSET,
+        RIGHT_TARGET_QUAT_OFFSET,
+    )
 
     env = MujocoSimEnv()
     env.reset(Config.HOME_QPOS)
@@ -167,14 +192,15 @@ def test_mujoco_state_packet_sends_target_pose_not_actual_tcp():
     packet = np.empty(CONTROL_INPUT_PACKET_SIZE, dtype=np.float64)
     env.write_state_packet(packet)
 
-    np.testing.assert_allclose(packet[0:14], Config.HOME_QPOS)
-    np.testing.assert_allclose(packet[28:31], target_pos)
-    np.testing.assert_allclose(packet[31:35], target_quat)
-    np.testing.assert_allclose(packet[35:38], right_target_pos)
-    np.testing.assert_allclose(packet[38:42], right_target_quat)
-    assert packet[42] == pytest.approx(Config.DT)
-    assert not np.allclose(packet[28:31], env.get_ee_pos(Config.LEFT_ARM))
-    assert not np.allclose(packet[35:38], env.get_ee_pos(Config.RIGHT_ARM))
+    np.testing.assert_allclose(packet[0:QD_OFFSET], Config.HOME_QPOS)
+    np.testing.assert_allclose(packet[BODY_Q_OFFSET:LEFT_TARGET_POS_OFFSET], env.get_body_qpos())
+    np.testing.assert_allclose(packet[LEFT_TARGET_POS_OFFSET:LEFT_TARGET_QUAT_OFFSET], target_pos)
+    np.testing.assert_allclose(packet[LEFT_TARGET_QUAT_OFFSET:RIGHT_TARGET_POS_OFFSET], target_quat)
+    np.testing.assert_allclose(packet[RIGHT_TARGET_POS_OFFSET:RIGHT_TARGET_QUAT_OFFSET], right_target_pos)
+    np.testing.assert_allclose(packet[RIGHT_TARGET_QUAT_OFFSET:DT_OFFSET], right_target_quat)
+    assert packet[DT_OFFSET] == pytest.approx(Config.DT)
+    assert not np.allclose(packet[LEFT_TARGET_POS_OFFSET:LEFT_TARGET_QUAT_OFFSET], env.get_ee_pos(Config.LEFT_ARM))
+    assert not np.allclose(packet[RIGHT_TARGET_POS_OFFSET:RIGHT_TARGET_QUAT_OFFSET], env.get_ee_pos(Config.RIGHT_ARM))
 
 
 def test_control_step_zero_pose_error_outputs_bias_compensation_only(tmp_path: Path):
@@ -261,6 +287,43 @@ def test_control_step_nonzero_pose_error_adds_cartesian_correction(tmp_path: Pat
     max_extra = float(subprocess.check_output([str(probe)], text=True).strip())
 
     assert max_extra > 0.01
+
+
+def test_c_body_gravity_uses_three_body_joint_angles(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "control_logic.h"
+        #include <stdio.h>
+
+        int main(void) {
+          double zero_q[3] = {0.0, 0.0, 0.0};
+          double body_q[3] = {0.3, -0.4, 0.2};
+          double gravity[3];
+
+          control_init();
+          control_update_body_gravity(zero_q);
+          control_get_body_gravity(gravity);
+          printf("%.12f %.12f %.12f\\n", gravity[0], gravity[1], gravity[2]);
+
+          control_update_body_gravity(body_q);
+          control_get_body_gravity(gravity);
+          printf("%.12f %.12f %.12f\\n", gravity[0], gravity[1], gravity[2]);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source)
+    rows = np.array(
+        [
+            [float(value) for value in line.split()]
+            for line in subprocess.check_output([str(probe)], text=True).splitlines()
+        ],
+        dtype=np.float64,
+    )
+
+    np.testing.assert_allclose(rows[0], [0.0, 0.0, -9.81], atol=1e-9)
+    assert not np.allclose(rows[1], [0.0, 0.0, -9.81])
+    assert np.linalg.norm(rows[1]) == pytest.approx(9.81, abs=1e-9)
 
 
 def test_stm_controller_uses_input_dt_with_control_dt_fallback(tmp_path: Path):

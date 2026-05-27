@@ -71,19 +71,24 @@ ArmR07_Link
 ArmR07Output_Link
 ```
 
-默认情况下，腰部/躯干等非双臂受控关节会在临时 MuJoCo 模型中编译为固定关节，
-让仿真自由度和 C 控制器的 14 轴输出一致，避免未接入控制器的 3 个自由度在动力学中耦合。
-如需恢复完整 17 DOF 模型，可设置 `AM_D02_FIX_UNCONTROLLED_JOINTS=0`，此时腰/躯干 3 DOF
-仍不会参与 C 控制输出。
+默认情况下，仿真保留 `Waist01_Joint`、`Waist02_Joint`、`Body0422_Joint` 三个躯干自由度，
+并在启动 `sim` 时打开一个小 GUI 滑条窗口。滑条会把这 3 个关节锁定到外部命令角度；
+C 控制器仍只输出左右双臂 14 轴力矩。Python 只把三躯干角度发送给 C，重力方向解算在 C 端完成。
+如需关闭滑条并恢复 14 DOF 固定躯干模型，可设置 `AM_D02_ENABLE_BODY_GUI=0`。
 
-仿真 UDP 协议使用 43 个 `double` 输入和 14 个 `double` 输出：
+仿真 UDP 协议使用 46 个 `double` 输入和 14 个 `double` 输出：
 
 ```text
 q[14] + qd[14]
++ body_q[3]
 + left_target_pos[3] + left_target_quat[4]
 + right_target_pos[3] + right_target_quat[4]
 + dt[1]
 ```
+
+其中 `left_target_pos` / `right_target_pos` 使用 Body0422 动态目标坐标系：
+坐标原点跟随当前 `Body0422_Link` 平移，坐标轴方向保持初始 URDF/base 方向。
+MuJoCo 里的目标方块会按该相对坐标随 Body0422 原点一起移动；四元数仍使用这组固定方向坐标轴。
 
 ## 常用环境变量
 
@@ -93,6 +98,7 @@ AM_D02_ENABLE_VIEWER=1
 AM_D02_ENABLE_RERUN=1
 AM_D02_RERUN_LOG_STRIDE=10
 AM_D02_FIX_UNCONTROLLED_JOINTS=1
+AM_D02_ENABLE_BODY_GUI=1
 AM_D02_MC_SAMPLES=50000
 AM_D02_MC_SEED=42
 AM_D02_MC_PROGRESS_INTERVAL=200
@@ -127,8 +133,8 @@ AM_D02_ENABLE_VIEWER=0 AM_D02_ENABLE_RERUN=0 ./run.sh sim
 ```
 
 `sim` 会持续运行，确认 C 控制器连接成功并进入控制循环后，用 `Ctrl+C` 结束。
-如需对比旧的完整双臂自由度行为：
+如需无 GUI 固定躯干运行：
 
 ```bash
-AM_D02_FIX_UNCONTROLLED_JOINTS=0 AM_D02_ENABLE_VIEWER=0 AM_D02_ENABLE_RERUN=0 ./run.sh sim
+AM_D02_ENABLE_BODY_GUI=0 AM_D02_ENABLE_VIEWER=0 AM_D02_ENABLE_RERUN=0 ./run.sh sim
 ```

@@ -34,6 +34,7 @@ int main(void) {
 
   /* 状态变量 */
   double q[NUM_JOINTS], qd[NUM_JOINTS];
+  double body_q[NUM_BODY_JOINTS];
   double target_pos[NUM_ARMS][3], target_quat[NUM_ARMS][4];
   double dt_s;
   
@@ -46,12 +47,13 @@ int main(void) {
    *  主控制循环
    * ================================================================ */
   while (1) {
-    /* -- 3a. 获取 Python 转发的反馈和 base_link 目标 -- */
-    sim_get_control_input(q, qd, target_pos, target_quat, &dt_s);
+    /* -- 3a. 获取 Python 转发的反馈和 Body0422 动态目标坐标 -- */
+    sim_get_control_input(q, qd, body_q, target_pos, target_quat, &dt_s);
 
     /* -- 3b. C 控制器执行完整闭环，Python 不参与控制逻辑 -- */
     memcpy(stm_in.q, q, sizeof(q));
     memcpy(stm_in.qd, qd, sizeof(qd));
+    memcpy(stm_in.body_q, body_q, sizeof(body_q));
     memcpy(stm_in.target_pos, target_pos, sizeof(target_pos));
     memcpy(stm_in.target_quat, target_quat, sizeof(target_quat));
     stm_in.dt_s = dt_s;

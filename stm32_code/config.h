@@ -32,6 +32,7 @@
 #define ARM_JOINTS 7     /* 单臂关节数量 */
 #define NUM_ARMS 2       /* 左右双臂 */
 #define NUM_JOINTS 14    /* 机器人受控关节数量 */
+#define NUM_BODY_JOINTS 3 /* 仿真躯干外部命令关节数量 */
 #define ARM_LEFT 0
 #define ARM_RIGHT 1
 /* Host bridge 仍使用该偏移量做 MuJoCo 坐标转换，保留兼容定义 */
@@ -50,6 +51,13 @@
 #define TCP_RIGHT_OFFSET_X 0.0
 #define TCP_RIGHT_OFFSET_Y -0.07
 #define TCP_RIGHT_OFFSET_Z 0.03
+
+/* Body0422 动态目标坐标系零位原点（相对于 URDF base_link，单位 m）。
+ * C 控制内部的 7 轴模型以该原点为根；目标位置也使用该坐标系。
+ */
+#define TARGET_FRAME_ORIGIN_BASE_X 0.0
+#define TARGET_FRAME_ORIGIN_BASE_Y 0.0715607946769668
+#define TARGET_FRAME_ORIGIN_BASE_Z 0.213
 
 /* ================================================================
  *  笛卡尔空间 PD 增益

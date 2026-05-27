@@ -30,6 +30,10 @@ static const double TORQUE_LIMIT[ARM_JOINTS] = {
     JOINT_TORQUE_LIMIT_4, JOINT_TORQUE_LIMIT_5, JOINT_TORQUE_LIMIT_6,
     JOINT_TORQUE_LIMIT_7};
 
+static double g_body_gravity[3] = {0.0, 0.0, -9.81};
+
+static void control_init_context(int side);
+
 static int normalize_side(int side) {
   return side == ARM_RIGHT ? ARM_RIGHT : ARM_LEFT;
 }
@@ -84,6 +88,54 @@ static void quat_error_to_axis_angle(const double target_quat_wxyz[4],
     e_rot[1] = k * q_err[1];
     e_rot[2] = k * q_err[2];
   }
+}
+
+static void rotz(double angle, double R[9]) {
+  double c = cos(angle);
+  double s = sin(angle);
+  R[0] = c;
+  R[1] = -s;
+  R[2] = 0.0;
+  R[3] = s;
+  R[4] = c;
+  R[5] = 0.0;
+  R[6] = 0.0;
+  R[7] = 0.0;
+  R[8] = 1.0;
+}
+
+static void mat3_mul_inplace(double A[9], const double B[9]) {
+  double C[9];
+  mat3_mul(A, B, C);
+  memcpy(A, C, sizeof(C));
+}
+
+static void control_apply_gravity_to_contexts(const double gravity[3]) {
+  for (int arm = 0; arm < NUM_ARMS; ++arm) {
+    ControlArmContext *ctx = control_get_context(arm);
+    control_init_context(arm);
+    vec3_copy(gravity, ctx->rbdl_model.gravity);
+  }
+}
+
+static void control_compute_body_rotation(const double body_q[NUM_BODY_JOINTS],
+                                          double R_base_to_body[9]) {
+  double R_origin[9];
+  double R_joint[9];
+
+  rpy_to_rotmat(-M_PI / 2.0, 0.0, 0.0, R_base_to_body);
+  rotz(body_q[0], R_joint);
+  mat3_mul_inplace(R_base_to_body, R_joint);
+
+  rpy_to_rotmat(0.0, 0.0, 0.0, R_origin);
+  mat3_mul_inplace(R_base_to_body, R_origin);
+  rotz(body_q[1], R_joint);
+  mat3_mul_inplace(R_base_to_body, R_joint);
+
+  rpy_to_rotmat(0.0, 0.0, 0.0, R_origin);
+  mat3_mul_inplace(R_base_to_body, R_origin);
+  rotz(body_q[2], R_joint);
+  mat3_mul_inplace(R_base_to_body, R_joint);
 }
 
 #if 0
@@ -199,10 +251,41 @@ static void control_init_context(int side) {
 void control_init(void) {
   control_init_context(ARM_LEFT);
   control_init_context(ARM_RIGHT);
+  control_apply_gravity_to_contexts(g_body_gravity);
 }
 
 void control_init_arm(int side) {
   control_init_context(side);
+  vec3_copy(g_body_gravity, control_get_context(side)->rbdl_model.gravity);
+}
+
+void control_update_body_gravity(const double body_q[NUM_BODY_JOINTS]) {
+  static const double gravity_world[3] = {0.0, 0.0, -9.81};
+  static const double zero_body_q[NUM_BODY_JOINTS] = {0.0, 0.0, 0.0};
+  double R_base_to_body_zero[9];
+  double R_base_to_body_current[9];
+  double R_body_zero_to_base[9];
+  double R_zero_to_current[9];
+  double R_current_to_zero[9];
+
+  if (body_q == NULL) {
+    return;
+  }
+
+  control_compute_body_rotation(zero_body_q, R_base_to_body_zero);
+  control_compute_body_rotation(body_q, R_base_to_body_current);
+  mat3_transpose(R_base_to_body_zero, R_body_zero_to_base);
+  mat3_mul(R_base_to_body_current, R_body_zero_to_base, R_zero_to_current);
+  mat3_transpose(R_zero_to_current, R_current_to_zero);
+  mat3_mul_vec3(R_current_to_zero, gravity_world, g_body_gravity);
+  control_apply_gravity_to_contexts(g_body_gravity);
+}
+
+void control_get_body_gravity(double gravity_out[3]) {
+  if (gravity_out == NULL) {
+    return;
+  }
+  vec3_copy(g_body_gravity, gravity_out);
 }
 
 /* 计算重力补偿 */
@@ -380,10 +463,10 @@ void control_get_fk_with_offset(const double q[ARM_JOINTS], double pos[3],
  *
  *
  * 函数输入的内容
- * target_pos: 目标末端位置 (URDF Base 坐标系) 格式为[x,y,z]
- * target_quat: 目标末端姿态 (URDF Base 坐标系) 格式为[w,x,y,z]
- * current_q: 当前关节角度 (URDF Base 坐标系) 格式为[q1,q2,q3,q4,q5,q6,q7]
- * current_qd: 当前关节速度 (URDF Base 坐标系)
+ * target_pos: 目标末端位置 (Body0422 动态目标坐标系) 格式为[x,y,z]
+ * target_quat: 目标末端姿态，坐标轴方向保持初始 URDF/base 方向，格式为[w,x,y,z]
+ * current_q: 当前关节角度 格式为[q1,q2,q3,q4,q5,q6,q7]
+ * current_qd: 当前关节速度
  * 格式为[qd1,qd2,qd3,qd4,qd5,qd6,qd7] cartesian_K: 笛卡尔空间位置/姿态比例增益
  * 格式为[kx,ky,kz,kroll,kpitch,kyaw] cartesian_D: 笛卡尔空间位置/姿态微分增益
  * 格式为[dx,dy,dz,droll,dpitch,dyaw] joint_kp: 关节空间位置比例增益

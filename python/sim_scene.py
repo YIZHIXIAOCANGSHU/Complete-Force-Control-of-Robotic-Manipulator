@@ -87,6 +87,32 @@ def _add_mocap_marker(
     _add_axis_geom(body, axis="z", radius=axis_radius, half_length=axis_half_length, color=f"0 0 1 {axis_alpha_suffix}")
 
 
+def _add_axis_marker_body(
+    worldbody: ET.Element,
+    *,
+    body_name: str,
+    pos: np.ndarray,
+    quat: np.ndarray,
+    axis_radius: float,
+    axis_half_length: float,
+    axis_alpha_suffix: str,
+) -> None:
+    body = ET.SubElement(worldbody, "body")
+    body.set("name", body_name)
+    body.set("pos", f"{pos[0]} {pos[1]} {pos[2]}")
+    body.set("quat", f"{quat[0]} {quat[1]} {quat[2]} {quat[3]}")
+    body.set("mocap", "true")
+
+    inertial = ET.SubElement(body, "inertial")
+    inertial.set("pos", "0 0 0")
+    inertial.set("mass", "1e-6")
+    inertial.set("diaginertia", "1e-9 1e-9 1e-9")
+
+    _add_axis_geom(body, axis="x", radius=axis_radius, half_length=axis_half_length, color=f"1 0 0 {axis_alpha_suffix}")
+    _add_axis_geom(body, axis="y", radius=axis_radius, half_length=axis_half_length, color=f"0 1 0 {axis_alpha_suffix}")
+    _add_axis_geom(body, axis="z", radius=axis_radius, half_length=axis_half_length, color=f"0 0 1 {axis_alpha_suffix}")
+
+
 def _attach_tcp_body(
     worldbody: ET.Element,
     *,
@@ -158,6 +184,9 @@ def _augment_scene(
     root: ET.Element,
     tcp_offsets: np.ndarray,
     tcp_frame_quats: np.ndarray,
+    target_frame_origin_base_zero: np.ndarray,
+    target_frame_quat_base: np.ndarray,
+    target_frame_marker_body: str,
 ) -> None:
     asset = _ensure_child(root, "asset")
 
@@ -253,6 +282,15 @@ def _augment_scene(
         axis_half_length=0.04,
         axis_alpha_suffix="0.5",
     )
+    _add_axis_marker_body(
+        worldbody,
+        body_name=target_frame_marker_body,
+        pos=target_frame_origin_base_zero,
+        quat=target_frame_quat_base,
+        axis_radius=0.003,
+        axis_half_length=0.08,
+        axis_alpha_suffix="0.9",
+    )
     _attach_tcp_body(
         worldbody,
         parent_body_name="ArmL07Output_Link",
@@ -273,6 +311,9 @@ def build_enhanced_model(
     urdf_filename: str,
     tcp_offsets: np.ndarray,
     tcp_frame_quats: np.ndarray,
+    target_frame_origin_base_zero: np.ndarray,
+    target_frame_quat_base: np.ndarray,
+    target_frame_marker_body: str,
     *,
     controlled_joint_names: list[str] | tuple[str, ...] | None = None,
     fix_uncontrolled_joints: bool = False,
@@ -322,7 +363,14 @@ def build_enhanced_model(
         mujoco.mj_saveLastXML(enhanced_path, basic_model)
         tree = ET.parse(enhanced_path)
         root = tree.getroot()
-        _augment_scene(root, tcp_offsets, tcp_frame_quats)
+        _augment_scene(
+            root,
+            tcp_offsets,
+            tcp_frame_quats,
+            target_frame_origin_base_zero,
+            target_frame_quat_base,
+            target_frame_marker_body,
+        )
         tree.write(enhanced_path)
         return mujoco.MjModel.from_xml_path(enhanced_path)
     except Exception as exc:

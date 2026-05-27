@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import sys
 import time
+import threading
 from dataclasses import dataclass, field
 from contextlib import nullcontext
 
@@ -128,6 +129,97 @@ def _create_sim_env():
         raise
 
     return MujocoSimEnv()
+
+
+class BodyJointGui:
+    """Small Tk slider window for commanding the three Body0422 joints."""
+
+    def __init__(self, env) -> None:
+        self._env = env
+        self._root = None
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._pending_body_qpos = env.get_body_qpos()
+        self._dirty = False
+
+    def start(self) -> None:
+        if not Config.ENABLE_BODY_GUI:
+            return
+        if not self._env.has_body_joints():
+            print("[Body GUI] 当前模型未保留躯干关节，跳过 GUI。")
+            return
+        self._thread = threading.Thread(target=self._run, name="body-joint-gui", daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._running = False
+        if self._root is not None:
+            try:
+                self._root.after(0, self._root.destroy)
+            except Exception:
+                pass
+
+    def apply_pending(self) -> bool:
+        with self._lock:
+            if not self._dirty:
+                return False
+            body_qpos = self._pending_body_qpos.copy()
+            self._dirty = False
+        self._env.set_body_qpos(body_qpos)
+        self._env.forward()
+        return True
+
+    def _run(self) -> None:
+        try:
+            import tkinter as tk
+        except Exception as exc:
+            print(f"[Body GUI] tkinter 不可用，跳过躯干滑条: {exc}")
+            return
+
+        self._running = True
+        root = tk.Tk()
+        self._root = root
+        root.title("Body0422 躯干角度")
+        root.geometry("360x210")
+        root.protocol("WM_DELETE_WINDOW", self.close)
+
+        names = ("Waist01", "Waist02", "Body0422")
+        initial = self._env.get_body_qpos()
+        limits_deg = np.rad2deg(Config.BODY_JOINT_LIMITS_RAD)
+
+        for i, name in enumerate(names):
+            frame = tk.Frame(root)
+            frame.pack(fill="x", padx=12, pady=8)
+            label = tk.Label(frame, text=name, width=10, anchor="w")
+            label.pack(side="left")
+            value_label = tk.Label(frame, text=f"{np.rad2deg(initial[i]):.1f} deg", width=10)
+            value_label.pack(side="right")
+
+            def on_change(value: str, joint_index: int = i, output_label=value_label) -> None:
+                angle_rad = np.deg2rad(float(value))
+                with self._lock:
+                    self._pending_body_qpos[joint_index] = angle_rad
+                    self._dirty = True
+                output_label.config(text=f"{float(value):.1f} deg")
+
+            slider = tk.Scale(
+                frame,
+                from_=float(limits_deg[i, 0]),
+                to=float(limits_deg[i, 1]),
+                orient="horizontal",
+                resolution=0.1,
+                showvalue=False,
+                command=on_change,
+            )
+            slider.set(float(np.rad2deg(initial[i])))
+            slider.pack(side="left", fill="x", expand=True)
+
+        try:
+            root.mainloop()
+        finally:
+            self._running = False
+            self._root = None
 
 
 def resolve_sampling_bounds(
@@ -811,7 +903,7 @@ def _show_monte_carlo_workspace_viewer(
         target_pos.append(
             box.center if not box.is_empty else arm_hull.center if not arm_hull.is_empty else arm_stats.mean
         )
-    env.set_all_target_poses(np.asarray(target_pos, dtype=np.float64))
+    env.set_all_target_poses_base(np.asarray(target_pos, dtype=np.float64))
 
     if len(hulls) == 1 and hulls[0].is_empty:
         print("[MC Viewer] 凸包点云退化，回退显示范围盒子。关闭窗口后程序退出。")
@@ -1129,7 +1221,9 @@ def run_udp_server(ready_file: str | None = None) -> None:
 
     env.reset(Config.HOME_QPOS)
     env.forward()
-    env.set_all_target_poses(box_init_pos, box_init_quat)
+    env.set_all_target_poses_base(box_init_pos, box_init_quat)
+    body_gui = BodyJointGui(env)
+    body_gui.start()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_addr = ("0.0.0.0", 9876)
@@ -1155,6 +1249,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
             if viewer and not viewer.is_running():
                 print("[UDP Server] 可视化窗口已关闭，退出。")
                 break
+            body_gui.apply_pending()
 
             try:
                 data, addr = sock.recvfrom(1024)
@@ -1201,6 +1296,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
                 step_count += 1
 
             except socket.timeout:
+                body_gui.apply_pending()
                 if viewer:
                     viewer.sync()
                 continue
@@ -1208,6 +1304,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
     except KeyboardInterrupt:
         print("\n[UDP Server] 用户中断，正在退出...")
     finally:
+        body_gui.close()
         if viewer:
             viewer.close()
         sock.close()

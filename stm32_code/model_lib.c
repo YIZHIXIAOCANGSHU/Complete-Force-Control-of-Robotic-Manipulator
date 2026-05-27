@@ -1,16 +1,17 @@
 #include "model_lib.h"
 
 /* ================================================================
- *  AM-DPBSURDF0422 left arm joint parameters in URDF base_link frame.
+ *  AM-DPBSURDF0422 arm joint parameters in the Body0422 target frame.
  *
- *  The first controlled joint origin includes the fixed zero-position chain
- *  base_link -> Waist01 -> Waist02 -> Body0422 -> ArmL01 -> ArmL02. The
- *  uncontrolled waist joints are locked at zero in the MuJoCo bridge, so the
- *  seven-axis controller can treat this as a fixed base_link transform.
+ *  The target frame origin follows Body0422_Link translation while its axes stay
+ *  aligned with the initial URDF/base axes. Therefore only the fixed base-to-body
+ *  offset is removed from the first controlled joint origin.
  * ================================================================ */
 
 const double AM_D02_JOINT_XYZ[ARM_JOINTS][3] = {
-    {0.0929999999988672, 0.118910794677936, 0.532999999999945},
+    {0.0929999999988672 - TARGET_FRAME_ORIGIN_BASE_X,
+     0.118910794677936 - TARGET_FRAME_ORIGIN_BASE_Y,
+     0.532999999999945 - TARGET_FRAME_ORIGIN_BASE_Z},
     {-0.0327000000002707, 0.0, 0.0850000000089008},
     {-0.0662499999999995, 0.0, -0.0341},
     {-0.0134219999993553, -0.031550000001845, -0.152889999999675},
@@ -82,7 +83,9 @@ const double AM_D02_LINK_INERTIA[ARM_JOINTS][6] = {
 };
 
 const double AM_D02_RIGHT_JOINT_XYZ[ARM_JOINTS][3] = {
-    {0.0930000000002959, -0.118789205321945, 0.532999999999215},
+    {0.0930000000002959 - TARGET_FRAME_ORIGIN_BASE_X,
+     -0.118789205321945 - TARGET_FRAME_ORIGIN_BASE_Y,
+     0.532999999999215 - TARGET_FRAME_ORIGIN_BASE_Z},
     {0.0, 0.0316999999999998, 0.085},
     {-0.0662499999999999, 0.0, -0.0341},
     {-0.0134219999993542, -0.0315500000018437, -0.152889999999675},

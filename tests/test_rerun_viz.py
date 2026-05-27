@@ -113,9 +113,19 @@ def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
         if node.get("kind") == "TimeSeriesView"
     }
 
-    assert names_by_origin["/tracking/pos/X"] == "EE Position X (mm)"
-    assert names_by_origin["/tracking/pos/Y"] == "EE Position Y (mm)"
-    assert names_by_origin["/tracking/pos/Z"] == "EE Position Z (mm)"
+    assert names_by_origin["/arms/left/position"] == "Left Position (mm)"
+    assert names_by_origin["/arms/right/position"] == "Right Position (mm)"
+    assert names_by_origin["/arms/left/torque"] == "Left Torque (N*m)"
+    assert names_by_origin["/arms/right/torque"] == "Right Torque (N*m)"
+    assert "/tracking/pos/X" not in names_by_origin
+    assert "/error/X" not in names_by_origin
+
+    tab_names = {
+        node["name"]
+        for node in _iter_nodes(dummy_rr.blueprint)
+        if node.get("kind") in ("Vertical", "Spatial3DView") and node.get("name")
+    }
+    assert {"3D", "Left Arm", "Right Arm", "Performance"} <= tab_names
 
 
 def test_log_realtime_step_logs_position_tracking_in_mm(monkeypatch):
@@ -125,15 +135,17 @@ def test_log_realtime_step_logs_position_tracking_in_mm(monkeypatch):
 
     rerun_viz.log_realtime_step(
         t=0.1,
-        pos_actual=np.array([0.123, 0.0, -0.001]),
-        pos_desired=np.array([0.100, -0.002, -0.003]),
-        quat_actual=np.array([1.0, 0.0, 0.0, 0.0]),
-        quat_desired=np.array([1.0, 0.0, 0.0, 0.0]),
+        pos_actual=np.array([[0.123, 0.0, -0.001], [0.010, 0.020, 0.030]]),
+        pos_desired=np.array([[0.100, -0.002, -0.003], [0.001, 0.002, 0.003]]),
+        quat_actual=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        quat_desired=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
         tau_total=np.zeros(rerun_viz.Config.NUM_JOINTS),
         cycle_time=1.25,
         step_count=0,
     )
 
-    assert _logged_scalar(dummy_rr, "tracking/pos/X/actual") == 123.0
-    assert _logged_scalar(dummy_rr, "tracking/pos/X/desired") == 100.0
-    assert _logged_scalar(dummy_rr, "error/X") == 23.0
+    assert _logged_scalar(dummy_rr, "arms/left/position/X_actual") == 123.0
+    assert _logged_scalar(dummy_rr, "arms/left/position/X_target") == 100.0
+    assert _logged_scalar(dummy_rr, "arms/left/position_error/X") == 23.0
+    assert _logged_scalar(dummy_rr, "arms/right/position/X_actual") == 10.0
+    assert _logged_scalar(dummy_rr, "arms/right/position/X_target") == 1.0
