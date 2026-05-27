@@ -36,6 +36,8 @@ typedef struct {
 
 void stm_controller_init(void);
 void stm_controller_step(const stm_input_t *in, stm_output_t *out);
+void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
+                                 double elapsed_s);
 void stm_controller_reset(void);
 void stm_controller_set_platform_hooks(const stm_platform_hooks_t *hooks);
 

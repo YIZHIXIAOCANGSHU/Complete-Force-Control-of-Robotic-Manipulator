@@ -429,10 +429,11 @@ def test_c_safety_uses_urdf_right_arm_position_limits_and_per_joint_velocity(tmp
     assert statuses["left_vel_low"] == [-2]
 
 
-def test_stm_controller_uses_fixed_control_dt(tmp_path: Path):
+def test_stm_controller_step_elapsed_uses_supplied_h7_elapsed_time(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "stm_controller.h"
+        #include <math.h>
         #include <stdio.h>
         #include <string.h>
 
@@ -458,9 +459,10 @@ def test_stm_controller_uses_fixed_control_dt(tmp_path: Path):
           stm_controller_init();
           stm_controller_reset();
           fill_input(&in);
-          for (int i = 0; i < 5; ++i) {
-            stm_controller_step(&in, &out);
-          }
+          stm_controller_step_elapsed(&in, &out, 0.0);
+          printf("%.9f %d %.9f\\n", out.traj_t, out.step_count, out.tau[3]);
+          stm_controller_step_elapsed(&in, &out, 0.002);
+          stm_controller_step_elapsed(&in, &out, 0.003);
           printf("%.9f\\n", out.traj_t);
           printf("%d\\n", out.step_count);
           return 0;
@@ -470,11 +472,14 @@ def test_stm_controller_uses_fixed_control_dt(tmp_path: Path):
     probe = _compile_c_probe(tmp_path, source)
     values = [
         float(line)
-        for line in subprocess.check_output([str(probe)], text=True).splitlines()
+        for line in subprocess.check_output([str(probe)], text=True).split()
     ]
 
-    assert values[0] == pytest.approx(5 * 0.001)
-    assert values[1] == pytest.approx(5)
+    assert values[0] == pytest.approx(0.0)
+    assert values[1] == pytest.approx(1)
+    assert np.isfinite(values[2])
+    assert values[3] == pytest.approx(0.005)
+    assert values[4] == pytest.approx(3)
 
 
 def test_stm_input_no_longer_exposes_sim_dt(tmp_path: Path):
@@ -509,29 +514,30 @@ def test_stm_input_no_longer_exposes_sim_dt(tmp_path: Path):
     assert "dt_s" in completed.stderr
 
 
-def test_h7_clock_sim_due_ticks_from_fixed_control_frequency(tmp_path: Path):
+def test_h7_clock_sim_samples_1mhz_elapsed_time_with_clamp(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "h7_clock_sim.h"
+        #include <stdint.h>
         #include <stdio.h>
 
-        static double fake_times_ms[] = {1000.0, 1005.2, 1005.8, 1035.8};
+        static uint64_t fake_times_us[] = {1000000ULL, 1000500ULL, 1002200ULL, 1045000ULL};
         static int fake_index = 0;
 
-        static double fake_now_ms(void *user_ctx) {
+        static uint64_t fake_now_us(void *user_ctx) {
           (void)user_ctx;
-          return fake_times_ms[fake_index++];
+          return fake_times_us[fake_index++];
         }
 
         int main(void) {
           h7_clock_sim_t clock;
-          h7_clock_sim_init(&clock, 0.001);
-          h7_clock_sim_set_now_fn(&clock, fake_now_ms, 0);
-          h7_clock_sim_set_max_catchup(&clock, 0.02);
-          printf("%d\\n", h7_clock_sim_due_ticks(&clock));
-          printf("%d\\n", h7_clock_sim_due_ticks(&clock));
-          printf("%d\\n", h7_clock_sim_due_ticks(&clock));
-          printf("%d\\n", h7_clock_sim_due_ticks(&clock));
+          h7_clock_sim_init(&clock);
+          h7_clock_sim_set_now_fn(&clock, fake_now_us, 0);
+          h7_clock_sim_set_max_elapsed(&clock, 0.02);
+          printf("%llu\\n", (unsigned long long)h7_clock_sim_elapsed_us(&clock));
+          printf("%llu\\n", (unsigned long long)h7_clock_sim_elapsed_us(&clock));
+          printf("%llu\\n", (unsigned long long)h7_clock_sim_elapsed_us(&clock));
+          printf("%llu\\n", (unsigned long long)h7_clock_sim_elapsed_us(&clock));
           return 0;
         }
         """
@@ -546,7 +552,16 @@ def test_h7_clock_sim_due_ticks_from_fixed_control_frequency(tmp_path: Path):
         for line in subprocess.check_output([str(probe)], text=True).splitlines()
     ]
 
-    assert values == [1, 5, 0, 20]
+    assert values == [0, 500, 1700, 20000]
+
+
+def test_c_sim_main_is_one_receive_one_send_without_scheduler_ticks():
+    main_source = (PROJECT_ROOT / "c_interface" / "main.c").read_text(encoding="utf-8")
+
+    assert "wait_for_h7_due_ticks" not in main_source
+    assert "h7_clock_sim_due_ticks" not in main_source
+    assert "stm_step_elapsed" in main_source
+    assert "for (int tick" not in main_source
 
 
 def test_stm_controller_reference_moves_by_configured_speed_without_reset(tmp_path: Path):

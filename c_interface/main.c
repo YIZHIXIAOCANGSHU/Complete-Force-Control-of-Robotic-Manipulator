@@ -11,20 +11,9 @@
 #include "main_stm.h"
 #include "sim_interface.h"
 #include "h7_clock_sim.h"
-#include <math.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <stdlib.h>
-
-static int wait_for_h7_due_ticks(h7_clock_sim_t *h7_clock) {
-  int due_ticks = h7_clock_sim_due_ticks(h7_clock);
-  while (due_ticks == 0) {
-    usleep(100);
-    due_ticks = h7_clock_sim_due_ticks(h7_clock);
-  }
-  return due_ticks;
-}
 
 int main(void) {
   printf("=========================================\n");
@@ -50,9 +39,8 @@ int main(void) {
   stm_input_t stm_in;
   stm_output_t stm_out;
   h7_clock_sim_t h7_clock;
-  double last_tau[NUM_JOINTS] = {0};
 
-  h7_clock_sim_init(&h7_clock, CONTROL_DT);
+  h7_clock_sim_init(&h7_clock);
   memset(&stm_out, 0, sizeof(stm_out));
 
   printf("[INFO] Starting control loop...\n\n");
@@ -71,23 +59,18 @@ int main(void) {
     memcpy(stm_in.target_pos, target_pos, sizeof(target_pos));
     memcpy(stm_in.target_quat, target_quat, sizeof(target_quat));
 
-    /* -- 3c. 按独立 H7 控制时钟补跑控制 tick，只保留最后一次力矩 -- */
-    int due_ticks = wait_for_h7_due_ticks(&h7_clock);
-    for (int tick = 0; tick < due_ticks; ++tick) {
-      stm_step(&stm_in, &stm_out);
-    }
-    if (due_ticks > 0) {
-      memcpy(last_tau, stm_out.tau, sizeof(last_tau));
-    }
+    /* -- 3c. 一收一发：H7 1MHz 时基只决定本轮路径推进量 -- */
+    double elapsed_s = h7_clock_sim_elapsed_s(&h7_clock);
+    stm_step_elapsed(&stm_in, &stm_out, elapsed_s);
 
     /* -- 3d. 安全检查处理 -- */
-    if (due_ticks > 0 && stm_out.status < 0) {
+    if (stm_out.status < 0) {
       printf("[SAFETY] Limit violated! EMERGENCY STOP.\n");
       exit(1);
     }
 
     /* -- 3e. 发送力矩，步进仿真 -- */
-    if (sim_apply_torque(last_tau) < 0) {
+    if (sim_apply_torque(stm_out.tau) < 0) {
       printf("[ERROR] Connection lost or simulation closed.\n");
       break;
     }

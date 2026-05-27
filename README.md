@@ -88,8 +88,10 @@ q[14] + qd[14]
 其中 `left_target_pos` / `right_target_pos` 使用 Body0422 动态目标坐标系：
 坐标原点跟随当前 `Body0422_Link`，坐标轴方向使用 `Body0422_Link` 相对零位的旋转。
 MuJoCo 里的目标方块会按该相对位姿随 Body0422 一起平移和旋转；四元数也使用同一个动态目标坐标系。
-C 端不接收 MuJoCo 仿真步长；host wrapper 使用独立的 H7 控制时钟模拟层按 `CONTROL_DT`
-补跑固定控制 tick，末端参考按 `TRAJ_PLAN_SPEED * CONTROL_DT` 定速推进。
+C 端不接收 MuJoCo 仿真步长；host wrapper 使用独立的 H7 1MHz 微秒时基测量两次
+UDP 控制循环之间的 elapsed time。sim UDP 保持一收一发：每收到一帧 MuJoCo 状态，
+C 端计算一次力矩并立即发送一次 `tau[14]`；末端参考按 `TRAJ_PLAN_SPEED * elapsed_s`
+推进，Python/MuJoCo 的物理步长不参与路径速度计算。
 
 ## 常用环境变量
 

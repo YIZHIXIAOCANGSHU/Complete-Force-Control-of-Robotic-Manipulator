@@ -3,82 +3,74 @@
 #include <math.h>
 #include <time.h>
 
-static double h7_clock_sim_default_now_ms(void *user_ctx) {
+static uint64_t h7_clock_sim_default_now_us(void *user_ctx) {
   struct timespec now;
   (void)user_ctx;
   clock_gettime(CLOCK_MONOTONIC, &now);
-  return (double)now.tv_sec * 1000.0 + (double)now.tv_nsec / 1000000.0;
+  return (uint64_t)now.tv_sec * 1000000ULL + (uint64_t)now.tv_nsec / 1000ULL;
 }
 
-void h7_clock_sim_init(h7_clock_sim_t *clock, double control_dt_s) {
+void h7_clock_sim_init(h7_clock_sim_t *clock) {
   if (clock == 0) {
     return;
   }
-  clock->control_dt_s = control_dt_s > 0.0 ? control_dt_s : 0.001;
-  clock->max_catchup_s = 0.02;
-  clock->last_tick_ms = 0.0;
+  clock->max_elapsed_us = 20000ULL;
+  clock->last_sample_us = 0ULL;
   clock->initialized = 0;
-  clock->now_ms = h7_clock_sim_default_now_ms;
+  clock->now_us = h7_clock_sim_default_now_us;
   clock->user_ctx = 0;
 }
 
-void h7_clock_sim_set_now_fn(h7_clock_sim_t *clock, h7_clock_now_ms_fn now_ms,
+void h7_clock_sim_set_now_fn(h7_clock_sim_t *clock, h7_clock_now_us_fn now_us,
                              void *user_ctx) {
   if (clock == 0) {
     return;
   }
-  clock->now_ms = now_ms != 0 ? now_ms : h7_clock_sim_default_now_ms;
+  clock->now_us = now_us != 0 ? now_us : h7_clock_sim_default_now_us;
   clock->user_ctx = user_ctx;
 }
 
-void h7_clock_sim_set_max_catchup(h7_clock_sim_t *clock, double max_catchup_s) {
-  if (clock == 0 || max_catchup_s <= 0.0 || !isfinite(max_catchup_s)) {
+void h7_clock_sim_set_max_elapsed(h7_clock_sim_t *clock, double max_elapsed_s) {
+  if (clock == 0 || max_elapsed_s <= 0.0 || !isfinite(max_elapsed_s)) {
     return;
   }
-  clock->max_catchup_s = max_catchup_s;
+  clock->max_elapsed_us = (uint64_t)llround(max_elapsed_s * 1000000.0);
+  if (clock->max_elapsed_us < 1ULL) {
+    clock->max_elapsed_us = 1ULL;
+  }
 }
 
-int h7_clock_sim_due_ticks(h7_clock_sim_t *clock) {
-  double now_ms;
-  double elapsed_s;
-  double tick_s;
-  int ticks;
-  int max_ticks;
+uint64_t h7_clock_sim_elapsed_us(h7_clock_sim_t *clock) {
+  uint64_t now_us;
+  uint64_t elapsed_us;
 
-  if (clock == 0 || clock->now_ms == 0) {
-    return 1;
+  if (clock == 0 || clock->now_us == 0) {
+    return 0ULL;
   }
 
-  now_ms = clock->now_ms(clock->user_ctx);
-  if (!isfinite(now_ms)) {
-    return 1;
-  }
+  now_us = clock->now_us(clock->user_ctx);
 
   if (!clock->initialized) {
-    clock->last_tick_ms = now_ms;
+    clock->last_sample_us = now_us;
     clock->initialized = 1;
-    return 1;
+    return 0ULL;
   }
 
-  elapsed_s = (now_ms - clock->last_tick_ms) / 1000.0;
-  tick_s = clock->control_dt_s;
-  if (elapsed_s <= 0.0 || tick_s <= 0.0) {
-    return 0;
+  if (now_us <= clock->last_sample_us) {
+    clock->last_sample_us = now_us;
+    return 0ULL;
   }
 
-  ticks = (int)floor(elapsed_s / tick_s);
-  if (ticks < 1) {
-    return 0;
+  elapsed_us = now_us - clock->last_sample_us;
+  clock->last_sample_us = now_us;
+
+  if (clock->max_elapsed_us > 0ULL && elapsed_us > clock->max_elapsed_us) {
+    elapsed_us = clock->max_elapsed_us;
   }
 
-  max_ticks = (int)ceil(clock->max_catchup_s / tick_s);
-  if (max_ticks < 1) {
-    max_ticks = 1;
-  }
-  if (ticks > max_ticks) {
-    ticks = max_ticks;
-  }
+  return elapsed_us;
+}
 
-  clock->last_tick_ms += (double)ticks * tick_s * 1000.0;
-  return ticks;
+double h7_clock_sim_elapsed_s(h7_clock_sim_t *clock) {
+  return (double)h7_clock_sim_elapsed_us(clock) / 1000000.0;
 }

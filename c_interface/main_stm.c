@@ -35,6 +35,12 @@ void stm_step(const stm_input_t *in, stm_output_t *out) {
   stm_controller_step(in, out);
 }
 
+void stm_step_elapsed(const stm_input_t *in, stm_output_t *out,
+                      double elapsed_s) {
+  ensure_host_hooks();
+  stm_controller_step_elapsed(in, out, elapsed_s);
+}
+
 void stm_reset(void) {
   stm_controller_reset();
 }

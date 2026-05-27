@@ -220,7 +220,8 @@ void stm_controller_init(void) {
   g_controller.initialized = 1;
 }
 
-void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
+void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
+                                 double elapsed_s) {
   double filtered_qd[NUM_JOINTS];
   double target_pos[NUM_ARMS][3];
   double target_quat[NUM_ARMS][4];
@@ -235,6 +236,10 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
 
   if (!g_controller.initialized) {
     stm_controller_init();
+  }
+
+  if (elapsed_s < 0.0 || !isfinite(elapsed_s)) {
+    elapsed_s = 0.0;
   }
 
   stm_controller_prepare_output(out);
@@ -259,7 +264,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
     stm_controller_update_reference_arm(arm, out->ee_pos[arm], out->ee_quat[arm],
-                                        target_pos[arm], target_quat[arm], CONTROL_DT,
+                                        target_pos[arm], target_quat[arm], elapsed_s,
                                         ref_pos[arm], ref_quat[arm]);
   }
 
@@ -272,7 +277,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   }
 
 finalize_step:
-  g_controller.traj_t += CONTROL_DT;
+  g_controller.traj_t += elapsed_s;
   g_controller.step_count++;
   out->traj_t = g_controller.traj_t;
   out->step_count = g_controller.step_count;
@@ -281,4 +286,8 @@ finalize_step:
   if (g_controller.hooks.now_ms != NULL && end_ms >= start_ms) {
     out->calc_time_ms = end_ms - start_ms;
   }
+}
+
+void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
+  stm_controller_step_elapsed(in, out, CONTROL_DT);
 }
