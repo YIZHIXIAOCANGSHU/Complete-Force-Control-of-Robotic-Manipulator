@@ -40,7 +40,7 @@ _JOINT_COLORS = [
     [50, 200, 200],
     [50, 80, 230],
     [150, 50, 230],
-]
+] * 2
 
 _POSITION_DISPLAY_UNIT = "mm"
 _POSITION_DISPLAY_SCALE = 1000.0
@@ -51,6 +51,18 @@ _POSE_NAME_MAP = {
     "伸展位": "extend",
     "随机位": "random",
 }
+
+_ARM_LABELS = ("left", "right")
+_ARM_DISPLAY_NAMES = ("Left", "Right")
+
+
+def _as_arm_array(values: np.ndarray, width: int) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64)
+    if array.shape == (width,):
+        return array.reshape(1, width)
+    if array.shape == (Config.NUM_ARMS, width):
+        return array
+    raise ValueError(f"expected shape ({width},) or ({Config.NUM_ARMS}, {width}), got {array.shape}")
 
 def _safe_pose_name(name: str) -> str:
     """将中文姿态名转为 ASCII 安全名称"""
@@ -260,21 +272,32 @@ def setup_realtime_styles():
     if not RERUN_AVAILABLE: return
     _setup_trajectory_styles()
     
-    # Position tracking
+    # Position / rotation tracking. Legacy paths are kept for single-arm tests.
     for axis in ('X', 'Y', 'Z'):
         rr.log(f"tracking/pos/{axis}",
-               rr.SeriesLines(colors=[[230, 100, 50], [80, 220, 80]], 
-                              names=["Actual", "Desired"], 
-                              widths=[2.0, 1.0]),
-               static=True)
-
-    # Rotation tracking
-    for axis in ('Roll', 'Pitch', 'Yaw'):
-        rr.log(f"tracking/rot/{axis}",
-               rr.SeriesLines(colors=[[50, 150, 230], [80, 220, 80]], 
+               rr.SeriesLines(colors=[[230, 100, 50], [80, 220, 80]],
                               names=["Actual", "Desired"],
                               widths=[2.0, 1.0]),
                static=True)
+        for arm_label, arm_name in zip(_ARM_LABELS, _ARM_DISPLAY_NAMES):
+            rr.log(f"tracking/{arm_label}/pos/{axis}",
+                   rr.SeriesLines(colors=[[230, 100, 50], [80, 220, 80]],
+                                  names=[f"{arm_name} Actual", f"{arm_name} Desired"],
+                                  widths=[2.0, 1.0]),
+                   static=True)
+
+    for axis in ('Roll', 'Pitch', 'Yaw'):
+        rr.log(f"tracking/rot/{axis}",
+               rr.SeriesLines(colors=[[50, 150, 230], [80, 220, 80]],
+                              names=["Actual", "Desired"],
+                              widths=[2.0, 1.0]),
+               static=True)
+        for arm_label, arm_name in zip(_ARM_LABELS, _ARM_DISPLAY_NAMES):
+            rr.log(f"tracking/{arm_label}/rot/{axis}",
+                   rr.SeriesLines(colors=[[50, 150, 230], [80, 220, 80]],
+                                  names=[f"{arm_name} Actual", f"{arm_name} Desired"],
+                                  widths=[2.0, 1.0]),
+                   static=True)
     
     # Error tracking styles
     for axis in ('X', 'Y', 'Z', 'Roll', 'Pitch', 'Yaw'):
@@ -282,6 +305,10 @@ def setup_realtime_styles():
         rr.log(f"error/{axis}", 
                rr.SeriesLines(colors=[color], names=[f"{axis} Error"], widths=[2.0]),
                static=True)
+        for arm_label, arm_name in zip(_ARM_LABELS, _ARM_DISPLAY_NAMES):
+            rr.log(f"error/{arm_label}/{axis}",
+                   rr.SeriesLines(colors=[color], names=[f"{arm_name} {axis} Error"], widths=[2.0]),
+                   static=True)
     
     # 增加初始数据点，确保 Viewer 启动时图表可见
     rr.set_time_seconds("time", 0.0)
@@ -289,10 +316,18 @@ def setup_realtime_styles():
         rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(0.0))
         rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(0.0))
         rr.log(f"error/{axis}", rr.Scalars(0.0))
+        for arm_label in _ARM_LABELS:
+            rr.log(f"tracking/{arm_label}/pos/{axis}/actual", rr.Scalars(0.0))
+            rr.log(f"tracking/{arm_label}/pos/{axis}/desired", rr.Scalars(0.0))
+            rr.log(f"error/{arm_label}/{axis}", rr.Scalars(0.0))
     for axis in ('Roll', 'Pitch', 'Yaw'):
         rr.log(f"tracking/rot/{axis}/actual", rr.Scalars(0.0))
         rr.log(f"tracking/rot/{axis}/desired", rr.Scalars(0.0))
         rr.log(f"error/{axis}", rr.Scalars(0.0))
+        for arm_label in _ARM_LABELS:
+            rr.log(f"tracking/{arm_label}/rot/{axis}/actual", rr.Scalars(0.0))
+            rr.log(f"tracking/{arm_label}/rot/{axis}/desired", rr.Scalars(0.0))
+            rr.log(f"error/{arm_label}/{axis}", rr.Scalars(0.0))
     for i in range(Config.NUM_JOINTS):
         rr.log(f"joint_state/q/J{i+1}", rr.Scalars(0.0))
         rr.log(f"joint_state/qd/J{i+1}", rr.Scalars(0.0))
@@ -311,37 +346,55 @@ def setup_realtime_styles():
     pos_views = []
     for axis in ('X', 'Y', 'Z'):
         pos_views.append(rrb.TimeSeriesView(
-            name=f"EE Position {axis} ({_POSITION_DISPLAY_UNIT})", origin=f"/tracking/pos/{axis}",
+            name=f"EE Position {axis} ({_POSITION_DISPLAY_UNIT})",
+            origin=f"/tracking/pos/{axis}",
         ))
-    
+    for arm_label, arm_name in zip(_ARM_LABELS, _ARM_DISPLAY_NAMES):
+        for axis in ('X', 'Y', 'Z'):
+            pos_views.append(rrb.TimeSeriesView(
+                name=f"{arm_name} EE Position {axis} ({_POSITION_DISPLAY_UNIT})",
+                origin=f"/tracking/{arm_label}/pos/{axis}",
+            ))
+
     rot_views = []
     for axis in ('Roll', 'Pitch', 'Yaw'):
         rot_views.append(rrb.TimeSeriesView(
-            name=f"EE Rotation {axis} (deg)", origin=f"/tracking/rot/{axis}",
+            name=f"EE Rotation {axis} (deg)",
+            origin=f"/tracking/rot/{axis}",
         ))
+    for arm_label, arm_name in zip(_ARM_LABELS, _ARM_DISPLAY_NAMES):
+        for axis in ('Roll', 'Pitch', 'Yaw'):
+            rot_views.append(rrb.TimeSeriesView(
+                name=f"{arm_name} EE Rotation {axis} (deg)",
+                origin=f"/tracking/{arm_label}/rot/{axis}",
+            ))
 
     pos_err_views = []
-    for axis in ('X', 'Y', 'Z'):
-        pos_err_views.append(rrb.TimeSeriesView(
-            name=f"Position Error {axis} (mm)", origin=f"/error/{axis}",
-        ))
-    
+    for arm_label, arm_name in zip(_ARM_LABELS, _ARM_DISPLAY_NAMES):
+        for axis in ('X', 'Y', 'Z'):
+            pos_err_views.append(rrb.TimeSeriesView(
+                name=f"{arm_name} Position Error {axis} (mm)",
+                origin=f"/error/{arm_label}/{axis}",
+            ))
+
     rot_err_views = []
-    for axis in ('Roll', 'Pitch', 'Yaw'):
-        rot_err_views.append(rrb.TimeSeriesView(
-            name=f"Rotation Error {axis} (deg)", origin=f"/error/{axis}",
-        ))
+    for arm_label, arm_name in zip(_ARM_LABELS, _ARM_DISPLAY_NAMES):
+        for axis in ('Roll', 'Pitch', 'Yaw'):
+            rot_err_views.append(rrb.TimeSeriesView(
+                name=f"{arm_name} Rotation Error {axis} (deg)",
+                origin=f"/error/{arm_label}/{axis}",
+            ))
 
     total_torque_views = []
     for i in range(Config.NUM_JOINTS):
-        short = Config.JOINT_NAMES[i].replace('ArmL', '').replace('_Joint', '')
+        short = Config.JOINT_NAMES[i].replace('ArmL', 'L').replace('ArmR', 'R').replace('_Joint', '')
         total_torque_views.append(rrb.TimeSeriesView(
             name=f"J{i+1} ({short}) Total Torque (N*m)", origin=f"/total_torque/J{i+1}",
         ))
 
     torque_gap_views = []
     for i in range(Config.NUM_JOINTS):
-        short = Config.JOINT_NAMES[i].replace('ArmL', '').replace('_Joint', '')
+        short = Config.JOINT_NAMES[i].replace('ArmL', 'L').replace('ArmR', 'R').replace('_Joint', '')
         torque_gap_views.append(rrb.TimeSeriesView(
             name=f"J{i+1} ({short}) Torque Gap (N*m)", origin=f"/torque_gap/J{i+1}",
         ))
@@ -433,6 +486,10 @@ def log_realtime_step(
     if Config.RERUN_LOG_STRIDE > 1 and step_count % Config.RERUN_LOG_STRIDE != 0:
         return
     rr.set_time_seconds("time", t)
+    pos_actual_by_arm = _as_arm_array(pos_actual, 3)
+    pos_desired_by_arm = _as_arm_array(pos_desired, 3)
+    quat_actual_by_arm = _as_arm_array(quat_actual, 4)
+    quat_desired_by_arm = _as_arm_array(quat_desired, 4)
     
     # Joint States
     if q is not None:
@@ -442,26 +499,33 @@ def log_realtime_step(
         for i in range(len(qd)):
             rr.log(f"joint_state/qd/J{i+1}", rr.Scalars(float(qd[i])))
     
-    # Position Tracking & Error
-    pos_actual_display = _position_to_display_units(pos_actual)
-    pos_desired_display = _position_to_display_units(pos_desired)
-    for i, axis in enumerate(('X', 'Y', 'Z')):
-        rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(float(pos_actual_display[i])))
-        rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(float(pos_desired_display[i])))
-        rr.log(f"error/{axis}", rr.Scalars(float(pos_actual_display[i] - pos_desired_display[i])))
-        
-    # Rotation Tracking & Error
-    rot_actual = quat_to_euler(quat_actual)
-    rot_desired = quat_to_euler(quat_desired)
-    rot_err = compute_rotation_error_single(quat_actual, quat_desired)
-    rot_actual_deg = np.rad2deg(rot_actual)
-    rot_desired_deg = np.rad2deg(rot_desired)
+    # Position / rotation tracking. Legacy paths mirror the left arm.
+    for arm, arm_label in enumerate(_ARM_LABELS[: len(pos_actual_by_arm)]):
+        pos_actual_display = _position_to_display_units(pos_actual_by_arm[arm])
+        pos_desired_display = _position_to_display_units(pos_desired_by_arm[arm])
+        for i, axis in enumerate(('X', 'Y', 'Z')):
+            rr.log(f"tracking/{arm_label}/pos/{axis}/actual", rr.Scalars(float(pos_actual_display[i])))
+            rr.log(f"tracking/{arm_label}/pos/{axis}/desired", rr.Scalars(float(pos_desired_display[i])))
+            rr.log(f"error/{arm_label}/{axis}", rr.Scalars(float(pos_actual_display[i] - pos_desired_display[i])))
+            if arm == Config.LEFT_ARM:
+                rr.log(f"tracking/pos/{axis}/actual", rr.Scalars(float(pos_actual_display[i])))
+                rr.log(f"tracking/pos/{axis}/desired", rr.Scalars(float(pos_desired_display[i])))
+                rr.log(f"error/{axis}", rr.Scalars(float(pos_actual_display[i] - pos_desired_display[i])))
 
-    for i, axis in enumerate(('Roll', 'Pitch', 'Yaw')):
-        rr.log(f"tracking/rot/{axis}/actual", rr.Scalars(float(rot_actual_deg[i])))
-        rr.log(f"tracking/rot/{axis}/desired", rr.Scalars(float(rot_desired_deg[i])))
-        # Error in deg
-        rr.log(f"error/{axis}", rr.Scalars(float(rot_err[i])))
+        rot_actual = quat_to_euler(quat_actual_by_arm[arm])
+        rot_desired = quat_to_euler(quat_desired_by_arm[arm])
+        rot_err = compute_rotation_error_single(quat_actual_by_arm[arm], quat_desired_by_arm[arm])
+        rot_actual_deg = np.rad2deg(rot_actual)
+        rot_desired_deg = np.rad2deg(rot_desired)
+
+        for i, axis in enumerate(('Roll', 'Pitch', 'Yaw')):
+            rr.log(f"tracking/{arm_label}/rot/{axis}/actual", rr.Scalars(float(rot_actual_deg[i])))
+            rr.log(f"tracking/{arm_label}/rot/{axis}/desired", rr.Scalars(float(rot_desired_deg[i])))
+            rr.log(f"error/{arm_label}/{axis}", rr.Scalars(float(rot_err[i])))
+            if arm == Config.LEFT_ARM:
+                rr.log(f"tracking/rot/{axis}/actual", rr.Scalars(float(rot_actual_deg[i])))
+                rr.log(f"tracking/rot/{axis}/desired", rr.Scalars(float(rot_desired_deg[i])))
+                rr.log(f"error/{axis}", rr.Scalars(float(rot_err[i])))
         
     # Torques
     for j in range(len(tau_total)):
@@ -488,14 +552,21 @@ def log_realtime_step(
         rr.log("performance/stm32_calc_hz", rr.Scalars(float(stm32_calc_hz)))
     
     # 3D
-    rr.log("trajectory_3d/actual_ee", 
-           rr.Points3D([pos_actual], colors=[[230, 100, 50]], radii=0.015, labels=["Actual"]))
-    rr.log("trajectory_3d/target_goal", 
-           rr.Points3D([pos_desired], colors=[[80, 220, 80]], radii=0.015, labels=["Target"]))
-    
-    # 还可以画一条连线表示偏差
+    actual_colors = [[230, 100, 50], [50, 150, 230]][: len(pos_actual_by_arm)]
+    target_colors = [[80, 220, 80], [230, 220, 80]][: len(pos_desired_by_arm)]
+    labels_actual = [f"{name} Actual" for name in _ARM_DISPLAY_NAMES[: len(pos_actual_by_arm)]]
+    labels_target = [f"{name} Target" for name in _ARM_DISPLAY_NAMES[: len(pos_desired_by_arm)]]
+    rr.log("trajectory_3d/actual_ee",
+           rr.Points3D(pos_actual_by_arm, colors=actual_colors, radii=0.015, labels=labels_actual))
+    rr.log("trajectory_3d/target_goal",
+           rr.Points3D(pos_desired_by_arm, colors=target_colors, radii=0.015, labels=labels_target))
+
+    error_lines = [
+        [pos_actual_by_arm[arm], pos_desired_by_arm[arm]]
+        for arm in range(len(pos_actual_by_arm))
+    ]
     rr.log("trajectory_3d/error_line",
-           rr.LineStrips3D([[pos_actual, pos_desired]], colors=[[255, 0, 0]], radii=0.002))
+           rr.LineStrips3D(error_lines, colors=[[255, 0, 0]], radii=0.002))
 
 
 

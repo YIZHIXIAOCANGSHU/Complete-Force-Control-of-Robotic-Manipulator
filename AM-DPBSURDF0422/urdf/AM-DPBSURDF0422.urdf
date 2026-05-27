@@ -380,7 +380,7 @@
     <child
       link="AM-D02-J14_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
       lower="-2.26"
       upper="0.26"
@@ -438,7 +438,7 @@
     <child
       link="ArmL04_Link" />
     <axis
-      xyz="0 0 1" />
+      xyz="0 0 -1" />
     <limit
       lower="-1.65"
       upper="1.65"
@@ -554,7 +554,7 @@
     <child
       link="ArmL06_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
       lower="-1.57"
       upper="1.57"
@@ -612,7 +612,7 @@
     <child
       link="ArmL07_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
       lower="-0.724"
       upper="1.06"
@@ -664,7 +664,7 @@
     type="revolute">
     <origin
       xyz="0 -0.0204999999999969 -0.0374999999999962"
-      rpy="1.57079632678463 1.5707963267949 0" />
+      rpy="1.57079632678463 4.71238898038469 0" />
     <parent
       link="ArmL07_Link" />
     <child
@@ -781,10 +781,10 @@
     <child
       link="ArmR02_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
-      lower="-2.35"
-      upper="2.35"
+      lower="-2.405"
+      upper="2.2175"
       effort="40"
       velocity="0" />
   </joint>
@@ -839,10 +839,10 @@
     <child
       link="AM-D02R-J03_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
-      lower="-0.26"
-      upper="2.26"
+      lower="-0.6605"
+      upper="2.203"
       effort="40"
       velocity="0" />
   </joint>
@@ -897,10 +897,10 @@
     <child
       link="ArmR04_Link" />
     <axis
-      xyz="0 0 1" />
+      xyz="0 0 -1" />
     <limit
-      lower="-1.65"
-      upper="1.65"
+      lower="-1.763"
+      upper="1.594"
       effort="27"
       velocity="0" />
   </joint>
@@ -957,8 +957,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-2.268"
-      upper="0"
+      lower="-0.0165"
+      upper="2.3235"
       effort="27"
       velocity="0" />
   </joint>
@@ -1013,10 +1013,10 @@
     <child
       link="ArmR06_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
-      lower="-1.57"
-      upper="1.57"
+      lower="-1.5935"
+      upper="1.574"
       effort="9"
       velocity="0" />
   </joint>
@@ -1071,10 +1071,10 @@
     <child
       link="ArmR07_Link" />
     <axis
-      xyz="0 0 -1" />
+      xyz="0 0 1" />
     <limit
-      lower="-0.724"
-      upper="1.06"
+      lower="-0.6015"
+      upper="0.6755"
       effort="9"
       velocity="0" />
   </joint>
@@ -1129,10 +1129,10 @@
     <child
       link="ArmR07Output_Link" />
     <axis
-      xyz="0 0 1" />
+      xyz="0 0 -1" />
     <limit
-      lower="-1.37"
-      upper="1.57"
+      lower="-1.1075"
+      upper="1.068"
       effort="9"
       velocity="0" />
   </joint>

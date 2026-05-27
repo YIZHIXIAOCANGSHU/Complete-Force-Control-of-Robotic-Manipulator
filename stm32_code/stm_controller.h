@@ -11,16 +11,16 @@ typedef struct {
   double q[NUM_JOINTS];
   double qd[NUM_JOINTS];
   /* Target TCP pose in the AM-DPBSURDF0422 URDF base_link frame. */
-  double target_pos[3];
-  double target_quat[4];
+  double target_pos[NUM_ARMS][3];
+  double target_quat[NUM_ARMS][4];
   double dt_s;
 } stm_input_t;
 
 typedef struct {
   double tau[NUM_JOINTS];
   int status;
-  double ee_pos[3];
-  double ee_quat[4];
+  double ee_pos[NUM_ARMS][3];
+  double ee_quat[NUM_ARMS][4];
   double traj_t;
   int step_count;
   double calc_time_ms;

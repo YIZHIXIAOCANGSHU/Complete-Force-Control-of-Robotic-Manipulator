@@ -9,7 +9,7 @@
  *  seven-axis controller can treat this as a fixed base_link transform.
  * ================================================================ */
 
-const double AM_D02_JOINT_XYZ[NUM_JOINTS][3] = {
+const double AM_D02_JOINT_XYZ[ARM_JOINTS][3] = {
     {0.0929999999988672, 0.118910794677936, 0.532999999999945},
     {-0.0327000000002707, 0.0, 0.0850000000089008},
     {-0.0662499999999995, 0.0, -0.0341},
@@ -19,23 +19,23 @@ const double AM_D02_JOINT_XYZ[NUM_JOINTS][3] = {
     {0.0, -0.0204999999999969, -0.0374999999999962},
 };
 
-const double AM_D02_JOINT_RPY[NUM_JOINTS][3] = {
+const double AM_D02_JOINT_RPY[ARM_JOINTS][3] = {
     {-1.57079632679488, 0.0, 0.0},
     {1.5707963267949, 0.0, -1.57079632679492},
     {0.0, 1.5707963267949, 0.0},
     {1.57079632678464, 0.0, 0.0},
     {1.57079632680516, 0.0, 0.0},
-    {0.0, 1.5707963267949, -3.14159265358979},
-    {0.0, 1.5707963267949, -1.57079632678463},
+    {3.14159265358979, 1.5707963267949, 0.0},
+    {1.57079632678463, 4.71238898038469, 0.0},
 };
 
-const double AM_D02_JOINT_AXIS[NUM_JOINTS][3] = {
-    {0.0, 0.0, 1.0},
-    {0.0, 0.0, -1.0},
+const double AM_D02_JOINT_AXIS[ARM_JOINTS][3] = {
     {0.0, 0.0, 1.0},
     {0.0, 0.0, 1.0},
     {0.0, 0.0, -1.0},
-    {0.0, 0.0, -1.0},
+    {0.0, 0.0, 1.0},
+    {0.0, 0.0, 1.0},
+    {0.0, 0.0, 1.0},
     {0.0, 0.0, 1.0},
 };
 
@@ -44,7 +44,7 @@ const double AM_D02_JOINT_AXIS[NUM_JOINTS][3] = {
  * 质心处的惯性张量 inertia)
  * ================================================================ */
 
-const double AM_D02_LINK_MASS[NUM_JOINTS] = {
+const double AM_D02_LINK_MASS[ARM_JOINTS] = {
     1.10121056177596,
     0.0804363204257602,
     1.11910465523096,
@@ -54,7 +54,7 @@ const double AM_D02_LINK_MASS[NUM_JOINTS] = {
     0.130071892527266,
 };
 
-const double AM_D02_LINK_COM[NUM_JOINTS][3] = {
+const double AM_D02_LINK_COM[ARM_JOINTS][3] = {
     {-0.00363424298638049, -1.4989360965556e-5, 0.0792167162541999},
     {-0.0431268231548414, 2.96588229661832e-6, -0.0168134725731695},
     {-0.00707133098173909, -0.000308889013178298, -0.0836892498679569},
@@ -64,7 +64,7 @@ const double AM_D02_LINK_COM[NUM_JOINTS][3] = {
     {7.71715413794283e-10, 0.0531454017557083, -0.0151797843192585},
 };
 
-const double AM_D02_LINK_INERTIA[NUM_JOINTS][6] = {
+const double AM_D02_LINK_INERTIA[ARM_JOINTS][6] = {
     {0.00142291410214384, 1.16752044186124e-8, -2.9481963350764e-5,
      0.000978403574312566, -4.73856860837856e-8, 0.000822778920073085},
     {3.4398827369876e-5, 3.21111842229668e-9, 2.02483617660832e-5,
@@ -79,6 +79,73 @@ const double AM_D02_LINK_INERTIA[NUM_JOINTS][6] = {
      0.000143260006631464, 7.31091061454864e-7, 0.000122726336605248},
     {5.94030554789123e-5, -5.01007319996629e-13, 3.38312867112602e-12,
      6.25184504536976e-5, 1.8740342666896e-6, 5.85465949820439e-5},
+};
+
+const double AM_D02_RIGHT_JOINT_XYZ[ARM_JOINTS][3] = {
+    {0.0930000000002959, -0.118789205321945, 0.532999999999215},
+    {0.0, 0.0316999999999998, 0.085},
+    {-0.0662499999999999, 0.0, -0.0341},
+    {-0.0134219999993542, -0.0315500000018437, -0.152889999999675},
+    {-0.09413, 0.0084105, -0.0335},
+    {-0.0382, 0.0, 0.138},
+    {0.0, 0.0195, -0.0381},
+};
+
+const double AM_D02_RIGHT_JOINT_RPY[ARM_JOINTS][3] = {
+    {0.0, -1.5707963267949, 1.57079632677436},
+    {-1.5707963267949, 0.0, 0.0},
+    {0.0, 1.5707963267949, 0.0},
+    {1.57079632677436, -1.5707963267949, 0.0},
+    {1.5708, 0.0, -1.5708},
+    {3.1416, 1.5708, 0.0},
+    {1.5708, 1.5708, 0.0},
+};
+
+const double AM_D02_RIGHT_JOINT_AXIS[ARM_JOINTS][3] = {
+    {0.0, 0.0, 1.0},
+    {0.0, 0.0, 1.0},
+    {0.0, 0.0, -1.0},
+    {0.0, 0.0, 1.0},
+    {0.0, 0.0, 1.0},
+    {0.0, 0.0, 1.0},
+    {0.0, 0.0, -1.0},
+};
+
+const double AM_D02_RIGHT_LINK_MASS[ARM_JOINTS] = {
+    1.11959402339938,
+    0.08043632042576,
+    1.0441,
+    0.481598757392941,
+    0.685972229333382,
+    0.352995085283625,
+    0.13007,
+};
+
+const double AM_D02_RIGHT_LINK_COM[ARM_JOINTS][3] = {
+    {-3.3044189595044e-5, 0.00408487721681111, 0.0783288220237686},
+    {-0.0431268231548383, 2.96588229739547e-6, -0.0168134725731695},
+    {-0.0068612, -0.00034369, -0.084609},
+    {-0.0619910438798228, 0.00774804052867251, -0.0327984712284014},
+    {0.00197697489052784, -0.000298666132234893, 0.0703999320776307},
+    {-2.10614983735535e-5, 0.000564096194038965, -0.0377010618202429},
+    {7.7173e-10, -0.053145, 0.01418},
+};
+
+const double AM_D02_RIGHT_LINK_INERTIA[ARM_JOINTS][6] = {
+    {0.00097924759510934, 9.72936642317599e-9, -3.53689810254816e-8,
+     0.00142389076858966, 2.93367271441357e-5, 0.000823271013985036},
+    {3.43988273698759e-5, 3.21111842180082e-9, 2.02483617660831e-5,
+     6.69008329565981e-5, 4.01110111563779e-9, 5.07555817335578e-5},
+    {0.0010401, 5.5458e-6, 0.0001008,
+     0.0011255, -3.5249e-9, 0.00036818},
+    {0.000170910015144692, -1.99340979707043e-5, 2.33536976739172e-6,
+     0.000384644043389551, 5.20518101014162e-6, 0.000407819449326737},
+    {0.000375896683686663, -4.40756793415572e-7, 1.65651918635699e-5,
+     0.00033082134283551, 1.72352869147883e-6, 0.000173399938125278},
+    {0.000124621924206036, -6.00512473262361e-10, 1.43561990453202e-8,
+     0.000143260006631464, 8.85533378580568e-7, 0.000122726336605248},
+    {5.9403e-5, 5.0101e-13, -3.3831e-12,
+     6.2518e-5, 1.874e-6, 5.8547e-5},
 };
 
 /* ================================================================
@@ -98,32 +165,44 @@ static void body_precompute(Body *b) {
   b->inertia[5] += m * (cx * cx + cy * cy); /* Izz */
 }
 
-void build_am_d02_model(RBDLModel *model) {
+void build_am_d02_arm_model(int side, RBDLModel *model) {
+  const double(*joint_xyz)[3] =
+      side == ARM_RIGHT ? AM_D02_RIGHT_JOINT_XYZ : AM_D02_JOINT_XYZ;
+  const double(*joint_rpy)[3] =
+      side == ARM_RIGHT ? AM_D02_RIGHT_JOINT_RPY : AM_D02_JOINT_RPY;
+  const double(*joint_axis)[3] =
+      side == ARM_RIGHT ? AM_D02_RIGHT_JOINT_AXIS : AM_D02_JOINT_AXIS;
+  const double *link_mass =
+      side == ARM_RIGHT ? AM_D02_RIGHT_LINK_MASS : AM_D02_LINK_MASS;
+  const double(*link_com)[3] =
+      side == ARM_RIGHT ? AM_D02_RIGHT_LINK_COM : AM_D02_LINK_COM;
+  const double(*link_inertia)[6] =
+      side == ARM_RIGHT ? AM_D02_RIGHT_LINK_INERTIA : AM_D02_LINK_INERTIA;
+
   memset(model, 0, sizeof(RBDLModel));
-  model->num_bodies = 7;
+  model->num_bodies = ARM_JOINTS;
   model->gravity[0] = 0.0;
   model->gravity[1] = 0.0;
   model->gravity[2] = -9.81;
 
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < ARM_JOINTS; i++) {
     Body *b = &model->bodies[i];
     b->id = i;
     b->parent = i - 1;
-    b->mass = AM_D02_LINK_MASS[i];
-    b->mhc[0] = b->mass * AM_D02_LINK_COM[i][0];
-    b->mhc[1] = b->mass * AM_D02_LINK_COM[i][1];
-    b->mhc[2] = b->mass * AM_D02_LINK_COM[i][2];
-    memcpy(b->inertia, AM_D02_LINK_INERTIA[i], 6 * sizeof(double));
+    b->mass = link_mass[i];
+    b->mhc[0] = b->mass * link_com[i][0];
+    b->mhc[1] = b->mass * link_com[i][1];
+    b->mhc[2] = b->mass * link_com[i][2];
+    memcpy(b->inertia, link_inertia[i], 6 * sizeof(double));
 
     body_precompute(b);
 
     /* 连杆参考系变换：计算从父节点到当前关节坐标系的旋转变换 (当 q=0 时) */
     double R[9];
-    rpy_to_rotmat(AM_D02_JOINT_RPY[i][0], AM_D02_JOINT_RPY[i][1],
-                  AM_D02_JOINT_RPY[i][2], R);
+    rpy_to_rotmat(joint_rpy[i][0], joint_rpy[i][1], joint_rpy[i][2], R);
     mat3_transpose(R, b->E_p);
-    vec3_copy(AM_D02_JOINT_XYZ[i], b->r_p);
-    vec3_copy(AM_D02_JOINT_AXIS[i], b->axis);
+    vec3_copy(joint_xyz[i], b->r_p);
+    vec3_copy(joint_axis[i], b->axis);
 
     /* 旋转关节的运动子空间 S = [axis; 0, 0, 0] */
     b->S[0] = b->axis[0];
@@ -133,4 +212,8 @@ void build_am_d02_model(RBDLModel *model) {
     b->S[4] = 0.0;
     b->S[5] = 0.0;
   }
+}
+
+void build_am_d02_model(RBDLModel *model) {
+  build_am_d02_arm_model(ARM_LEFT, model);
 }

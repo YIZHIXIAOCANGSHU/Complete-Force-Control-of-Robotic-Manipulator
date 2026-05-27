@@ -647,44 +647,178 @@ def _draw_workspace_hull(
             break
 
 
+def _draw_workspace_hull_layer(
+    scene,
+    hull: WorkspaceHull,
+    points: np.ndarray,
+    internal_box: InternalWorkspaceBox | None,
+    *,
+    face_rgba: np.ndarray,
+    edge_rgba: np.ndarray,
+    vertex_rgba: np.ndarray,
+    point_rgba: np.ndarray,
+    box_rgba: np.ndarray,
+) -> None:
+    import mujoco
+
+    if internal_box is not None and not internal_box.is_empty:
+        _add_viewer_geom(
+            scene,
+            mujoco.mjtGeom.mjGEOM_BOX,
+            size=internal_box.half_size,
+            pos=internal_box.center,
+            rgba=box_rgba,
+        )
+        for start, end in _workspace_box_edges(internal_box.center, internal_box.half_size):
+            if not _add_viewer_connector(
+                scene,
+                mujoco.mjtGeom.mjGEOM_LINE,
+                width=4.0,
+                start=start,
+                end=end,
+                rgba=edge_rgba,
+            ):
+                break
+
+    if hull.is_empty:
+        point_radius = 0.003
+        for point in points:
+            if not _add_viewer_geom(
+                scene,
+                mujoco.mjtGeom.mjGEOM_SPHERE,
+                size=np.array([point_radius, 0.0, 0.0], dtype=np.float64),
+                pos=point,
+                rgba=point_rgba,
+            ):
+                break
+        return
+
+    for a, b, c in hull.triangles:
+        if not _add_viewer_triangle(scene, hull.vertices[a], hull.vertices[b], hull.vertices[c], face_rgba):
+            break
+
+    for start_index, end_index in hull.edges:
+        if not _add_viewer_connector(
+            scene,
+            mujoco.mjtGeom.mjGEOM_LINE,
+            width=3.0,
+            start=hull.vertices[start_index],
+            end=hull.vertices[end_index],
+            rgba=edge_rgba,
+        ):
+            break
+
+    hull_span = np.ptp(hull.vertices, axis=0)
+    point_radius = max(float(np.max(hull_span)) * 0.006, 0.002)
+    vertex_radius = point_radius * 1.4
+    for vertex in hull.vertices:
+        if not _add_viewer_geom(
+            scene,
+            mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([vertex_radius, 0.0, 0.0], dtype=np.float64),
+            pos=vertex,
+            rgba=vertex_rgba,
+        ):
+            break
+
+    for point in points:
+        if not _add_viewer_geom(
+            scene,
+            mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([point_radius, 0.0, 0.0], dtype=np.float64),
+            pos=point,
+            rgba=point_rgba,
+        ):
+            break
+
+
+def _draw_dual_workspace_hulls(
+    scene,
+    hulls: list[WorkspaceHull],
+    points_by_arm: list[np.ndarray],
+    internal_boxes: list[InternalWorkspaceBox],
+) -> None:
+    scene.ngeom = 0
+    palettes = [
+        {
+            "face_rgba": np.array([0.0, 0.52, 1.0, 0.20], dtype=np.float32),
+            "edge_rgba": np.array([0.0, 0.24, 0.95, 0.95], dtype=np.float32),
+            "vertex_rgba": np.array([0.0, 0.68, 1.0, 0.85], dtype=np.float32),
+            "point_rgba": np.array([1.0, 0.72, 0.1, 0.78], dtype=np.float32),
+            "box_rgba": np.array([0.1, 0.85, 0.35, 0.22], dtype=np.float32),
+        },
+        {
+            "face_rgba": np.array([1.0, 0.28, 0.20, 0.18], dtype=np.float32),
+            "edge_rgba": np.array([0.95, 0.12, 0.08, 0.92], dtype=np.float32),
+            "vertex_rgba": np.array([1.0, 0.35, 0.18, 0.82], dtype=np.float32),
+            "point_rgba": np.array([0.2, 1.0, 0.72, 0.72], dtype=np.float32),
+            "box_rgba": np.array([0.95, 0.45, 0.1, 0.20], dtype=np.float32),
+        },
+    ]
+    for arm, hull in enumerate(hulls):
+        _draw_workspace_hull_layer(
+            scene,
+            hull,
+            points_by_arm[arm],
+            internal_boxes[arm],
+            **palettes[arm % len(palettes)],
+        )
+
+
 def _show_monte_carlo_workspace_viewer(
     env,
     *,
-    points: np.ndarray,
-    pos_stats: RangeSnapshot,
+    points: np.ndarray | list[np.ndarray],
+    pos_stats: RangeSnapshot | list[RangeSnapshot],
     last_qpos: np.ndarray,
-    hull: WorkspaceHull | None = None,
-    internal_box: InternalWorkspaceBox | None = None,
+    hull: WorkspaceHull | list[WorkspaceHull] | None = None,
+    internal_box: InternalWorkspaceBox | list[InternalWorkspaceBox] | None = None,
     max_visual_points: int = DEFAULT_MC_MAX_VIS_POINTS,
     max_hull_points: int = DEFAULT_MC_MAX_HULL_POINTS,
 ) -> None:
     if not VIEWER_AVAILABLE:
         print("[MC Viewer] MuJoCo viewer 不可用，跳过窗口显示。")
         return
-    if len(points) == 0:
+    points_by_arm = points if isinstance(points, list) else [points]
+    pos_stats_by_arm = pos_stats if isinstance(pos_stats, list) else [pos_stats]
+    if len(points_by_arm) == 0 or any(len(arm_points) == 0 for arm_points in points_by_arm):
         print("[MC Viewer] 没有采样点，跳过窗口显示。")
         return
 
-    visual_points = select_visualization_points(points, max_visual_points)
+    visual_points_by_arm = [
+        select_visualization_points(arm_points, max_visual_points)
+        for arm_points in points_by_arm
+    ]
     if hull is None:
-        hull_points = select_visualization_points(points, max_hull_points)
-        hull = compute_workspace_hull(hull_points)
+        hulls = [
+            compute_workspace_hull(select_visualization_points(arm_points, max_hull_points))
+            for arm_points in points_by_arm
+        ]
+    else:
+        hulls = hull if isinstance(hull, list) else [hull]
     if internal_box is None:
-        internal_box = compute_largest_internal_workspace_box(hull)
+        internal_boxes = [compute_largest_internal_workspace_box(arm_hull) for arm_hull in hulls]
+    else:
+        internal_boxes = internal_box if isinstance(internal_box, list) else [internal_box]
 
     env.set_qpos(last_qpos)
     env.set_qvel(np.zeros_like(last_qpos))
     env.forward()
-    target_pos = internal_box.center if not internal_box.is_empty else hull.center if not hull.is_empty else pos_stats.mean
-    env.set_target_pose(target_pos)
+    target_pos = []
+    for arm, box in enumerate(internal_boxes):
+        arm_hull = hulls[arm]
+        arm_stats = pos_stats_by_arm[arm]
+        target_pos.append(
+            box.center if not box.is_empty else arm_hull.center if not arm_hull.is_empty else arm_stats.mean
+        )
+    env.set_all_target_poses(np.asarray(target_pos, dtype=np.float64))
 
-    if hull.is_empty:
+    if len(hulls) == 1 and hulls[0].is_empty:
         print("[MC Viewer] 凸包点云退化，回退显示范围盒子。关闭窗口后程序退出。")
     else:
         print(
-            "[MC Viewer] 打开 MuJoCo 窗口：蓝色透明多面体为末端可达空间凸包，"
-            f"绿色透明长方体为内部最大可输入 pos 范围，面数={len(hull.triangles)}, "
-            f"顶点={len(hull.vertices)}, 黄色点为采样末端位置。关闭窗口后程序退出。"
+            "[MC Viewer] 打开 MuJoCo 窗口：蓝色为左臂工作空间，橙色为右臂工作空间，"
+            "透明长方体为各自内部最大可输入 pos 范围。关闭窗口后程序退出。"
         )
     sys.stdout.flush()
     with launch_passive_viewer(env.model, env.data) as viewer:
@@ -692,7 +826,20 @@ def _show_monte_carlo_workspace_viewer(
             lock = viewer.lock() if hasattr(viewer, "lock") else nullcontext()
             with lock:
                 if hasattr(viewer, "user_scn"):
-                    _draw_workspace_hull(viewer.user_scn, hull, visual_points, internal_box)
+                    if len(hulls) == 1:
+                        _draw_workspace_hull(
+                            viewer.user_scn,
+                            hulls[0],
+                            visual_points_by_arm[0],
+                            internal_boxes[0],
+                        )
+                    else:
+                        _draw_dual_workspace_hulls(
+                            viewer.user_scn,
+                            hulls,
+                            visual_points_by_arm,
+                            internal_boxes,
+                        )
             viewer.sync()
             time.sleep(1.0 / 30.0)
 
@@ -788,6 +935,61 @@ def _format_monte_carlo_report(
     )
 
 
+def _format_dual_monte_carlo_report(
+    *,
+    samples: int,
+    seed: int | None,
+    joint_lower: np.ndarray,
+    joint_upper: np.ndarray,
+    pos_stats: list[RangeSnapshot],
+    quat_stats: list[RangeSnapshot],
+    quat_norm_stats: list[RangeSnapshot],
+    internal_boxes: list[InternalWorkspaceBox],
+    hull_point_count: int,
+    last_qpos: np.ndarray,
+) -> str:
+    seed_text = "随机" if seed is None else str(seed)
+    lines = [
+        "",
+        "=" * 72,
+        "AM-DPBSURDF0422 双臂蒙特卡洛末端位姿范围检查",
+        "=" * 72,
+        f"采样数量：{samples}",
+        f"随机种子：{seed_text}",
+        f"关节下限(rad)：{_format_vector(joint_lower)}",
+        f"关节上限(rad)：{_format_vector(joint_upper)}",
+    ]
+    for arm, label in enumerate(("左臂", "右臂")):
+        lines.extend(
+            [
+                "",
+                f"{label}末端位置范围：",
+                _format_range_block(["x", "y", "z"], pos_stats[arm], "m"),
+                "",
+                f"{label}" + _format_internal_workspace_box(internal_boxes[arm], hull_point_count),
+                "",
+                f"{label}末端四元数范围 [w, x, y, z]：",
+                _format_range_block(["w", "x", "y", "z"], quat_stats[arm]),
+                "",
+                f"{label}四元数范数范围：",
+                _format_range_block(["|q|"], quat_norm_stats[arm]),
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "最后刷新样本：",
+            f"关节角 qpos(rad)：{_format_vector(last_qpos)}",
+            f"左臂末端位置 ee_pos(m)：{_format_vector(pos_stats[Config.LEFT_ARM].last)}",
+            f"右臂末端位置 ee_pos(m)：{_format_vector(pos_stats[Config.RIGHT_ARM].last)}",
+            f"左臂末端四元数 ee_quat(wxyz)：{_format_vector(quat_stats[Config.LEFT_ARM].last)}",
+            f"右臂末端四元数 ee_quat(wxyz)：{_format_vector(quat_stats[Config.RIGHT_ARM].last)}",
+            "=" * 72,
+        ]
+    )
+    return "\n".join(lines)
+
+
 def run_monte_carlo_range_check(
     *,
     samples: int = DEFAULT_MC_SAMPLES,
@@ -822,14 +1024,14 @@ def run_monte_carlo_range_check(
     )
 
     rng = np.random.default_rng(seed)
-    pos_stats = RangeAccumulator(3)
-    quat_stats = RangeAccumulator(4)
-    quat_norm_stats = RangeAccumulator(1)
+    pos_stats = [RangeAccumulator(3) for _ in range(Config.NUM_ARMS)]
+    quat_stats = [RangeAccumulator(4) for _ in range(Config.NUM_ARMS)]
+    quat_norm_stats = [RangeAccumulator(1) for _ in range(Config.NUM_ARMS)]
     last_qpos = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-    ee_points: list[np.ndarray] = []
+    ee_points: list[list[np.ndarray]] = [[] for _ in range(Config.NUM_ARMS)]
 
     print(f"[MC] 采样数量={samples}, 随机种子={'随机' if seed is None else seed}")
-    print("[MC] 使用原 sim 的 MujocoSimEnv 做 FK 采样，按 Ctrl+C 可提前输出已采样范围。")
+    print("[MC] 使用原 sim 的 MujocoSimEnv 做双臂 FK 采样，按 Ctrl+C 可提前输出已采样范围。")
 
     try:
         for index in range(samples):
@@ -838,20 +1040,21 @@ def run_monte_carlo_range_check(
             env.set_qvel(np.zeros_like(last_qpos))
             env.forward()
 
-            pos = env.get_ee_pos()
-            quat = env.get_ee_quat()
-            pos_stats.update(pos)
-            quat_stats.update(quat)
-            quat_norm_stats.update(np.array([np.linalg.norm(quat)], dtype=np.float64))
-            ee_points.append(pos)
+            pos = env.get_all_ee_pos()
+            quat = env.get_all_ee_quat()
+            for arm in range(Config.NUM_ARMS):
+                pos_stats[arm].update(pos[arm])
+                quat_stats[arm].update(quat[arm])
+                quat_norm_stats[arm].update(np.array([np.linalg.norm(quat[arm])], dtype=np.float64))
+                ee_points[arm].append(pos[arm])
 
             current = index + 1
             if progress_interval and (current % progress_interval == 0 or current == samples):
                 sys.stdout.write(
                     "\r"
                     f"[MC] {current:>{len(str(samples))}}/{samples} "
-                    f"末端位置={_format_vector(pos, precision=4)} "
-                    f"末端四元数={_format_vector(quat, precision=4)}"
+                    f"左臂={_format_vector(pos[Config.LEFT_ARM], precision=4)} "
+                    f"右臂={_format_vector(pos[Config.RIGHT_ARM], precision=4)}"
                 )
                 sys.stdout.flush()
         if progress_interval:
@@ -861,26 +1064,29 @@ def run_monte_carlo_range_check(
             sys.stdout.write("\n")
         print("[MC] 用户中断，输出已经采集到的范围。")
 
-    if pos_stats.count == 0:
+    if pos_stats[Config.LEFT_ARM].count == 0:
         print("[MC] 没有采到样本，结束。")
         return
 
-    points_array = np.asarray(ee_points, dtype=np.float64)
-    hull_points = select_visualization_points(points_array, max_hull_points)
-    workspace_hull = compute_workspace_hull(hull_points)
-    internal_box = compute_largest_internal_workspace_box(workspace_hull)
+    points_array = [np.asarray(points, dtype=np.float64) for points in ee_points]
+    hull_points = [select_visualization_points(points, max_hull_points) for points in points_array]
+    workspace_hulls = [compute_workspace_hull(points) for points in hull_points]
+    internal_boxes = [compute_largest_internal_workspace_box(hull) for hull in workspace_hulls]
+    pos_snapshots = [stats.snapshot() for stats in pos_stats]
+    quat_snapshots = [stats.snapshot() for stats in quat_stats]
+    quat_norm_snapshots = [stats.snapshot() for stats in quat_norm_stats]
 
     print(
-        _format_monte_carlo_report(
-            samples=pos_stats.snapshot().count,
+        _format_dual_monte_carlo_report(
+            samples=pos_snapshots[Config.LEFT_ARM].count,
             seed=seed,
             joint_lower=joint_lower,
             joint_upper=joint_upper,
-            pos_stats=pos_stats.snapshot(),
-            quat_stats=quat_stats.snapshot(),
-            quat_norm_stats=quat_norm_stats.snapshot(),
-            internal_box=internal_box,
-            hull_point_count=len(hull_points),
+            pos_stats=pos_snapshots,
+            quat_stats=quat_snapshots,
+            quat_norm_stats=quat_norm_snapshots,
+            internal_boxes=internal_boxes,
+            hull_point_count=len(hull_points[Config.LEFT_ARM]),
             last_qpos=last_qpos,
         )
     )
@@ -889,10 +1095,10 @@ def run_monte_carlo_range_check(
         _show_monte_carlo_workspace_viewer(
             env,
             points=points_array,
-            pos_stats=pos_stats.snapshot(),
+            pos_stats=pos_snapshots,
             last_qpos=last_qpos,
-            hull=workspace_hull,
-            internal_box=internal_box,
+            hull=workspace_hulls,
+            internal_box=internal_boxes,
             max_visual_points=max_visual_points,
             max_hull_points=max_hull_points,
         )
@@ -913,13 +1119,17 @@ def run_udp_server(ready_file: str | None = None) -> None:
 
     env.reset(Config.INIT_QPOS)
     env.forward()
-    box_init_pos = env.get_ee_pos().copy()
-    box_init_quat = env.get_ee_quat().copy()
-    print(f"[Server] INIT_QPOS 正向运动学 => 初始目标位置: {box_init_pos}")
+    box_init_pos = env.get_all_ee_pos().copy()
+    box_init_quat = env.get_all_ee_quat().copy()
+    print(
+        "[Server] INIT_QPOS 正向运动学 => "
+        f"左臂初始目标位置: {box_init_pos[Config.LEFT_ARM]}, "
+        f"右臂初始目标位置: {box_init_pos[Config.RIGHT_ARM]}"
+    )
 
     env.reset(Config.HOME_QPOS)
     env.forward()
-    env.set_target_pose(box_init_pos, box_init_quat)
+    env.set_all_target_poses(box_init_pos, box_init_quat)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_addr = ("0.0.0.0", 9876)

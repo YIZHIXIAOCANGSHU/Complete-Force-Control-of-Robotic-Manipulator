@@ -19,18 +19,18 @@ extern "C" {
 typedef struct {
   uint8_t use_joint_limits;            /* 是否启用关节角度限幅 */
   double lambda;                       /* DLS (阻尼最小二乘法) 阻尼因子 */
-  double joint_limits_min[NUM_JOINTS]; /* 关节角度下限 */
-  double joint_limits_max[NUM_JOINTS]; /* 关节角度上限 */
+  double joint_limits_min[ARM_JOINTS]; /* 单臂关节角度下限 */
+  double joint_limits_max[ARM_JOINTS]; /* 单臂关节角度上限 */
 } IKConfig;
 
 /**
  * @brief 运动学求解器状态管理器 (用于数值解法)
  */
 typedef struct {
-  DHParameters dh_params[NUM_JOINTS]; /* 内部使用的 DH 参数缓冲 */
-  double joint_angles[NUM_JOINTS];    /* 当前缓存的关节角度 */
+  DHParameters dh_params[ARM_JOINTS]; /* 内部使用的 DH 参数缓冲 */
+  double joint_angles[ARM_JOINTS];    /* 当前缓存的关节角度 */
   TransformMatrix
-      link_transforms[NUM_JOINTS]; /* 各连杆相对于基座的齐次变换矩阵 */
+      link_transforms[ARM_JOINTS]; /* 各连杆相对于基座的齐次变换矩阵 */
   Pose end_effector_pose;          /* 末端位姿缓存 */
   IKConfig ik_config;              /* 求解器配置 */
   uint8_t initialized;             /* 初始化完成标志 */

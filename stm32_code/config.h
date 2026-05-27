@@ -29,17 +29,27 @@
  *  基础运行参数
  * ================================================================ */
 #define CONTROL_DT 0.001  /* 控制步长 (秒) */
-#define NUM_JOINTS 7     /* 机器人关节数量 */
+#define ARM_JOINTS 7     /* 单臂关节数量 */
+#define NUM_ARMS 2       /* 左右双臂 */
+#define NUM_JOINTS 14    /* 机器人受控关节数量 */
+#define ARM_LEFT 0
+#define ARM_RIGHT 1
 /* Host bridge 仍使用该偏移量做 MuJoCo 坐标转换，保留兼容定义 */
 #define MUJOCO_Z_OFFSET 1.0 /* MuJoCo 仿真中机器人基座的高度偏移 */
 
 /* ================================================================
  *  TCP 偏移
  * ================================================================ */
-/* TCP 偏移量 (相对于 ArmLseventh_Joint，本地坐标系，单位 m) */
+/* TCP 偏移量 (相对于 ArmL07Output_Link，本地坐标系，单位 m) */
 #define TCP_OFFSET_X 0.0
 #define TCP_OFFSET_Y 0.07
 #define TCP_OFFSET_Z -0.03
+#define TCP_LEFT_OFFSET_X 0.0
+#define TCP_LEFT_OFFSET_Y 0.07
+#define TCP_LEFT_OFFSET_Z -0.03
+#define TCP_RIGHT_OFFSET_X 0.0
+#define TCP_RIGHT_OFFSET_Y -0.07
+#define TCP_RIGHT_OFFSET_Z 0.03
 
 /* ================================================================
  *  笛卡尔空间 PD 增益
@@ -103,6 +113,11 @@
 #define POSTURE_ALPHA 0.3
 #define W_CARTESIAN 0.8
 #define W_JOINT 0.2
+#define NULLSPACE_POS_DEADBAND 0.001 /* m，目标附近禁用零空间偏置 */
+#define NULLSPACE_ORI_DEADBAND 0.002 /* rad，目标附近禁用零空间偏置 */
+#define NULLSPACE_POS_FULL_SCALE 0.02 /* m，远离目标后恢复轻度零空间 */
+#define NULLSPACE_ORI_FULL_SCALE 0.05 /* rad，远离目标后恢复轻度零空间 */
+#define NULLSPACE_TORQUE_LIMIT 0.05  /* N.m，轻度零空间补偿限幅 */
 
 /* ================================================================
  *  运动学与逆解参数
@@ -119,16 +134,16 @@
 /* 位置限位输入单位为度, 内部自动转换为 rad 供控制与运动学模块使用 */
 #define JOINT_POS_MIN_1_DEG (-89.971835)
 #define JOINT_POS_MAX_1_DEG (89.971835)
-#define JOINT_POS_MIN_2_DEG (-89.954374)
-#define JOINT_POS_MAX_2_DEG (20.587610)
-#define JOINT_POS_MIN_3_DEG (-68.754935)
-#define JOINT_POS_MAX_3_DEG (45.836624)
+#define JOINT_POS_MIN_2_DEG (-20.587610)
+#define JOINT_POS_MAX_2_DEG (89.954374)
+#define JOINT_POS_MIN_3_DEG (-45.836624)
+#define JOINT_POS_MAX_3_DEG (68.754935)
 #define JOINT_POS_MIN_4_DEG (-119.748454)
 #define JOINT_POS_MAX_4_DEG (119.954374)
 #define JOINT_POS_MIN_5_DEG (-45.836624)
 #define JOINT_POS_MAX_5_DEG (45.836624)
-#define JOINT_POS_MIN_6_DEG (-61.306275)
-#define JOINT_POS_MAX_6_DEG (45.263666)
+#define JOINT_POS_MIN_6_DEG (-45.263666)
+#define JOINT_POS_MAX_6_DEG (61.306275)
 #define JOINT_POS_MIN_7_DEG (-61.306275)
 #define JOINT_POS_MAX_7_DEG (61.306275)
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import math
+import os
 import struct
+import subprocess
 import sys
+import textwrap
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -15,15 +18,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from config import Config
 
 
-REAL_ARM_TORQUE_LIMITS = [40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0]
-REAL_ARM_JOINT_LIMITS_DEG = [
+REAL_LEFT_ARM_TORQUE_LIMITS = [40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0]
+REAL_RIGHT_ARM_TORQUE_LIMITS = [40.0, 40.0, 27.0, 27.0, 9.0, 9.0, 9.0]
+REAL_LEFT_ARM_JOINT_LIMITS_DEG = [
     (-89.971835, 89.971835),
-    (-89.954374, 20.587610),
-    (-68.754935, 45.836624),
+    (-20.587610, 89.954374),
+    (-45.836624, 68.754935),
     (-119.748454, 119.954374),
     (-45.836624, 45.836624),
-    (-61.306275, 45.263666),
+    (-45.263666, 61.306275),
     (-61.306275, 61.306275),
+]
+REAL_RIGHT_ARM_JOINT_LIMITS_RAD = [
+    (-2.405, 2.2175),
+    (-0.6605, 2.203),
+    (-1.763, 1.594),
+    (-0.0165, 2.3235),
+    (-1.5935, 1.574),
+    (-0.6015, 0.6755),
+    (-1.1075, 1.068),
 ]
 
 
@@ -125,10 +138,13 @@ def _assert_same_direction(actual: np.ndarray, expected: list[float]) -> None:
     assert float(actual_unit @ expected_unit) > 0.99
 
 
-def test_config_keeps_dual_arm_model_and_controls_left_arm():
+def test_config_controls_both_arms():
     assert Path(Config.URDF_PATH).name == "AM-DPBSURDF0422.urdf"
     assert Path(Config.URDF_PATH).is_file()
-    assert Config.JOINT_NAMES == [
+    assert Config.ARM_JOINTS == 7
+    assert Config.NUM_ARMS == 2
+    assert Config.NUM_JOINTS == 14
+    assert Config.LEFT_JOINT_NAMES == [
         "ArmL02_Joint",
         "AM-D02-J14_Joint",
         "ArmL04_Joint",
@@ -137,23 +153,80 @@ def test_config_keeps_dual_arm_model_and_controls_left_arm():
         "ArmL07_Joint",
         "ArmL07Output_Joint",
     ]
-    assert Config.TORQUE_LIMITS.tolist() == REAL_ARM_TORQUE_LIMITS
-    np.testing.assert_allclose(Config.JOINT_LIMITS_DEG, REAL_ARM_JOINT_LIMITS_DEG)
+    assert Config.RIGHT_JOINT_NAMES == [
+        "ArmR01_Joint_duplicate_2",
+        "AM-D02R-J03_Joint",
+        "ArmR04_Joint",
+        "ArmR05_Link",
+        "ArmR06_Link",
+        "ArmR07_Link",
+        "ArmR07Output_Link",
+    ]
+    assert Config.JOINT_NAMES == Config.LEFT_JOINT_NAMES + Config.RIGHT_JOINT_NAMES
+    assert Config.TORQUE_LIMITS.tolist() == REAL_LEFT_ARM_TORQUE_LIMITS + REAL_RIGHT_ARM_TORQUE_LIMITS
+    expected_limits_deg = np.vstack(
+        [
+            np.array(REAL_LEFT_ARM_JOINT_LIMITS_DEG, dtype=np.float64),
+            np.rad2deg(np.array(REAL_RIGHT_ARM_JOINT_LIMITS_RAD, dtype=np.float64)),
+        ]
+    )
+    np.testing.assert_allclose(Config.JOINT_LIMITS_DEG, expected_limits_deg)
     np.testing.assert_allclose(
         Config.JOINT_LIMITS_RAD,
-        np.deg2rad(np.array(REAL_ARM_JOINT_LIMITS_DEG, dtype=np.float64)),
+        np.deg2rad(expected_limits_deg),
+    )
+    assert Config.FIX_UNCONTROLLED_JOINTS is True
+
+
+def test_fix_uncontrolled_joints_marks_only_non_controlled_joints_fixed():
+    from sim_scene import _fix_uncontrolled_joints
+
+    root = ET.fromstring(
+        """
+        <robot>
+          <joint name="ArmL02_Joint" type="revolute">
+            <axis xyz="0 0 1" />
+            <limit lower="-1" upper="1" />
+          </joint>
+          <joint name="Waist01_Joint" type="revolute">
+            <axis xyz="0 0 1" />
+            <limit lower="-1" upper="1" />
+            <dynamics damping="1" />
+            <mimic joint="other" />
+          </joint>
+        </robot>
+        """
     )
 
+    fixed_names = _fix_uncontrolled_joints(root, ["ArmL02_Joint"])
 
-def test_initial_target_qpos_is_elbow_raised_90_degrees():
+    controlled = root.find("./joint[@name='ArmL02_Joint']")
+    fixed = root.find("./joint[@name='Waist01_Joint']")
+    assert fixed_names == ["Waist01_Joint"]
+    assert controlled is not None
+    assert controlled.attrib["type"] == "revolute"
+    assert controlled.find("axis") is not None
+    assert controlled.find("limit") is not None
+    assert fixed is not None
+    assert fixed.attrib["type"] == "fixed"
+    assert fixed.find("axis") is None
+    assert fixed.find("limit") is None
+    assert fixed.find("dynamics") is None
+    assert fixed.find("mimic") is None
+
+
+def test_initial_and_home_qpos_are_elbow_raised_90_degrees():
+    arm_init = [0.0, 0.0, 0.0, np.pi / 2, 0.0, 0.0, 0.0]
     np.testing.assert_allclose(
         Config.INIT_QPOS,
-        [0.0, 0.0, 0.0, np.pi / 2, 0.0, 0.0, 0.0],
+        arm_init + arm_init,
     )
+    np.testing.assert_allclose(Config.HOME_QPOS, Config.INIT_QPOS)
 
 
 def test_left_arm_tcp_offset_is_at_dual_output_link_tip():
     np.testing.assert_allclose(Config.TCP_OFFSET, [0.0, 0.07, -0.03])
+    np.testing.assert_allclose(Config.LEFT_TCP_OFFSET, [0.0, 0.07, -0.03])
 
     for geometry_tag in ("visual", "collision"):
         bbox_min, bbox_max = _link_mesh_bbox("ArmL07Output_Link", geometry_tag)
@@ -165,17 +238,173 @@ def test_left_arm_tcp_offset_is_at_dual_output_link_tip():
         assert Config.TCP_OFFSET[1] <= bbox_max[1] + 0.01
 
 
+def test_right_arm_tcp_offset_is_at_dual_output_link_tip():
+    np.testing.assert_allclose(Config.RIGHT_TCP_OFFSET, [0.0, -0.07, 0.03])
+
+    for geometry_tag in ("visual", "collision"):
+        bbox_min, bbox_max = _link_mesh_bbox("ArmR07Output_Link", geometry_tag)
+        span = bbox_max - bbox_min
+
+        assert bbox_min[0] <= Config.RIGHT_TCP_OFFSET[0] <= bbox_max[0]
+        assert bbox_min[2] <= Config.RIGHT_TCP_OFFSET[2] <= bbox_max[2]
+        assert Config.RIGHT_TCP_OFFSET[1] < bbox_max[1] - 0.8 * span[1]
+        assert Config.RIGHT_TCP_OFFSET[1] >= bbox_min[1] - 0.01
+
+
+def test_tcp_frame_quats_align_left_tcp_axes_with_right_arm():
+    np.testing.assert_allclose(Config.LEFT_TCP_FRAME_QUAT, [0.0, 0.0, 0.0, 1.0])
+    np.testing.assert_allclose(Config.RIGHT_TCP_FRAME_QUAT, [1.0, 0.0, 0.0, 0.0])
+    assert Config.TCP_FRAME_QUATS.shape == (Config.NUM_ARMS, 4)
+
+
+def test_mujoco_initial_tcp_frames_are_aligned_between_arms():
+    pytest.importorskip("mujoco")
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    env.reset(Config.INIT_QPOS)
+    env.forward()
+
+    np.testing.assert_allclose(
+        env.get_ee_rotmat(Config.LEFT_ARM),
+        env.get_ee_rotmat(Config.RIGHT_ARM),
+        atol=2e-5,
+    )
+
+
+def test_target_frame_marker_uses_body_origin_and_identity_axes():
+    pytest.importorskip("mujoco")
+
+    import mujoco
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    env.reset(Config.INIT_QPOS)
+    env.forward()
+
+    marker_id = mujoco.mj_name2id(
+        env.model,
+        mujoco.mjtObj.mjOBJ_BODY,
+        Config.TARGET_FRAME_MARKER_BODY,
+    )
+    assert marker_id >= 0
+    np.testing.assert_allclose(
+        env.get_target_frame_origin_base(),
+        Config.TARGET_FRAME_ORIGIN_BASE_ZERO,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        env.data.xpos[marker_id],
+        Config.TARGET_FRAME_ORIGIN_BASE_ZERO,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        env.data.xmat[marker_id].reshape(3, 3),
+        np.eye(3),
+        atol=1e-12,
+    )
+
+
+def test_target_pose_is_stored_in_body0422_coordinates_and_displayed_in_world():
+    pytest.importorskip("mujoco")
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    env.reset(Config.INIT_QPOS)
+    env.forward()
+
+    target_body = np.array([0.1, -0.2, 0.3], dtype=np.float64)
+    target_quat = np.array([0.5, -0.5, 0.5, -0.5], dtype=np.float64)
+    env.set_target_pose(target_body, target_quat, arm=Config.LEFT_ARM)
+
+    pos_body, quat = env.get_target_pose(Config.LEFT_ARM)
+    np.testing.assert_allclose(pos_body, target_body)
+    np.testing.assert_allclose(quat, target_quat)
+    np.testing.assert_allclose(
+        env.data.mocap_pos[env.target_mocap_ids[Config.LEFT_ARM]],
+        env.get_target_frame_origin_base() + target_body,
+    )
+
+
+def test_target_pose_follows_body0422_translation_when_unfixed():
+    pytest.importorskip("mujoco")
+
+    script = textwrap.dedent(
+        """
+        import os
+        import sys
+        import numpy as np
+        import mujoco
+
+        os.environ["AM_D02_FIX_UNCONTROLLED_JOINTS"] = "0"
+        sys.path.insert(0, "python")
+        from config import Config
+        from sim_env import MujocoSimEnv
+
+        env = MujocoSimEnv()
+        env.reset(Config.INIT_QPOS)
+        env.forward()
+
+        body_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, Config.TARGET_FRAME_BODY_NAME)
+        marker_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, Config.TARGET_FRAME_MARKER_BODY)
+        assert body_id >= 0
+        assert marker_id >= 0
+
+        target_body = np.array([0.12, -0.03, 0.08], dtype=np.float64)
+        env.set_target_pose(target_body, arm=Config.RIGHT_ARM)
+        before_body_target, _ = env.get_target_pose(Config.RIGHT_ARM)
+
+        # Body0422_Joint 是默认 17 DOF 模型中的第三个未受控关节。
+        env.data.qpos[2] = 0.4
+        env.forward()
+
+        origin = env.data.xpos[body_id].copy()
+        target_world = env.data.mocap_pos[env.target_mocap_ids[Config.RIGHT_ARM]].copy()
+        marker_world = env.data.xpos[marker_id].copy()
+        marker_rot = env.data.xmat[marker_id].reshape(3, 3).copy()
+        after_body_target, _ = env.get_target_pose(Config.RIGHT_ARM)
+
+        print("origin", *origin)
+        print("target_world", *target_world)
+        print("marker_world", *marker_world)
+        print("marker_rot", *marker_rot.reshape(-1))
+        print("before", *before_body_target)
+        print("after", *after_body_target)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    rows = {
+        line.split()[0]: np.array([float(value) for value in line.split()[1:]], dtype=np.float64)
+        for line in result.stdout.strip().splitlines()
+    }
+    target_body = np.array([0.12, -0.03, 0.08], dtype=np.float64)
+    np.testing.assert_allclose(rows["target_world"], rows["origin"] + target_body, atol=1e-12)
+    np.testing.assert_allclose(rows["marker_world"], rows["origin"], atol=1e-12)
+    np.testing.assert_allclose(rows["marker_rot"].reshape(3, 3), np.eye(3), atol=1e-12)
+    np.testing.assert_allclose(rows["before"], target_body, atol=1e-12)
+    np.testing.assert_allclose(rows["after"], target_body, atol=1e-12)
+
+
 def test_dual_urdf_left_arm_joint_axes_follow_real_machine_rotation_direction():
     axes = _read_dual_urdf_zero_pose_axes()
 
     expected_axes = {
         "ArmL02_Joint": [0.0, 0.0, 1.0],
-        "AM-D02-J14_Joint": [1.0, 0.0, 0.0],
-        "ArmL04_Joint": [0.0, -1.0, 0.0],
-        "ArmL05_Joint": [0.011054, 0.0, -0.999939],
-        "ArmL06_Joint": [0.0, -1.0, 0.0],
-        "ArmL07_Joint": [0.999939, 0.0, 0.011054],
-        "ArmL07Output_Joint": [0.011054, 0.000656, -0.999939],
+        "AM-D02-J14_Joint": [-1.0, 0.0, 0.0],
+        "ArmL04_Joint": [0.0, 1.0, 0.0],
+        "ArmL05_Joint": [0.0, 0.0, -1.0],
+        "ArmL06_Joint": [0.0, 1.0, 0.0],
+        "ArmL07_Joint": [-1.0, 0.0, 0.0],
+        "ArmL07Output_Joint": [0.0, 0.0, -1.0],
     }
     assert expected_axes.keys() <= axes.keys()
     for joint_name, expected_axis in expected_axes.items():
@@ -186,13 +415,13 @@ def test_dual_urdf_right_arm_joint_axes_follow_real_machine_rotation_direction()
     axes = _read_dual_urdf_zero_pose_axes()
 
     expected_axes = {
-        "ArmR01_Joint": [0.0, 0.0, 1.0],
-        "AM-D02R-J03_Joint": [1.0, 0.0, 0.0],
-        "ArmR04_Joint": [0.0, -1.0, 0.0],
-        "ArmR05_Link": [0.011054, 0.0, -0.999939],
-        "ArmR06_Link": [0.0, -1.0, 0.0],
-        "ArmR07_Link": [0.999939, 0.0, 0.011054],
-        "ArmR07Output_Link": [0.011054, 0.000656, -0.999939],
+        "ArmR01_Joint": [0.0, 0.0, -1.0],
+        "AM-D02R-J03_Joint": [-1.0, 0.0, 0.0],
+        "ArmR04_Joint": [0.0, 1.0, 0.0],
+        "ArmR05_Link": [0.0, 0.0, -1.0],
+        "ArmR06_Link": [0.0, 1.0, 0.0],
+        "ArmR07_Link": [-1.0, 0.0, 0.0],
+        "ArmR07Output_Link": [0.0, 0.0, 1.0],
     }
     assert expected_axes.keys() <= axes.keys()
     for joint_name, expected_axis in expected_axes.items():
@@ -218,3 +447,59 @@ def test_mujoco_env_uses_real_machine_joint_limits_for_clipping():
     env.set_qpos(too_high)
     assert env.enforce_joint_limits()
     np.testing.assert_allclose(env.get_qpos(), expected_limits[:, 1])
+
+
+def test_mujoco_env_fixes_uncontrolled_joints_by_default():
+    pytest.importorskip("mujoco")
+
+    import mujoco
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+
+    assert env.model.nv == Config.NUM_JOINTS
+    assert env.model.njnt == Config.NUM_JOINTS
+    assert [
+        mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+        for joint_id in range(env.model.njnt)
+    ] == Config.JOINT_NAMES
+    assert env.locked_dof_ids.size == 0
+    assert env.locked_qpos_ids.size == 0
+
+    env.reset(Config.INIT_QPOS)
+    env.forward()
+    env.apply_torque(env.get_qfrc_bias())
+    env.forward()
+    np.testing.assert_allclose(env.data.qacc[env.dof_ids], 0.0, atol=1e-9)
+
+
+def test_mujoco_env_can_keep_full_dual_arm_dofs_when_fixing_disabled():
+    pytest.importorskip("mujoco")
+
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.path.insert(0, "python")
+        from config import Config
+        from sim_env import MujocoSimEnv
+
+        env = MujocoSimEnv()
+        print(Config.FIX_UNCONTROLLED_JOINTS)
+        print(env.model.nv)
+        print(env.locked_dof_ids.size)
+        """
+    )
+    env = os.environ.copy()
+    env["AM_D02_FIX_UNCONTROLLED_JOINTS"] = "0"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    lines = result.stdout.strip().splitlines()
+
+    assert lines == ["False", "17", "3"]

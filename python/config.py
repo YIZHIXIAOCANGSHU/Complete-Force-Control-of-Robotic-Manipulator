@@ -1,4 +1,4 @@
-"""AM-DPBSURDF0422 左臂七轴仿真配置。"""
+"""AM-DPBSURDF0422 左右双臂十四轴仿真配置。"""
 import os
 import numpy as np
 
@@ -44,10 +44,16 @@ class Config:
     ENABLE_VIEWER = _env_bool("AM_D02_ENABLE_VIEWER", True)
     ENABLE_RERUN = _env_bool("AM_D02_ENABLE_RERUN", True)
     RERUN_LOG_STRIDE = max(1, _env_int("AM_D02_RERUN_LOG_STRIDE", 10))
+    FIX_UNCONTROLLED_JOINTS = _env_bool("AM_D02_FIX_UNCONTROLLED_JOINTS", True)
     
     # === 关节配置 (Joints) ===
-    NUM_JOINTS = 7
-    JOINT_NAMES = [
+    ARM_JOINTS = 7
+    NUM_ARMS = 2
+    NUM_JOINTS = ARM_JOINTS * NUM_ARMS
+    ARM_NAMES = ("left", "right")
+    LEFT_ARM = 0
+    RIGHT_ARM = 1
+    LEFT_JOINT_NAMES = [
         "ArmL02_Joint",
         "AM-D02-J14_Joint",
         "ArmL04_Joint",
@@ -56,47 +62,82 @@ class Config:
         "ArmL07_Joint",
         "ArmL07Output_Joint",
     ]
+    RIGHT_JOINT_NAMES = [
+        "ArmR01_Joint_duplicate_2",
+        "AM-D02R-J03_Joint",
+        "ArmR04_Joint",
+        "ArmR05_Link",
+        "ArmR06_Link",
+        "ArmR07_Link",
+        "ArmR07Output_Link",
+    ]
+    JOINT_NAMES = LEFT_JOINT_NAMES + RIGHT_JOINT_NAMES
     
     # 末端连杆名称（用于获取末端位姿）
-    END_EFFECTOR_BODY = "tcp"
+    END_EFFECTOR_BODIES = ("tcp_left", "tcp_right")
+    END_EFFECTOR_BODY = END_EFFECTOR_BODIES[LEFT_ARM]
     
-    # TCP 偏移量 (相对于 ArmL07Output_Link 本体坐标系, 单位 m)
-    TCP_OFFSET = np.array([0.0, 0.07, -0.03])
+    # TCP 偏移量 (相对于各自 Arm*07Output_Link 本体坐标系, 单位 m)
+    LEFT_TCP_OFFSET = np.array([0.0, 0.07, -0.03])
+    RIGHT_TCP_OFFSET = np.array([0.0, -0.07, 0.03])
+    TCP_OFFSETS = np.vstack([LEFT_TCP_OFFSET, RIGHT_TCP_OFFSET])
+    TCP_OFFSET = LEFT_TCP_OFFSET
+    # MuJoCo body quat 使用 [w, x, y, z]。左 TCP 绕本地 Z 轴转 180 度，
+    # 让左右末端坐标轴方向统一；位置偏移保持不变。
+    LEFT_TCP_FRAME_QUAT = np.array([0.0, 0.0, 0.0, 1.0])
+    RIGHT_TCP_FRAME_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
+    TCP_FRAME_QUATS = np.vstack([LEFT_TCP_FRAME_QUAT, RIGHT_TCP_FRAME_QUAT])
     
     # 力矩限制 (N·m)
-    TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0])
+    LEFT_TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 9.0])
+    RIGHT_TORQUE_LIMITS = np.array([40.0, 40.0, 27.0, 27.0, 9.0, 9.0, 9.0])
+    TORQUE_LIMITS = np.concatenate([LEFT_TORQUE_LIMITS, RIGHT_TORQUE_LIMITS])
 
-    # 单臂参考关节安全限位 (deg/rad)。MuJoCo 双臂 URDF 的部分限位更宽，
-    # 仿真侧也使用这里的单臂限位，避免 C 控制端下一帧才发现越界急停。
-    JOINT_LIMITS_DEG = np.array(
+    # 关节安全限位 (deg/rad)。左臂沿用真机安全限位，右臂使用当前双臂 URDF 限位。
+    LEFT_JOINT_LIMITS_DEG = np.array(
         [
             [-89.971835, 89.971835],
-            [-89.954374, 20.587610],
-            [-68.754935, 45.836624],
+            [-20.587610, 89.954374],
+            [-45.836624, 68.754935],
             [-119.748454, 119.954374],
             [-45.836624, 45.836624],
-            [-61.306275, 45.263666],
+            [-45.263666, 61.306275],
             [-61.306275, 61.306275],
         ],
         dtype=np.float64,
     )
+    RIGHT_JOINT_LIMITS_RAD = np.array(
+        [
+            [-2.405, 2.2175],
+            [-0.6605, 2.203],
+            [-1.763, 1.594],
+            [-0.0165, 2.3235],
+            [-1.5935, 1.574],
+            [-0.6015, 0.6755],
+            [-1.1075, 1.068],
+        ],
+        dtype=np.float64,
+    )
+    RIGHT_JOINT_LIMITS_DEG = np.rad2deg(RIGHT_JOINT_LIMITS_RAD)
+    JOINT_LIMITS_DEG = np.vstack([LEFT_JOINT_LIMITS_DEG, RIGHT_JOINT_LIMITS_DEG])
     JOINT_LIMITS_RAD = np.deg2rad(JOINT_LIMITS_DEG)
 
     # 新模型腕部惯量较轻，给纯力矩仿真补一点被动阻尼/转子惯量，避免默认目标启动时冲过速度保护。
-    JOINT_DAMPING = np.array([2.0, 2.0, 1.5, 1.5, 0.8, 0.8, 0.8])
-    JOINT_ARMATURE = np.array([0.02, 0.02, 0.015, 0.015, 0.01, 0.01, 0.01])
+    ARM_JOINT_DAMPING = np.array([2.0, 2.0, 1.5, 1.5, 0.8, 0.8, 0.8])
+    ARM_JOINT_ARMATURE = np.array([0.02, 0.02, 0.015, 0.015, 0.01, 0.01, 0.01])
+    JOINT_DAMPING = np.tile(ARM_JOINT_DAMPING, NUM_ARMS)
+    JOINT_ARMATURE = np.tile(ARM_JOINT_ARMATURE, NUM_ARMS)
 
     # === 仿真参数 ===
     DT = 0.01  # 仿真步长 (秒)，对应 100 Hz
     
     # === 初始位置 ===
-    # 机械臂仿真实际起始关节角（全零，C端从这里出发）
-    HOME_QPOS = np.array([0.0, 0.0, 0.0, np.pi/3, 0.0, 0.0, 0.0])
-
-    # 用户希望机械臂最终到达的构型（用于FK计算方块的初始摆放位置）
-    # 肘部关节抬起 90 度。
-    INIT_QPOS = np.array([0.0, 0.0, 0.0, np.pi / 2, 0.0, 0.0, 0.0])
+    # 机械臂初始关节定义：左右臂均为全 0，第四关节为 pi/2。初始目标由该构型 FK 得到。
+    ARM_INIT_QPOS = np.array([0.0, 0.0, 0.0, np.pi / 2, 0.0, 0.0, 0.0])
+    INIT_QPOS = np.tile(ARM_INIT_QPOS, NUM_ARMS)
+    HOME_QPOS = INIT_QPOS.copy()
 
     # === 目标位置 (Target Posture) ===
     # 用于重力补偿与 PD 控制的目标位置 (rad)
-    TARGET_Q = np.array([-np.pi/6, 0, 0.0, np.pi/3, 0.0, 0.0, 0.0])
+    ARM_TARGET_Q = np.array([-np.pi/6, 0, 0.0, np.pi/3, 0.0, 0.0, 0.0])
+    TARGET_Q = np.tile(ARM_TARGET_Q, NUM_ARMS)

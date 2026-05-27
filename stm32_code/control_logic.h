@@ -15,6 +15,7 @@
 
 #include "dynamics_lib.h"
 #include "kinematics_lib.h"
+#include "config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +23,7 @@ extern "C" {
 
 /* 初始化控制器和底层模型 */
 void control_init(void);
+void control_init_arm(int side);
 
 /* 步进 V2: 规划 + 双空间阻抗控制
  * 注意: 传入的 target_pos 和 target_quat 必须位于 URDF Base 坐标系下。
@@ -39,23 +41,46 @@ void control_init(void);
  * @param tau_out 传出计算得到的关节期望力矩 [tau1..tau7]
  */
 void control_step_v2(const double target_pos[3], const double target_quat[4],
-                     const double current_q[7], const double current_qd[7],
-                     double tau_out[7]);
+                     const double current_q[ARM_JOINTS],
+                     const double current_qd[ARM_JOINTS],
+                     double tau_out[ARM_JOINTS]);
+void control_step_v2_arm(int side, const double target_pos[3],
+                         const double target_quat[4],
+                         const double current_q[ARM_JOINTS],
+                         const double current_qd[ARM_JOINTS],
+                         double tau_out[ARM_JOINTS]);
+void control_step_v2_dual(const double target_pos[NUM_ARMS][3],
+                          const double target_quat[NUM_ARMS][4],
+                          const double current_q[NUM_JOINTS],
+                          const double current_qd[NUM_JOINTS],
+                          double tau_out[NUM_JOINTS]);
 
 /* 显式暴露的补偿函数 */
-void control_calc_gravity_compensation(const double q[7], double G[7]);
-void control_calc_gravity_pd_compensation(const double q[7], const double qd[7],
-                                          const double q_target[7],
-                                          double tau_out[7]);
+void control_calc_gravity_compensation(const double q[ARM_JOINTS],
+                                       double G[ARM_JOINTS]);
+void control_calc_gravity_compensation_arm(int side, const double q[ARM_JOINTS],
+                                           double G[ARM_JOINTS]);
+void control_calc_gravity_pd_compensation(const double q[ARM_JOINTS],
+                                          const double qd[ARM_JOINTS],
+                                          const double q_target[ARM_JOINTS],
+                                          double tau_out[ARM_JOINTS]);
 void control_calc_cartesian_joint_pd_compensation(
-    const double q[7], const double qd[7], const double q_target[7],
-    const double target_pos[3], const double target_quat[4], double tau_out[7]);
-void control_calc_coriolis_compensation(const double q[7], const double qd[7],
-                                        double tau_c[7]);
+    const double q[ARM_JOINTS], const double qd[ARM_JOINTS],
+    const double q_target[ARM_JOINTS], const double target_pos[3],
+    const double target_quat[4], double tau_out[ARM_JOINTS]);
+void control_calc_coriolis_compensation(const double q[ARM_JOINTS],
+                                        const double qd[ARM_JOINTS],
+                                        double tau_c[ARM_JOINTS]);
+void control_calc_coriolis_compensation_arm(int side,
+                                            const double q[ARM_JOINTS],
+                                            const double qd[ARM_JOINTS],
+                                            double tau_c[ARM_JOINTS]);
 
 /* 带有 TCP 偏移的正运动学辅助函数 */
-void control_get_fk_with_offset(const double q[7], double pos[3],
+void control_get_fk_with_offset(const double q[ARM_JOINTS], double pos[3],
                                 double quat[4]);
+void control_get_fk_with_offset_arm(int side, const double q[ARM_JOINTS],
+                                    double pos[3], double quat[4]);
 
 /**
  * @brief 检查关节位置和速度是否在安全限位内
@@ -63,14 +88,20 @@ void control_get_fk_with_offset(const double q[7], double pos[3],
  * @param qd 当前各关节角速度
  * @return 0 if safe, -1 if position limit violated, -2 if velocity limit violated
  */
-int control_check_safety(const double q[7], const double qd[7]);
+int control_check_safety(const double q[ARM_JOINTS],
+                         const double qd[ARM_JOINTS]);
+int control_check_safety_arm(int side, const double q[ARM_JOINTS],
+                             const double qd[ARM_JOINTS]);
 
 /**
  * @brief 对关节速度进行 1D 卡尔曼滤波
  * @param qd_raw 原始输入速度
  * @param qd_filtered 滤波后的输出速度
  */
-void control_filter_velocities(const double qd_raw[7], double qd_filtered[7]);
+void control_filter_velocities(const double qd_raw[ARM_JOINTS],
+                               double qd_filtered[ARM_JOINTS]);
+void control_filter_velocities_arm(int side, const double qd_raw[ARM_JOINTS],
+                                   double qd_filtered[ARM_JOINTS]);
 
 #ifdef __cplusplus
 }

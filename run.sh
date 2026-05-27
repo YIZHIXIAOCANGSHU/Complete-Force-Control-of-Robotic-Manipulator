@@ -104,9 +104,9 @@ select_python
 
 echo "=========================================================="
 if [ "$MODE" == "sim" ]; then
-    echo "    AM-DPBSURDF0422 左臂联合仿真启动系统 (SITL)       "
+    echo "    AM-DPBSURDF0422 双臂联合仿真启动系统 (SITL)       "
 elif [ "$MODE" == "mc" ] || [ "$MODE" == "monte-carlo" ]; then
-    echo "    AM-DPBSURDF0422 左臂蒙特卡罗末端位姿范围检查      "
+    echo "    AM-DPBSURDF0422 双臂蒙特卡罗末端位姿范围检查      "
 else
     PRINT_RED "错误: 未知模式 '$MODE'。请使用 'sim'、'mc' 或 'monte-carlo'。"
     exit 1

@@ -103,16 +103,28 @@ typedef struct {
  *  AM-DPBSURDF0422 左臂模型常量
  * ================================================================ */
 
-extern const double AM_D02_JOINT_XYZ[NUM_JOINTS][3];
-extern const double AM_D02_JOINT_RPY[NUM_JOINTS][3];
-extern const double AM_D02_JOINT_AXIS[NUM_JOINTS][3];
-extern const double AM_D02_LINK_MASS[NUM_JOINTS];
-extern const double AM_D02_LINK_COM[NUM_JOINTS][3];
-extern const double AM_D02_LINK_INERTIA[NUM_JOINTS][6];
+extern const double AM_D02_JOINT_XYZ[ARM_JOINTS][3];
+extern const double AM_D02_JOINT_RPY[ARM_JOINTS][3];
+extern const double AM_D02_JOINT_AXIS[ARM_JOINTS][3];
+extern const double AM_D02_LINK_MASS[ARM_JOINTS];
+extern const double AM_D02_LINK_COM[ARM_JOINTS][3];
+extern const double AM_D02_LINK_INERTIA[ARM_JOINTS][6];
+
+extern const double AM_D02_RIGHT_JOINT_XYZ[ARM_JOINTS][3];
+extern const double AM_D02_RIGHT_JOINT_RPY[ARM_JOINTS][3];
+extern const double AM_D02_RIGHT_JOINT_AXIS[ARM_JOINTS][3];
+extern const double AM_D02_RIGHT_LINK_MASS[ARM_JOINTS];
+extern const double AM_D02_RIGHT_LINK_COM[ARM_JOINTS][3];
+extern const double AM_D02_RIGHT_LINK_INERTIA[ARM_JOINTS][6];
 
 /* ================================================================
  *  机器人特定模型
  * ================================================================ */
+
+/**
+ * @brief 构建 AM-DPBSURDF0422 指定侧七轴 RBDL 动力学模型
+ */
+void build_am_d02_arm_model(int side, RBDLModel *model);
 
 /**
  * @brief 构建 AM-DPBSURDF0422 左臂七轴 RBDL 动力学模型

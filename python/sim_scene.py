@@ -11,6 +11,14 @@ import numpy as np
 
 
 _PI_HALF = "1.5707963"
+_FIXED_JOINT_REMOVED_CHILD_TAGS = (
+    "axis",
+    "calibration",
+    "dynamics",
+    "limit",
+    "mimic",
+    "safety_controller",
+)
 
 
 def _ensure_child(root: ET.Element, tag: str) -> ET.Element:
@@ -79,14 +87,22 @@ def _add_mocap_marker(
     _add_axis_geom(body, axis="z", radius=axis_radius, half_length=axis_half_length, color=f"0 0 1 {axis_alpha_suffix}")
 
 
-def _attach_tcp_body(worldbody: ET.Element, tcp_offset: np.ndarray) -> None:
+def _attach_tcp_body(
+    worldbody: ET.Element,
+    *,
+    parent_body_name: str,
+    tcp_body_name: str,
+    tcp_offset: np.ndarray,
+    tcp_quat: np.ndarray,
+) -> None:
     for body in worldbody.iter("body"):
-        if body.get("name") != "ArmL07Output_Link":
+        if body.get("name") != parent_body_name:
             continue
 
         tcp_body = ET.SubElement(body, "body")
-        tcp_body.set("name", "tcp")
+        tcp_body.set("name", tcp_body_name)
         tcp_body.set("pos", f"{tcp_offset[0]} {tcp_offset[1]} {tcp_offset[2]}")
+        tcp_body.set("quat", f"{tcp_quat[0]} {tcp_quat[1]} {tcp_quat[2]} {tcp_quat[3]}")
 
         inertial = ET.SubElement(tcp_body, "inertial")
         inertial.set("pos", "0 0 0")
@@ -98,7 +114,7 @@ def _attach_tcp_body(worldbody: ET.Element, tcp_offset: np.ndarray) -> None:
         _add_axis_geom(tcp_body, axis="z", radius=0.003, half_length=0.06, color="0 0 1 1")
         return
 
-    raise ValueError("未找到新模型末端 body 'ArmL07Output_Link'，无法挂载 TCP")
+    raise ValueError(f"未找到新模型末端 body '{parent_body_name}'，无法挂载 TCP '{tcp_body_name}'")
 
 
 def _deduplicate_joint_names(root: ET.Element) -> None:
@@ -119,7 +135,30 @@ def _normalize_mesh_paths(root: ET.Element) -> None:
             mesh.set("filename", os.path.basename(filename))
 
 
-def _augment_scene(root: ET.Element, tcp_offset: np.ndarray) -> None:
+def _fix_uncontrolled_joints(
+    root: ET.Element,
+    controlled_joint_names: list[str] | tuple[str, ...],
+) -> list[str]:
+    controlled = set(controlled_joint_names)
+    fixed_names: list[str] = []
+    for joint in root.findall(".//joint"):
+        name = joint.get("name")
+        if name in controlled:
+            continue
+
+        joint.set("type", "fixed")
+        fixed_names.append(name or "")
+        for tag in _FIXED_JOINT_REMOVED_CHILD_TAGS:
+            for child in list(joint.findall(tag)):
+                joint.remove(child)
+    return fixed_names
+
+
+def _augment_scene(
+    root: ET.Element,
+    tcp_offsets: np.ndarray,
+    tcp_frame_quats: np.ndarray,
+) -> None:
     asset = _ensure_child(root, "asset")
 
     tex_grid = ET.SubElement(asset, "texture")
@@ -180,7 +219,7 @@ def _augment_scene(root: ET.Element, tcp_offset: np.ndarray) -> None:
 
     _add_mocap_marker(
         worldbody,
-        body_name="target_pose",
+        body_name="target_pose_left",
         box_size=0.015,
         box_rgba="0.2 0.8 0.2 0.3",
         axis_radius=0.002,
@@ -189,17 +228,55 @@ def _augment_scene(root: ET.Element, tcp_offset: np.ndarray) -> None:
     )
     _add_mocap_marker(
         worldbody,
-        body_name="reported_pose",
+        body_name="reported_pose_left",
         box_size=0.016,
         box_rgba="0.2 0.2 0.8 0.5",
         axis_radius=0.0015,
         axis_half_length=0.04,
         axis_alpha_suffix="0.5",
     )
-    _attach_tcp_body(worldbody, tcp_offset)
+    _add_mocap_marker(
+        worldbody,
+        body_name="target_pose_right",
+        box_size=0.015,
+        box_rgba="0.2 0.8 0.2 0.3",
+        axis_radius=0.002,
+        axis_half_length=0.05,
+        axis_alpha_suffix="0.8",
+    )
+    _add_mocap_marker(
+        worldbody,
+        body_name="reported_pose_right",
+        box_size=0.016,
+        box_rgba="0.2 0.2 0.8 0.5",
+        axis_radius=0.0015,
+        axis_half_length=0.04,
+        axis_alpha_suffix="0.5",
+    )
+    _attach_tcp_body(
+        worldbody,
+        parent_body_name="ArmL07Output_Link",
+        tcp_body_name="tcp_left",
+        tcp_offset=tcp_offsets[0],
+        tcp_quat=tcp_frame_quats[0],
+    )
+    _attach_tcp_body(
+        worldbody,
+        parent_body_name="ArmR07Output_Link",
+        tcp_body_name="tcp_right",
+        tcp_offset=tcp_offsets[1],
+        tcp_quat=tcp_frame_quats[1],
+    )
 
 
-def build_enhanced_model(urdf_filename: str, tcp_offset: np.ndarray) -> mujoco.MjModel:
+def build_enhanced_model(
+    urdf_filename: str,
+    tcp_offsets: np.ndarray,
+    tcp_frame_quats: np.ndarray,
+    *,
+    controlled_joint_names: list[str] | tuple[str, ...] | None = None,
+    fix_uncontrolled_joints: bool = False,
+) -> mujoco.MjModel:
     """Load URDF and inject a viewer-friendly scene."""
     tree = ET.parse(urdf_filename)
     root = tree.getroot()
@@ -209,6 +286,10 @@ def build_enhanced_model(urdf_filename: str, tcp_offset: np.ndarray) -> mujoco.M
     compiler.set("meshdir", "../meshes")
     _normalize_mesh_paths(root)
     _deduplicate_joint_names(root)
+    if fix_uncontrolled_joints:
+        if controlled_joint_names is None:
+            raise ValueError("controlled_joint_names is required when fixing joints")
+        _fix_uncontrolled_joints(root, controlled_joint_names)
 
     resolved_file = tempfile.NamedTemporaryFile(
         mode="wb",
@@ -241,7 +322,7 @@ def build_enhanced_model(urdf_filename: str, tcp_offset: np.ndarray) -> mujoco.M
         mujoco.mj_saveLastXML(enhanced_path, basic_model)
         tree = ET.parse(enhanced_path)
         root = tree.getroot()
-        _augment_scene(root, tcp_offset)
+        _augment_scene(root, tcp_offsets, tcp_frame_quats)
         tree.write(enhanced_path)
         return mujoco.MjModel.from_xml_path(enhanced_path)
     except Exception as exc:

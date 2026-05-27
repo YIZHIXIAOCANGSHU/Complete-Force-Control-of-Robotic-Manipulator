@@ -16,12 +16,23 @@ void control_mujoco_to_rbdl(const double base_pos[3], const double base_quat[4],
 
 void control_step_v2_mujoco(const double base_target_pos[3],
                             const double base_target_quat[4],
-                            const double current_q[7],
-                            const double current_qd[7], double tau_out[7]) {
+                            const double current_q[ARM_JOINTS],
+                            const double current_qd[ARM_JOINTS],
+                            double tau_out[ARM_JOINTS]) {
+  control_step_v2_mujoco_arm(ARM_LEFT, base_target_pos, base_target_quat,
+                             current_q, current_qd, tau_out);
+}
+
+void control_step_v2_mujoco_arm(int side, const double base_target_pos[3],
+                                const double base_target_quat[4],
+                                const double current_q[ARM_JOINTS],
+                                const double current_qd[ARM_JOINTS],
+                                double tau_out[ARM_JOINTS]) {
   double control_pos[3];
   double control_quat[4];
 
   control_mujoco_to_rbdl(base_target_pos, base_target_quat, control_pos,
                          control_quat);
-  control_step_v2(control_pos, control_quat, current_q, current_qd, tau_out);
+  control_step_v2_arm(side, control_pos, control_quat, current_q, current_qd,
+                      tau_out);
 }

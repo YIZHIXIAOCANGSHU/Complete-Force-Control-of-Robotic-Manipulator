@@ -21,11 +21,11 @@ void rbdl_forward_kinematics(RBDLModel *model, const double *q,
   mat4_identity(T);
 
   for (int i = 0; i < N; i++) {
-    rpy_to_rotmat(AM_D02_JOINT_RPY[i][0], AM_D02_JOINT_RPY[i][1],
-                  AM_D02_JOINT_RPY[i][2], R_fix);
-    mat4_from_rot_trans(R_fix, AM_D02_JOINT_XYZ[i], T_fix);
+    const Body *body = &model->bodies[i];
+    mat3_transpose(body->E_p, R_fix);
+    mat4_from_rot_trans(R_fix, body->r_p, T_fix);
 
-    axis_angle_to_rotmat(AM_D02_JOINT_AXIS[i], q[i], R_jnt);
+    axis_angle_to_rotmat(body->axis, q[i], R_jnt);
     double zero3[3] = {0, 0, 0};
     mat4_from_rot_trans(R_jnt, zero3, T_jnt);
 
@@ -56,15 +56,15 @@ void rbdl_calc_jacobian(RBDLModel *model, const double *q, double *J) {
   mat4_identity(T);
 
   for (int i = 0; i < N; i++) {
-    rpy_to_rotmat(AM_D02_JOINT_RPY[i][0], AM_D02_JOINT_RPY[i][1],
-                  AM_D02_JOINT_RPY[i][2], R_fix);
-    mat4_from_rot_trans(R_fix, AM_D02_JOINT_XYZ[i], T_fix);
+    const Body *body = &model->bodies[i];
+    mat3_transpose(body->E_p, R_fix);
+    mat4_from_rot_trans(R_fix, body->r_p, T_fix);
     mat4_mul(T, T_fix, T_temp);
 
-    mat4_rot_vec3(T_temp, AM_D02_JOINT_AXIS[i], z[i]);
+    mat4_rot_vec3(T_temp, body->axis, z[i]);
     mat4_get_position(T_temp, p[i]);
 
-    axis_angle_to_rotmat(AM_D02_JOINT_AXIS[i], q[i], R_jnt);
+    axis_angle_to_rotmat(body->axis, q[i], R_jnt);
     double zero3[3] = {0, 0, 0};
     mat4_from_rot_trans(R_jnt, zero3, T_jnt);
     mat4_mul(T_temp, T_jnt, T);
@@ -132,7 +132,7 @@ void kinematics_set_joint_angles(KinematicsSolver *solver,
                                  const double *angles) {
   if (!solver || !angles)
     return;
-  memcpy(solver->joint_angles, angles, sizeof(double) * NUM_JOINTS);
+  memcpy(solver->joint_angles, angles, sizeof(double) * ARM_JOINTS);
 }
 
 /**
@@ -147,7 +147,7 @@ uint8_t kinematics_compute_forward(KinematicsSolver *solver) {
   double T[16];
   mat4_identity(T);
 
-  for (int i = 0; i < NUM_JOINTS; i++) {
+  for (int i = 0; i < ARM_JOINTS; i++) {
     double R_fix[9], R_jnt[9], T_fix[16], T_jnt[16], T_temp[16];
     rpy_to_rotmat(AM_D02_JOINT_RPY[i][0], AM_D02_JOINT_RPY[i][1],
                   AM_D02_JOINT_RPY[i][2], R_fix);
@@ -189,7 +189,7 @@ double normalize_angle(double angle) {
  * @param joints 需要限幅的关节角度数组
  */
 void kinematics_clamp_joints(const KinematicsSolver *solver, double *joints) {
-  for (int i = 0; i < NUM_JOINTS; i++) {
+  for (int i = 0; i < ARM_JOINTS; i++) {
     if (joints[i] < solver->ik_config.joint_limits_min[i])
       joints[i] = solver->ik_config.joint_limits_min[i];
     if (joints[i] > solver->ik_config.joint_limits_max[i])
@@ -249,7 +249,7 @@ uint8_t kinematics_compute_inverse_pose_dls(KinematicsSolver *solver,
                                             const double *initial_joints,
                                             double *result_joints,
                                             uint16_t max_iterations) {
-  double q[NUM_JOINTS];
+  double q[ARM_JOINTS];
   if (initial_joints)
     memcpy(q, initial_joints, sizeof(q));
   else
@@ -273,14 +273,14 @@ uint8_t kinematics_compute_inverse_pose_dls(KinematicsSolver *solver,
     double J[42]; /* 6x7 雅可比矩阵 (列主序 Column Major) */
     RBDLModel
         dummy_model; /* 雅可比计算无需真实的质量惯量参数，使用空模型即可 */
-    dummy_model.num_bodies = NUM_JOINTS;
+    build_am_d02_model(&dummy_model);
     rbdl_calc_jacobian(&dummy_model, q, J);
 
     /* 将列主序的 J[6*7] 转换为 A[6*6] = J * J^T，用于 DLS 伪逆计算 */
     double A[36] = {0};
     for (int r = 0; r < 6; r++) {
       for (int c = 0; c < 6; c++) {
-        for (int k = 0; k < NUM_JOINTS; k++) {
+        for (int k = 0; k < ARM_JOINTS; k++) {
           A[r * 6 + c] += J[r + 6 * k] * J[c + 6 * k];
         }
       }
@@ -300,7 +300,7 @@ uint8_t kinematics_compute_inverse_pose_dls(KinematicsSolver *solver,
         b[i] += invA[i * 6 + j] * e6[j];
     }
 
-    for (int i = 0; i < NUM_JOINTS; i++) {
+    for (int i = 0; i < ARM_JOINTS; i++) {
       double dq_i = 0;
       for (int k = 0; k < 6; k++)
         dq_i += J[k + 6 * i] * b[k];

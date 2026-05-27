@@ -5,7 +5,7 @@
  * This file handles simulation-specific tasks:
  * 1. Connecting to the MuJoCo server.
  * 2. Forwarding MuJoCo feedback/target packets to the C closed loop.
- * 3. Applying the seven joint torques returned by main_stm.
+ * 3. Applying the fourteen joint torques returned by main_stm.
  */
 
 #include "main_stm.h"
@@ -33,8 +33,8 @@ int main(void) {
   printf("[INFO] Controller ready.\n\n");
 
   /* 状态变量 */
-  double q[7], qd[7];
-  double target_pos[3], target_quat[4];
+  double q[NUM_JOINTS], qd[NUM_JOINTS];
+  double target_pos[NUM_ARMS][3], target_quat[NUM_ARMS][4];
   double dt_s;
   
   stm_input_t stm_in;
@@ -73,10 +73,13 @@ int main(void) {
 
     /* -- 3f. 定期打印状态 -- */
     if (stm_out.step_count % 500 == 0) {
-      printf("[Step %6d] t=%.3fs | ee=[%.3f %.3f %.3f] | tau[0]=%.3f\n",
+      printf("[Step %6d] t=%.3fs | L=[%.3f %.3f %.3f] R=[%.3f %.3f %.3f] | tauL0=%.3f tauR0=%.3f\n",
              stm_out.step_count, stm_out.traj_t, 
-             stm_out.ee_pos[0], stm_out.ee_pos[1], stm_out.ee_pos[2],
-             stm_out.tau[0]);
+             stm_out.ee_pos[ARM_LEFT][0], stm_out.ee_pos[ARM_LEFT][1],
+             stm_out.ee_pos[ARM_LEFT][2],
+             stm_out.ee_pos[ARM_RIGHT][0], stm_out.ee_pos[ARM_RIGHT][1],
+             stm_out.ee_pos[ARM_RIGHT][2],
+             stm_out.tau[0], stm_out.tau[ARM_JOINTS]);
     }
   }
 

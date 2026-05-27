@@ -13,7 +13,7 @@ from state_packets import CONTROL_INPUT_PACKET_SIZE, fill_control_input_packet
 
 
 class MujocoSimEnv:
-    """AM-DPBSURDF0422 左臂七轴 MuJoCo 仿真环境"""
+    """AM-DPBSURDF0422 左右双臂十四轴 MuJoCo 仿真环境"""
 
     def __init__(self, urdf_path: str | None = None):
         if urdf_path is None:
@@ -25,7 +25,13 @@ class MujocoSimEnv:
         old_cwd = os.getcwd()
         try:
             os.chdir(urdf_dir)
-            self.model = build_enhanced_model(urdf_filename, Config.TCP_OFFSET)
+            self.model = build_enhanced_model(
+                urdf_filename,
+                Config.TCP_OFFSETS,
+                Config.TCP_FRAME_QUATS,
+                controlled_joint_names=Config.JOINT_NAMES,
+                fix_uncontrolled_joints=Config.FIX_UNCONTROLLED_JOINTS,
+            )
         finally:
             os.chdir(old_cwd)
 
@@ -35,9 +41,21 @@ class MujocoSimEnv:
         self.joint_ids, self.dof_ids = self._resolve_joint_ids()
         self.joint_lower, self.joint_upper = self._resolve_joint_limits()
         self._apply_joint_sim_properties()
-        self.ee_body_id = self._resolve_required_body_id(Config.END_EFFECTOR_BODY)
-        self.target_mocap_id = self._get_mocap_id("target_pose")
-        self.reported_mocap_id = self._get_mocap_id("reported_pose")
+        self.ee_body_ids = np.array(
+            [self._resolve_required_body_id(name) for name in Config.END_EFFECTOR_BODIES],
+            dtype=np.int32,
+        )
+        self.ee_body_id = int(self.ee_body_ids[Config.LEFT_ARM])
+        self.target_mocap_ids = np.array(
+            [self._get_mocap_id("target_pose_left"), self._get_mocap_id("target_pose_right")],
+            dtype=np.int32,
+        )
+        self.reported_mocap_ids = np.array(
+            [self._get_mocap_id("reported_pose_left"), self._get_mocap_id("reported_pose_right")],
+            dtype=np.int32,
+        )
+        self.target_mocap_id = int(self.target_mocap_ids[Config.LEFT_ARM])
+        self.reported_mocap_id = int(self.reported_mocap_ids[Config.LEFT_ARM])
         self.locked_dof_ids = self._resolve_uncontrolled_dof_ids()
         self.locked_qpos_ids = self._resolve_uncontrolled_qpos_ids()
         self._torque_buffer = np.empty(Config.NUM_JOINTS, dtype=np.float64)
@@ -126,43 +144,64 @@ class MujocoSimEnv:
         mujoco.mj_forward(self.model, self.data)
 
     def get_qpos(self) -> np.ndarray:
-        """获取 7 轴关节角度 (rad)"""
+        """获取 14 轴关节角度 (rad)"""
         return self.data.qpos[self.dof_ids].copy()
 
     def set_qpos(self, qpos: np.ndarray) -> None:
-        """设置 7 轴关节角度"""
+        """设置 14 轴关节角度"""
         self.data.qpos[self.dof_ids] = qpos
 
     def get_qvel(self) -> np.ndarray:
-        """获取 7 轴关节角速度 (rad/s)"""
+        """获取 14 轴关节角速度 (rad/s)"""
         return self.data.qvel[self.dof_ids].copy()
 
     def set_qvel(self, qvel: np.ndarray) -> None:
-        """设置 7 轴关节角速度"""
+        """设置 14 轴关节角速度"""
         self.data.qvel[self.dof_ids] = qvel
 
-    def get_ee_pos(self) -> np.ndarray:
+    def arm_slice(self, arm: int) -> slice:
+        """返回指定机械臂在 14 轴数组中的切片。"""
+        start = int(arm) * Config.ARM_JOINTS
+        return slice(start, start + Config.ARM_JOINTS)
+
+    def get_arm_qpos(self, arm: int) -> np.ndarray:
+        """获取指定机械臂 7 轴关节角度。"""
+        return self.get_qpos()[self.arm_slice(arm)]
+
+    def get_arm_qvel(self, arm: int) -> np.ndarray:
+        """获取指定机械臂 7 轴关节角速度。"""
+        return self.get_qvel()[self.arm_slice(arm)]
+
+    def get_ee_pos(self, arm: int = Config.LEFT_ARM) -> np.ndarray:
         """获取 TCP 位置 [x, y, z] (m)"""
-        return self.data.xpos[self.ee_body_id].copy()
+        return self.data.xpos[self.ee_body_ids[int(arm)]].copy()
 
-    def get_ee_quat(self) -> np.ndarray:
+    def get_ee_quat(self, arm: int = Config.LEFT_ARM) -> np.ndarray:
         """获取末端四元数 [w, x, y, z]（MuJoCo 格式）"""
-        return self.data.xquat[self.ee_body_id].copy()
+        return self.data.xquat[self.ee_body_ids[int(arm)]].copy()
 
-    def get_ee_rotmat(self) -> np.ndarray:
+    def get_ee_rotmat(self, arm: int = Config.LEFT_ARM) -> np.ndarray:
         """获取末端旋转矩阵 (3x3)"""
-        return self.data.xmat[self.ee_body_id].reshape(3, 3).copy()
+        return self.data.xmat[self.ee_body_ids[int(arm)]].reshape(3, 3).copy()
+
+    def get_all_ee_pos(self) -> np.ndarray:
+        """获取左右 TCP 位置，形状为 (2, 3)。"""
+        return self.data.xpos[self.ee_body_ids].copy()
+
+    def get_all_ee_quat(self) -> np.ndarray:
+        """获取左右 TCP 四元数，形状为 (2, 4)。"""
+        return self.data.xquat[self.ee_body_ids].copy()
 
     def get_state_snapshot(
         self,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """一次性取出 UDP / Rerun 所需状态，减少热路径上的重复函数往返。"""
-        pos_desired, quat_desired = self.get_target_pose()
+        pos_desired, quat_desired = self.get_all_target_poses()
         return (
             self.data.qpos[self.dof_ids].copy(),
             self.data.qvel[self.dof_ids].copy(),
-            self.data.xpos[self.ee_body_id].copy(),
-            self.data.xquat[self.ee_body_id].copy(),
+            self.data.xpos[self.ee_body_ids].copy(),
+            self.data.xquat[self.ee_body_ids].copy(),
             pos_desired,
             quat_desired,
         )
@@ -173,73 +212,96 @@ class MujocoSimEnv:
             raise ValueError(
                 f"control input packet must contain {CONTROL_INPUT_PACKET_SIZE} doubles"
             )
-        if self.target_mocap_id >= 0:
-            target_pos = self.data.mocap_pos[self.target_mocap_id]
-            target_quat = self.data.mocap_quat[self.target_mocap_id]
-        else:
-            target_pos = self._zero_pos
-            target_quat = self._unit_quat
+        target_pos, target_quat = self.get_all_target_poses()
 
         fill_control_input_packet(
             state_packet,
             self.data.qpos[self.dof_ids],
             self.data.qvel[self.dof_ids],
-            target_pos,
-            target_quat,
+            target_pos[Config.LEFT_ARM],
+            target_quat[Config.LEFT_ARM],
+            target_pos[Config.RIGHT_ARM],
+            target_quat[Config.RIGHT_ARM],
             Config.DT,
         )
 
-    def get_jacobian(self) -> tuple[np.ndarray, np.ndarray]:
+    def get_jacobian(self, arm: int = Config.LEFT_ARM) -> tuple[np.ndarray, np.ndarray]:
         """
         计算 TCP 处的几何雅可比矩阵
         返回: (jacp, jacr) 各为 (3, nv) 的矩阵
         """
         jacp = np.zeros((3, self.model.nv))
         jacr = np.zeros((3, self.model.nv))
-        mujoco.mj_jacBody(self.model, self.data, jacp, jacr, self.ee_body_id)
+        mujoco.mj_jacBody(self.model, self.data, jacp, jacr, int(self.ee_body_ids[int(arm)]))
         return jacp, jacr
 
-    def set_target_pose(self, pos: np.ndarray, quat: np.ndarray | None = None) -> None:
+    def set_target_pose(
+        self,
+        pos: np.ndarray,
+        quat: np.ndarray | None = None,
+        arm: int = Config.LEFT_ARM,
+    ) -> None:
         """设置目标可视化物体的位姿 (mocap body)"""
-        if self.target_mocap_id < 0:
+        mocap_id = int(self.target_mocap_ids[int(arm)])
+        if mocap_id < 0:
             return
-        self.data.mocap_pos[self.target_mocap_id] = pos
+        self.data.mocap_pos[mocap_id] = pos
         if quat is not None:
-            self.data.mocap_quat[self.target_mocap_id] = quat
+            self.data.mocap_quat[mocap_id] = quat
 
-    def get_target_pose(self) -> tuple[np.ndarray, np.ndarray]:
+    def set_all_target_poses(
+        self,
+        pos: np.ndarray,
+        quat: np.ndarray | None = None,
+    ) -> None:
+        """设置左右目标可视化物体的位姿。"""
+        for arm in range(Config.NUM_ARMS):
+            arm_quat = None if quat is None else quat[arm]
+            self.set_target_pose(pos[arm], arm_quat, arm=arm)
+
+    def get_target_pose(self, arm: int = Config.LEFT_ARM) -> tuple[np.ndarray, np.ndarray]:
         """获取目标可视化物体的当前位姿 (mocap body)"""
-        if self.target_mocap_id >= 0:
+        mocap_id = int(self.target_mocap_ids[int(arm)])
+        if mocap_id >= 0:
             return (
-                self.data.mocap_pos[self.target_mocap_id].copy(),
-                self.data.mocap_quat[self.target_mocap_id].copy(),
+                self.data.mocap_pos[mocap_id].copy(),
+                self.data.mocap_quat[mocap_id].copy(),
             )
         return self._zero_pos.copy(), self._unit_quat.copy()
 
-    def get_jacobian_7dof(self) -> np.ndarray:
+    def get_all_target_poses(self) -> tuple[np.ndarray, np.ndarray]:
+        """获取左右目标可视化物体的当前位姿。"""
+        pos = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
+        quat = np.zeros((Config.NUM_ARMS, 4), dtype=np.float64)
+        for arm in range(Config.NUM_ARMS):
+            pos[arm], quat[arm] = self.get_target_pose(arm)
+        return pos, quat
+
+    def get_jacobian_7dof(self, arm: int = Config.LEFT_ARM) -> np.ndarray:
         """
         获取 6x7 几何雅可比矩阵（仅 7 个关节自由度）
         返回: J (6, 7)，前 3 行为线速度，后 3 行为角速度
         """
-        jacp, jacr = self.get_jacobian()
-        return np.vstack([jacp[:, self.dof_ids], jacr[:, self.dof_ids]])
+        jacp, jacr = self.get_jacobian(arm)
+        arm_dof_ids = self.dof_ids[self.arm_slice(arm)]
+        return np.vstack([jacp[:, arm_dof_ids], jacr[:, arm_dof_ids]])
 
     def get_qfrc_bias(self) -> np.ndarray:
         """
         获取 MuJoCo 计算的 qfrc_bias（重力 + Coriolis）
-        返回: tau (7,)
+        返回: tau (14,)
         """
         return self.data.qfrc_bias[self.dof_ids].copy()
 
     def apply_torque(self, tau: np.ndarray) -> None:
         """
         施加关节力矩
-        tau: (7,) 各关节力矩 (N·m)
+        tau: (14,) 各关节力矩 (N·m)
         """
         self.data.qfrc_applied[self.dof_ids] = tau
 
     def _lock_uncontrolled_joints(self) -> None:
-        """锁住 AM-DPBSURDF0422 中未接入 7 轴控制器的自由度。"""
+        """锁住 AM-DPBSURDF0422 中未接入 14 轴控制器的自由度。"""
         if len(self.locked_qpos_ids):
             self.data.qpos[self.locked_qpos_ids] = 0.0
         if len(self.locked_dof_ids):
