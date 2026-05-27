@@ -326,6 +326,92 @@ def test_c_body_gravity_uses_three_body_joint_angles(tmp_path: Path):
     assert np.linalg.norm(rows[1]) == pytest.approx(9.81, abs=1e-9)
 
 
+def test_c_safety_uses_urdf_right_arm_position_limits_and_per_joint_velocity(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "control_logic.h"
+        #include <stdio.h>
+
+        static void print_status(const char *label, int side, double q[7], double qd[7]) {
+          printf("%s %d\\n", label, control_check_safety_arm(side, q, qd));
+        }
+
+        int main(void) {
+          double right_min[7] = {
+            RIGHT_JOINT_POS_MIN_1, RIGHT_JOINT_POS_MIN_2, RIGHT_JOINT_POS_MIN_3,
+            RIGHT_JOINT_POS_MIN_4, RIGHT_JOINT_POS_MIN_5, RIGHT_JOINT_POS_MIN_6,
+            RIGHT_JOINT_POS_MIN_7
+          };
+          double right_max[7] = {
+            RIGHT_JOINT_POS_MAX_1, RIGHT_JOINT_POS_MAX_2, RIGHT_JOINT_POS_MAX_3,
+            RIGHT_JOINT_POS_MAX_4, RIGHT_JOINT_POS_MAX_5, RIGHT_JOINT_POS_MAX_6,
+            RIGHT_JOINT_POS_MAX_7
+          };
+          double left_min[7] = {
+            JOINT_POS_MIN_1, JOINT_POS_MIN_2, JOINT_POS_MIN_3, JOINT_POS_MIN_4,
+            JOINT_POS_MIN_5, JOINT_POS_MIN_6, JOINT_POS_MIN_7
+          };
+          double left_max[7] = {
+            JOINT_POS_MAX_1, JOINT_POS_MAX_2, JOINT_POS_MAX_3, JOINT_POS_MAX_4,
+            JOINT_POS_MAX_5, JOINT_POS_MAX_6, JOINT_POS_MAX_7
+          };
+          double right_vel[7] = {
+            RIGHT_JOINT_VEL_LIMIT_1, RIGHT_JOINT_VEL_LIMIT_2, RIGHT_JOINT_VEL_LIMIT_3,
+            RIGHT_JOINT_VEL_LIMIT_4, RIGHT_JOINT_VEL_LIMIT_5, RIGHT_JOINT_VEL_LIMIT_6,
+            RIGHT_JOINT_VEL_LIMIT_7
+          };
+          double left_vel[7] = {
+            JOINT_VEL_LIMIT_1, JOINT_VEL_LIMIT_2, JOINT_VEL_LIMIT_3, JOINT_VEL_LIMIT_4,
+            JOINT_VEL_LIMIT_5, JOINT_VEL_LIMIT_6, JOINT_VEL_LIMIT_7
+          };
+          double q[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+          double qd[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+          control_init();
+          print_status("right_center", ARM_RIGHT, q, qd);
+          for (int i = 0; i < 7; ++i) {
+            q[i] = right_min[i] - 0.011;
+            print_status("right_low", ARM_RIGHT, q, qd);
+            q[i] = right_max[i] + 0.011;
+            print_status("right_high", ARM_RIGHT, q, qd);
+            q[i] = 0.0;
+          }
+
+          q[0] = left_min[0] - 0.011;
+          print_status("left_j1_low", ARM_LEFT, q, qd);
+          q[0] = 0.0;
+          q[6] = left_max[6] + 0.011;
+          print_status("left_j7_high", ARM_LEFT, q, qd);
+          q[6] = 0.0;
+
+          qd[0] = right_vel[0] - 0.001;
+          print_status("right_vel_ok", ARM_RIGHT, q, qd);
+          qd[0] = right_vel[0] + 0.001;
+          print_status("right_vel_high", ARM_RIGHT, q, qd);
+          qd[0] = 0.0;
+          qd[6] = -left_vel[6] - 0.001;
+          print_status("left_vel_low", ARM_LEFT, q, qd);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source)
+    lines = subprocess.check_output([str(probe)], text=True, stderr=subprocess.DEVNULL).splitlines()
+    statuses: dict[str, list[int]] = {}
+    for line in lines:
+      label, status = line.split()
+      statuses.setdefault(label, []).append(int(status))
+
+    assert statuses["right_center"] == [0]
+    assert statuses["right_low"] == [-1] * 7
+    assert statuses["right_high"] == [-1] * 7
+    assert statuses["left_j1_low"] == [-1]
+    assert statuses["left_j7_high"] == [-1]
+    assert statuses["right_vel_ok"] == [0]
+    assert statuses["right_vel_high"] == [-2]
+    assert statuses["left_vel_low"] == [-2]
+
+
 def test_stm_controller_uses_input_dt_with_control_dt_fallback(tmp_path: Path):
     source = textwrap.dedent(
         """

@@ -204,78 +204,73 @@ def _setup_trajectory_styles():
 
 def _setup_arm_realtime_styles() -> None:
     """为左右臂合并曲线写入 Rerun SeriesLines 样式。"""
-    position_names = [
-        f"{axis} Actual" for axis in ("X", "Y", "Z")
-    ] + [
-        f"{axis} Target" for axis in ("X", "Y", "Z")
-    ]
-    position_colors = [_AXIS_COLORS[axis] for axis in ("X", "Y", "Z")] * 2
-    position_widths = [2.0, 2.0, 2.0, 1.2, 1.2, 1.2]
-
-    rotation_names = [
-        f"{axis} Actual" for axis in ("Roll", "Pitch", "Yaw")
-    ] + [
-        f"{axis} Target" for axis in ("Roll", "Pitch", "Yaw")
-    ]
-    rotation_colors = [_AXIS_COLORS[axis] for axis in ("Roll", "Pitch", "Yaw")] * 2
-    rotation_widths = [2.0, 2.0, 2.0, 1.2, 1.2, 1.2]
-
     for arm_label, arm_name in zip(_ARM_LABELS, _ARM_DISPLAY_NAMES):
-        rr.log(
-            f"arms/{arm_label}/position",
-            rr.SeriesLines(colors=position_colors, names=position_names, widths=position_widths),
-            static=True,
-        )
-        rr.log(
-            f"arms/{arm_label}/rotation",
-            rr.SeriesLines(colors=rotation_colors, names=rotation_names, widths=rotation_widths),
-            static=True,
-        )
-        rr.log(
-            f"arms/{arm_label}/position_error",
-            rr.SeriesLines(
-                colors=[_AXIS_COLORS[axis] for axis in ("X", "Y", "Z")],
-                names=[f"{axis} Error" for axis in ("X", "Y", "Z")],
-                widths=[2.0, 2.0, 2.0],
-            ),
-            static=True,
-        )
-        rr.log(
-            f"arms/{arm_label}/rotation_error",
-            rr.SeriesLines(
-                colors=[_AXIS_COLORS[axis] for axis in ("Roll", "Pitch", "Yaw")],
-                names=[f"{axis} Error" for axis in ("Roll", "Pitch", "Yaw")],
-                widths=[2.0, 2.0, 2.0],
-            ),
-            static=True,
-        )
-        rr.log(
-            f"arms/{arm_label}/joint_q",
-            rr.SeriesLines(
-                colors=_JOINT_COLORS[:Config.ARM_JOINTS],
-                names=[f"{arm_name} J{i + 1} q" for i in range(Config.ARM_JOINTS)],
-                widths=[2.0] * Config.ARM_JOINTS,
-            ),
-            static=True,
-        )
-        rr.log(
-            f"arms/{arm_label}/joint_qd",
-            rr.SeriesLines(
-                colors=_JOINT_COLORS[:Config.ARM_JOINTS],
-                names=[f"{arm_name} J{i + 1} qd" for i in range(Config.ARM_JOINTS)],
-                widths=[2.0] * Config.ARM_JOINTS,
-            ),
-            static=True,
-        )
-        rr.log(
-            f"arms/{arm_label}/torque",
-            rr.SeriesLines(
-                colors=_JOINT_COLORS[:Config.ARM_JOINTS],
-                names=[f"{arm_name} J{i + 1} Tau" for i in range(Config.ARM_JOINTS)],
-                widths=[2.0] * Config.ARM_JOINTS,
-            ),
-            static=True,
-        )
+        for axis in ("X", "Y", "Z"):
+            rr.log(
+                f"arms/{arm_label}/position/{axis}",
+                rr.SeriesLines(
+                    colors=[_AXIS_COLORS[axis], _AXIS_COLORS[axis]],
+                    names=[f"{arm_name} {axis} Actual", f"{arm_name} {axis} Target"],
+                    widths=[2.0, 1.2],
+                ),
+                static=True,
+            )
+            rr.log(
+                f"arms/{arm_label}/position_error/{axis}",
+                rr.SeriesLines(
+                    colors=[_AXIS_COLORS[axis]],
+                    names=[f"{arm_name} {axis} Error"],
+                    widths=[2.0],
+                ),
+                static=True,
+            )
+        for axis in ("Roll", "Pitch", "Yaw"):
+            rr.log(
+                f"arms/{arm_label}/rotation/{axis}",
+                rr.SeriesLines(
+                    colors=[_AXIS_COLORS[axis], _AXIS_COLORS[axis]],
+                    names=[f"{arm_name} {axis} Actual", f"{arm_name} {axis} Target"],
+                    widths=[2.0, 1.2],
+                ),
+                static=True,
+            )
+            rr.log(
+                f"arms/{arm_label}/rotation_error/{axis}",
+                rr.SeriesLines(
+                    colors=[_AXIS_COLORS[axis]],
+                    names=[f"{arm_name} {axis} Error"],
+                    widths=[2.0],
+                ),
+                static=True,
+            )
+        for i in range(Config.ARM_JOINTS):
+            joint = f"J{i + 1}"
+            color = _JOINT_COLORS[i]
+            rr.log(
+                f"arms/{arm_label}/joint_q/{joint}",
+                rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} q"], widths=[2.0]),
+                static=True,
+            )
+            rr.log(
+                f"arms/{arm_label}/joint_qd/{joint}",
+                rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} qd"], widths=[2.0]),
+                static=True,
+            )
+            rr.log(
+                f"arms/{arm_label}/torque/{joint}",
+                rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} Tau"], widths=[2.0]),
+                static=True,
+            )
+            rr.log(
+                f"arms/{arm_label}/torque_actual/{joint}",
+                rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} Actual Tau"], widths=[1.5]),
+                static=True,
+            )
+            rr.log(
+                f"arms/{arm_label}/torque_gap/{joint}",
+                rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} Tau Gap"], widths=[2.0]),
+                static=True,
+            )
 
 def setup_realtime_styles():
     """设置交互式 Rerun 的曲线样式和试图蓝图，在仿真启动前调用"""
@@ -286,17 +281,20 @@ def setup_realtime_styles():
     rr.set_time_seconds("time", 0.0)
     for arm_label in _ARM_LABELS:
         for axis in ("X", "Y", "Z"):
-            rr.log(f"arms/{arm_label}/position/{axis}_actual", rr.Scalars(0.0))
-            rr.log(f"arms/{arm_label}/position/{axis}_target", rr.Scalars(0.0))
-            rr.log(f"arms/{arm_label}/position_error/{axis}", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/position/{axis}/actual", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/position/{axis}/target", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/position_error/{axis}/value", rr.Scalars(0.0))
         for axis in ("Roll", "Pitch", "Yaw"):
-            rr.log(f"arms/{arm_label}/rotation/{axis}_actual", rr.Scalars(0.0))
-            rr.log(f"arms/{arm_label}/rotation/{axis}_target", rr.Scalars(0.0))
-            rr.log(f"arms/{arm_label}/rotation_error/{axis}", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/rotation/{axis}/actual", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/rotation/{axis}/target", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/rotation_error/{axis}/value", rr.Scalars(0.0))
         for i in range(Config.ARM_JOINTS):
-            rr.log(f"arms/{arm_label}/joint_q/J{i+1}", rr.Scalars(0.0))
-            rr.log(f"arms/{arm_label}/joint_qd/J{i+1}", rr.Scalars(0.0))
-            rr.log(f"arms/{arm_label}/torque/J{i+1}", rr.Scalars(0.0))
+            joint = f"J{i + 1}"
+            rr.log(f"arms/{arm_label}/joint_q/{joint}/value", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/joint_qd/{joint}/value", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/torque/{joint}/command", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/torque_actual/{joint}/value", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/torque_gap/{joint}/value", rr.Scalars(0.0))
     rr.log("performance/c_engine_time", rr.Scalars(0.0))
     rr.log("performance/link_latency", rr.Scalars(0.0))
     rr.log("performance/link_cycle_hz", rr.Scalars(0.0))
@@ -330,23 +328,63 @@ def setup_realtime_styles():
         name="Python Control Step Time (ms)", origin="/performance/c_engine_time",
     )
 
-    def arm_tab(arm_label: str, arm_name: str):
+    def arm_view(arm_label: str, arm_name: str, key: str, title: str, unit: str):
         return rrb.Vertical(
-            rrb.TimeSeriesView(name=f"{arm_name} Position ({_POSITION_DISPLAY_UNIT})", origin=f"/arms/{arm_label}/position"),
-            rrb.TimeSeriesView(name=f"{arm_name} Rotation (deg)", origin=f"/arms/{arm_label}/rotation"),
-            rrb.TimeSeriesView(name=f"{arm_name} Position Error (mm)", origin=f"/arms/{arm_label}/position_error"),
-            rrb.TimeSeriesView(name=f"{arm_name} Rotation Error (deg)", origin=f"/arms/{arm_label}/rotation_error"),
-            rrb.TimeSeriesView(name=f"{arm_name} Joint Positions (rad)", origin=f"/arms/{arm_label}/joint_q"),
-            rrb.TimeSeriesView(name=f"{arm_name} Joint Velocities (rad/s)", origin=f"/arms/{arm_label}/joint_qd"),
-            rrb.TimeSeriesView(name=f"{arm_name} Torque (N*m)", origin=f"/arms/{arm_label}/torque"),
-            name=f"{arm_name} Arm",
+            rrb.TimeSeriesView(
+                name=f"{arm_name} {title} ({unit})",
+                origin=f"/arms/{arm_label}/{key}",
+            ),
+            name=f"{arm_name} {title}",
+        )
+
+    def arm_axis_view(
+        arm_label: str,
+        arm_name: str,
+        key: str,
+        title: str,
+        axes: tuple[str, ...],
+        unit: str,
+    ):
+        return rrb.Vertical(
+            *[
+                rrb.TimeSeriesView(
+                    name=f"{arm_name} {title} {axis} ({unit})",
+                    origin=f"/arms/{arm_label}/{key}/{axis}",
+                )
+                for axis in axes
+            ],
+            name=f"{arm_name} {title}",
+        )
+
+    def arm_joint_axis_view(arm_label: str, arm_name: str, key: str, title: str, unit: str):
+        return arm_axis_view(
+            arm_label,
+            arm_name,
+            key,
+            title,
+            tuple(f"J{i + 1}" for i in range(Config.ARM_JOINTS)),
+            unit,
         )
 
     blueprint = rrb.Blueprint(
         rrb.Tabs(
             rrb.Spatial3DView(name="3D", origin="/trajectory_3d"),
-            arm_tab("left", "Left"),
-            arm_tab("right", "Right"),
+            arm_axis_view("left", "Left", "position", "Position", ("X", "Y", "Z"), _POSITION_DISPLAY_UNIT),
+            arm_axis_view("right", "Right", "position", "Position", ("X", "Y", "Z"), _POSITION_DISPLAY_UNIT),
+            arm_axis_view("left", "Left", "rotation", "Rotation", ("Roll", "Pitch", "Yaw"), "deg"),
+            arm_axis_view("right", "Right", "rotation", "Rotation", ("Roll", "Pitch", "Yaw"), "deg"),
+            arm_axis_view("left", "Left", "position_error", "Position Error", ("X", "Y", "Z"), "mm"),
+            arm_axis_view("right", "Right", "position_error", "Position Error", ("X", "Y", "Z"), "mm"),
+            arm_axis_view("left", "Left", "rotation_error", "Rotation Error", ("Roll", "Pitch", "Yaw"), "deg"),
+            arm_axis_view("right", "Right", "rotation_error", "Rotation Error", ("Roll", "Pitch", "Yaw"), "deg"),
+            arm_joint_axis_view("left", "Left", "joint_q", "Joint Q", "rad"),
+            arm_joint_axis_view("right", "Right", "joint_q", "Joint Q", "rad"),
+            arm_joint_axis_view("left", "Left", "joint_qd", "Joint QD", "rad/s"),
+            arm_joint_axis_view("right", "Right", "joint_qd", "Joint QD", "rad/s"),
+            arm_joint_axis_view("left", "Left", "torque", "Torque", "N*m"),
+            arm_joint_axis_view("right", "Right", "torque", "Torque", "N*m"),
+            arm_joint_axis_view("left", "Left", "torque_gap", "Torque Gap", "N*m"),
+            arm_joint_axis_view("right", "Right", "torque_gap", "Torque Gap", "N*m"),
             rrb.Vertical(
                 python_time_view,
                 link_cycle_rate_view,
@@ -354,9 +392,9 @@ def setup_realtime_styles():
                 latency_view,
                 stm32_time_view,
                 stm32_rate_view,
-                link_log_view,
                 name="Performance",
             ),
+            rrb.Vertical(link_log_view, latency_view, name="Control Link"),
         ),
         collapse_panels=True,
     )
@@ -397,9 +435,9 @@ def log_realtime_step(
         pos_actual_display = _position_to_display_units(pos_actual_by_arm[arm])
         pos_desired_display = _position_to_display_units(pos_desired_by_arm[arm])
         for i, axis in enumerate(('X', 'Y', 'Z')):
-            rr.log(f"arms/{arm_label}/position/{axis}_actual", rr.Scalars(float(pos_actual_display[i])))
-            rr.log(f"arms/{arm_label}/position/{axis}_target", rr.Scalars(float(pos_desired_display[i])))
-            rr.log(f"arms/{arm_label}/position_error/{axis}", rr.Scalars(float(pos_actual_display[i] - pos_desired_display[i])))
+            rr.log(f"arms/{arm_label}/position/{axis}/actual", rr.Scalars(float(pos_actual_display[i])))
+            rr.log(f"arms/{arm_label}/position/{axis}/target", rr.Scalars(float(pos_desired_display[i])))
+            rr.log(f"arms/{arm_label}/position_error/{axis}/value", rr.Scalars(float(pos_actual_display[i] - pos_desired_display[i])))
 
         rot_actual = quat_to_euler(quat_actual_by_arm[arm])
         rot_desired = quat_to_euler(quat_desired_by_arm[arm])
@@ -408,30 +446,30 @@ def log_realtime_step(
         rot_desired_deg = np.rad2deg(rot_desired)
 
         for i, axis in enumerate(('Roll', 'Pitch', 'Yaw')):
-            rr.log(f"arms/{arm_label}/rotation/{axis}_actual", rr.Scalars(float(rot_actual_deg[i])))
-            rr.log(f"arms/{arm_label}/rotation/{axis}_target", rr.Scalars(float(rot_desired_deg[i])))
-            rr.log(f"arms/{arm_label}/rotation_error/{axis}", rr.Scalars(float(rot_err[i])))
+            rr.log(f"arms/{arm_label}/rotation/{axis}/actual", rr.Scalars(float(rot_actual_deg[i])))
+            rr.log(f"arms/{arm_label}/rotation/{axis}/target", rr.Scalars(float(rot_desired_deg[i])))
+            rr.log(f"arms/{arm_label}/rotation_error/{axis}/value", rr.Scalars(float(rot_err[i])))
 
     if q is not None:
         q_by_arm = _as_arm_array(q, Config.ARM_JOINTS)
         for arm, arm_label in enumerate(_ARM_LABELS[: len(q_by_arm)]):
             for i, value in enumerate(q_by_arm[arm]):
-                rr.log(f"arms/{arm_label}/joint_q/J{i+1}", rr.Scalars(float(value)))
+                rr.log(f"arms/{arm_label}/joint_q/J{i+1}/value", rr.Scalars(float(value)))
     if qd is not None:
         qd_by_arm = _as_arm_array(qd, Config.ARM_JOINTS)
         for arm, arm_label in enumerate(_ARM_LABELS[: len(qd_by_arm)]):
             for i, value in enumerate(qd_by_arm[arm]):
-                rr.log(f"arms/{arm_label}/joint_qd/J{i+1}", rr.Scalars(float(value)))
+                rr.log(f"arms/{arm_label}/joint_qd/J{i+1}/value", rr.Scalars(float(value)))
         
     tau_by_arm = _as_arm_array(tau_total, Config.ARM_JOINTS)
     tau_actual_by_arm = None if tau_actual is None else _as_arm_array(tau_actual, Config.ARM_JOINTS)
     for arm, arm_label in enumerate(_ARM_LABELS[: len(tau_by_arm)]):
         for i, value in enumerate(tau_by_arm[arm]):
-            rr.log(f"arms/{arm_label}/torque/J{i+1}", rr.Scalars(float(value)))
+            rr.log(f"arms/{arm_label}/torque/J{i+1}/command", rr.Scalars(float(value)))
             if tau_actual_by_arm is not None:
-                rr.log(f"arms/{arm_label}/torque_actual/J{i+1}", rr.Scalars(float(tau_actual_by_arm[arm, i])))
+                rr.log(f"arms/{arm_label}/torque_actual/J{i+1}/value", rr.Scalars(float(tau_actual_by_arm[arm, i])))
                 rr.log(
-                    f"arms/{arm_label}/torque_gap/J{i+1}",
+                    f"arms/{arm_label}/torque_gap/J{i+1}/value",
                     rr.Scalars(float(value - tau_actual_by_arm[arm, i])),
                 )
             

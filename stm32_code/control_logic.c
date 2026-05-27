@@ -678,13 +678,28 @@ int control_check_safety_arm(int side, const double q[ARM_JOINTS],
       JOINT_POS_MAX_1, JOINT_POS_MAX_2, JOINT_POS_MAX_3, JOINT_POS_MAX_4,
       JOINT_POS_MAX_5, JOINT_POS_MAX_6, JOINT_POS_MAX_7};
   const double joint_min_right[ARM_JOINTS] = {
-      -2.405, -0.6605, -1.763, -0.0165, -1.5935, -0.6015, -1.1075};
+      RIGHT_JOINT_POS_MIN_1, RIGHT_JOINT_POS_MIN_2, RIGHT_JOINT_POS_MIN_3,
+      RIGHT_JOINT_POS_MIN_4, RIGHT_JOINT_POS_MIN_5, RIGHT_JOINT_POS_MIN_6,
+      RIGHT_JOINT_POS_MIN_7};
   const double joint_max_right[ARM_JOINTS] = {
-      2.2175, 2.203, 1.594, 2.3235, 1.574, 0.6755, 1.068};
+      RIGHT_JOINT_POS_MAX_1, RIGHT_JOINT_POS_MAX_2, RIGHT_JOINT_POS_MAX_3,
+      RIGHT_JOINT_POS_MAX_4, RIGHT_JOINT_POS_MAX_5, RIGHT_JOINT_POS_MAX_6,
+      RIGHT_JOINT_POS_MAX_7};
+  const double joint_vel_left[ARM_JOINTS] = {
+      JOINT_VEL_LIMIT_1, JOINT_VEL_LIMIT_2, JOINT_VEL_LIMIT_3,
+      JOINT_VEL_LIMIT_4, JOINT_VEL_LIMIT_5, JOINT_VEL_LIMIT_6,
+      JOINT_VEL_LIMIT_7};
+  const double joint_vel_right[ARM_JOINTS] = {
+      RIGHT_JOINT_VEL_LIMIT_1, RIGHT_JOINT_VEL_LIMIT_2,
+      RIGHT_JOINT_VEL_LIMIT_3, RIGHT_JOINT_VEL_LIMIT_4,
+      RIGHT_JOINT_VEL_LIMIT_5, RIGHT_JOINT_VEL_LIMIT_6,
+      RIGHT_JOINT_VEL_LIMIT_7};
   const double *joint_min =
       normalize_side(side) == ARM_RIGHT ? joint_min_right : joint_min_left;
   const double *joint_max =
       normalize_side(side) == ARM_RIGHT ? joint_max_right : joint_max_left;
+  const double *joint_vel =
+      normalize_side(side) == ARM_RIGHT ? joint_vel_right : joint_vel_left;
 
   for (int i = 0; i < ARM_JOINTS; i++) {
     /* 位置检查 (允许 0.01 rad 的容差以避免边界抖动) */
@@ -699,9 +714,9 @@ int control_check_safety_arm(int side, const double q[ARM_JOINTS],
       return -1;
     }
     /* 速度检查 */
-    if (qd[i] > JOINT_VEL_LIMIT || qd[i] < -JOINT_VEL_LIMIT) {
+    if (qd[i] > joint_vel[i] || qd[i] < -joint_vel[i]) {
       fprintf(stderr, "[SAFETY] Arm%d J%d velocity error: %.4f (limit: %.4f)\n",
-              normalize_side(side), i + 1, qd[i], JOINT_VEL_LIMIT);
+              normalize_side(side), i + 1, qd[i], joint_vel[i]);
       return -2;
     }
   }
