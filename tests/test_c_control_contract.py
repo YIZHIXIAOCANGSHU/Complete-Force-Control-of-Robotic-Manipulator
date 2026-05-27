@@ -220,7 +220,7 @@ def test_mujoco_state_packet_sends_target_pose_not_actual_tcp():
     assert not np.allclose(packet[RIGHT_TARGET_POS_OFFSET:RIGHT_TARGET_QUAT_OFFSET], env.get_ee_pos(Config.RIGHT_ARM))
 
 
-def test_control_step_zero_pose_error_outputs_bias_compensation_only(tmp_path: Path):
+def test_dual_control_zero_pose_error_outputs_bias_compensation_only(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "control_logic.h"
@@ -228,26 +228,34 @@ def test_control_step_zero_pose_error_outputs_bias_compensation_only(tmp_path: P
         #include <stdio.h>
 
         int main(void) {
-          double q[7] = {0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0};
-          double qd[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-          double target_pos[3];
-          double target_quat[4];
-          double gravity[7];
-          double coriolis[7];
-          double tau[7];
+          double q[14] = {
+            0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0
+          };
+          double qd[14] = {0.0};
+          double target_pos[2][3];
+          double target_quat[2][4];
+          RBDLModel model;
+          double tau_gc[7];
+          double tau[14];
           double max_extra = 0.0;
 
           control_init();
-          control_get_fk_with_offset(q, target_pos, target_quat);
-          control_calc_gravity_compensation(q, gravity);
-          control_calc_coriolis_compensation(q, qd, coriolis);
-          control_step_v2(target_pos, target_quat, q, qd, tau);
+          for (int arm = 0; arm < 2; ++arm) {
+            int offset = arm * 7;
+            control_get_fk_with_offset_arm(arm, q + offset, target_pos[arm], target_quat[arm]);
+          }
+          control_step_v2_dual(target_pos, target_quat, q, qd, tau);
 
-          for (int i = 0; i < 7; ++i) {
-            double expected = gravity[i] + coriolis[i];
-            double extra = fabs(tau[i] - expected);
-            if (extra > max_extra) {
-              max_extra = extra;
+          for (int arm = 0; arm < 2; ++arm) {
+            int offset = arm * 7;
+            build_am_d02_arm_model(arm, &model);
+            rbdl_calc_gc(&model, q + offset, qd + offset, tau_gc);
+            for (int i = 0; i < 7; ++i) {
+              double extra = fabs(tau[offset + i] - tau_gc[i]);
+              if (extra > max_extra) {
+                max_extra = extra;
+              }
             }
           }
 
@@ -262,7 +270,7 @@ def test_control_step_zero_pose_error_outputs_bias_compensation_only(tmp_path: P
     assert max_extra < 1e-7
 
 
-def test_control_step_nonzero_pose_error_adds_cartesian_correction(tmp_path: Path):
+def test_dual_control_nonzero_pose_error_adds_cartesian_correction(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "control_logic.h"
@@ -270,28 +278,36 @@ def test_control_step_nonzero_pose_error_adds_cartesian_correction(tmp_path: Pat
         #include <stdio.h>
 
         int main(void) {
-          double q[7] = {0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0};
-          double qd[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-          double target_pos[3];
-          double target_quat[4];
-          double gravity[7];
-          double coriolis[7];
-          double tau[7];
+          double q[14] = {
+            0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0
+          };
+          double qd[14] = {0.0};
+          double target_pos[2][3];
+          double target_quat[2][4];
+          RBDLModel model;
+          double tau_gc[7];
+          double tau[14];
           double max_extra = 0.0;
 
           control_init();
-          control_get_fk_with_offset(q, target_pos, target_quat);
-          target_pos[0] += 0.02;
-          target_pos[2] += 0.01;
-          control_calc_gravity_compensation(q, gravity);
-          control_calc_coriolis_compensation(q, qd, coriolis);
-          control_step_v2(target_pos, target_quat, q, qd, tau);
+          for (int arm = 0; arm < 2; ++arm) {
+            int offset = arm * 7;
+            control_get_fk_with_offset_arm(arm, q + offset, target_pos[arm], target_quat[arm]);
+            target_pos[arm][0] += 0.02;
+            target_pos[arm][2] += 0.01;
+          }
+          control_step_v2_dual(target_pos, target_quat, q, qd, tau);
 
-          for (int i = 0; i < 7; ++i) {
-            double expected = gravity[i] + coriolis[i];
-            double extra = fabs(tau[i] - expected);
-            if (extra > max_extra) {
-              max_extra = extra;
+          for (int arm = 0; arm < 2; ++arm) {
+            int offset = arm * 7;
+            build_am_d02_arm_model(arm, &model);
+            rbdl_calc_gc(&model, q + offset, qd + offset, tau_gc);
+            for (int i = 0; i < 7; ++i) {
+              double extra = fabs(tau[offset + i] - tau_gc[i]);
+              if (extra > max_extra) {
+                max_extra = extra;
+              }
             }
           }
 
@@ -304,6 +320,40 @@ def test_control_step_nonzero_pose_error_adds_cartesian_correction(tmp_path: Pat
     max_extra = float(subprocess.check_output([str(probe)], text=True).strip())
 
     assert max_extra > 0.01
+
+
+def test_trajectory_lib_remains_available_for_endpoint_path_planning(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "trajectory_lib.h"
+        #include <stdio.h>
+
+        int main(void) {
+          LinearPathPlanner planner;
+          double start_pos[3] = {0.0, 0.0, 0.0};
+          double end_pos[3] = {1.0, 0.0, 0.0};
+          double start_quat[4] = {1.0, 0.0, 0.0, 0.0};
+          double end_quat[4] = {1.0, 0.0, 0.0, 0.0};
+          double pos[3];
+          double quat[4];
+
+          linear_path_init(&planner, start_pos, start_quat, end_pos, end_quat, 0.5, 1.0);
+          linear_path_evaluate(&planner, 0.1, pos, quat);
+          printf("%.12f %.12f %.12f %.12f\\n", pos[0], pos[1], pos[2], planner.total_time);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source)
+    values = [
+        float(value)
+        for value in subprocess.check_output([str(probe)], text=True).split()
+    ]
+
+    assert 0.0 < values[0] < 1.0
+    assert values[1] == pytest.approx(0.0)
+    assert values[2] == pytest.approx(0.0)
+    assert values[3] > 0.0
 
 
 def test_c_body_gravity_uses_three_body_joint_angles(tmp_path: Path):
@@ -514,6 +564,95 @@ def test_stm_input_no_longer_exposes_sim_dt(tmp_path: Path):
     assert "dt_s" in completed.stderr
 
 
+@pytest.mark.parametrize(
+    ("source", "missing_name"),
+    [
+        (
+            """
+            #include "control_logic.h"
+            int main(void) {
+              double q[7] = {0};
+              double qd[7] = {0};
+              double pos[3] = {0};
+              double quat[4] = {1, 0, 0, 0};
+              double tau[7];
+              control_step_v2(pos, quat, q, qd, tau);
+              return 0;
+            }
+            """,
+            "control_step_v2",
+        ),
+        (
+            """
+            #include "control_logic.h"
+            int main(void) {
+              double q[7] = {0};
+              double pos[3];
+              double quat[4];
+              control_get_fk_with_offset(q, pos, quat);
+              return 0;
+            }
+            """,
+            "control_get_fk_with_offset",
+        ),
+        (
+            """
+            #include "control_logic.h"
+            int main(void) {
+              double q[7] = {0};
+              double qd[7] = {0};
+              return control_check_safety(q, qd);
+            }
+            """,
+            "control_check_safety",
+        ),
+        (
+            """
+            #include "model_lib.h"
+            int main(void) {
+              RBDLModel model;
+              build_am_d02_model(&model);
+              return 0;
+            }
+            """,
+            "build_am_d02_model",
+        ),
+        (
+            """
+            #include "kinematics_lib.h"
+            int main(void) {
+              KinematicsSolver solver;
+              (void)solver;
+              return 0;
+            }
+            """,
+            "KinematicsSolver",
+        ),
+    ],
+)
+def test_removed_left_arm_and_legacy_ik_symbols_no_longer_compile(
+    tmp_path: Path, source: str, missing_name: str
+):
+    probe_c = tmp_path / "probe.c"
+    probe_bin = tmp_path / "probe"
+    probe_c.write_text(textwrap.dedent(source), encoding="utf-8")
+    cmd = [
+        "gcc",
+        "-o",
+        str(probe_bin),
+        str(probe_c),
+        "-I",
+        str(PROJECT_ROOT / "stm32_code"),
+        "-O2",
+        "-Wall",
+        "-Werror",
+        "-lm",
+    ]
+    completed = subprocess.run(cmd, cwd=PROJECT_ROOT, text=True, capture_output=True)
+    assert completed.returncode != 0
+    assert missing_name in completed.stderr
+
+
 def test_h7_clock_sim_samples_1mhz_elapsed_time_with_clamp(tmp_path: Path):
     source = textwrap.dedent(
         """
@@ -564,7 +703,7 @@ def test_c_sim_main_is_one_receive_one_send_without_scheduler_ticks():
     assert "for (int tick" not in main_source
 
 
-def test_stm_controller_reference_moves_by_configured_speed_without_reset(tmp_path: Path):
+def test_stm_controller_reference_uses_linear_path_planner_with_acceleration(tmp_path: Path):
     source = textwrap.dedent(
         f"""
         #include "stm_controller.c"
@@ -583,10 +722,13 @@ def test_stm_controller_reference_moves_by_configured_speed_without_reset(tmp_pa
           stm_controller_update_reference(current_pos, current_quat, target_a,
                                           target_quat, CONTROL_DT, ref_pos, ref_quat);
           printf("%.9f %.9f %.9f\\n", ref_pos[0], ref_pos[1], ref_pos[2]);
+          g_controller.traj_t += CONTROL_DT;
 
-          current_pos[0] = -5.0;
-          current_pos[1] = -5.0;
-          current_pos[2] = -5.0;
+          stm_controller_update_reference(current_pos, current_quat, target_a,
+                                          target_quat, CONTROL_DT, ref_pos, ref_quat);
+          printf("%.9f %.9f %.9f\\n", ref_pos[0], ref_pos[1], ref_pos[2]);
+          g_controller.traj_t += CONTROL_DT;
+
           stm_controller_update_reference(current_pos, current_quat, target_b,
                                           target_quat, CONTROL_DT, ref_pos, ref_quat);
           printf("%.9f %.9f %.9f\\n", ref_pos[0], ref_pos[1], ref_pos[2]);
@@ -603,11 +745,12 @@ def test_stm_controller_reference_moves_by_configured_speed_without_reset(tmp_pa
         dtype=np.float64,
     )
 
-    first_step = 0.75 * 0.001
+    first_step = 0.5 * 1.25 * 0.001 * 0.001
+    second_step = 0.5 * 1.25 * 0.002 * 0.002
     np.testing.assert_allclose(rows[0], [first_step, 0.0, 0.0], atol=1e-9)
+    np.testing.assert_allclose(rows[1], [second_step, 0.0, 0.0], atol=1e-9)
 
-    direction = np.array([1.0, 1.0, 0.0]) - rows[0]
-    expected_second = rows[0] + first_step * direction / np.linalg.norm(direction)
-    np.testing.assert_allclose(rows[1], expected_second, atol=1e-9)
-    assert np.linalg.norm(rows[1] - rows[0]) == pytest.approx(first_step)
-    assert not np.allclose(rows[1], [-5.0, -5.0, -5.0])
+    direction = np.array([1.0, 1.0, 0.0]) - rows[1]
+    direction = direction / np.linalg.norm(direction)
+    expected_replanned = rows[1] + first_step * direction
+    np.testing.assert_allclose(rows[2], expected_replanned, atol=1e-9)

@@ -216,7 +216,3 @@ void build_am_d02_arm_model(int side, RBDLModel *model) {
     b->S[5] = 0.0;
   }
 }
-
-void build_am_d02_model(RBDLModel *model) {
-  build_am_d02_arm_model(ARM_LEFT, model);
-}

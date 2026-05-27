@@ -4,13 +4,12 @@
 #include <string.h>
 
 typedef struct {
-  KinematicsSolver kin_solver;
   RBDLModel rbdl_model;
   KalmanFilter1D vel_filters[ARM_JOINTS];
   int initialized;
 } ControlArmContext;
 
-/* 左右臂独立控制上下文。单臂兼容接口默认使用左臂。 */
+/* 左右臂独立控制上下文。 */
 static ControlArmContext g_arm_contexts[NUM_ARMS];
 
 static const double TCP_OFFSETS[NUM_ARMS][3] = {
@@ -139,12 +138,6 @@ static void control_compute_body_rotation(const double body_q[NUM_BODY_JOINTS],
   mat3_mul_inplace(R_base_to_body, R_joint);
 }
 
-#if 0
-/* 姿态规划的滤波器状态 */
-static double g_q_ref_filtered[7] = {0};
-static int g_planner_first_call = 1;
-#endif
-
 /* ================================================================
  *  内部辅助函数
  * ================================================================ */
@@ -195,41 +188,6 @@ static void apply_tcp_frame_orientation(int side, double quat_xyzw[4]) {
   quat_normalize(quat_xyzw);
 }
 
-#if 0
-/**
- * 姿态规划器计算：根据目标位姿和首选姿态计算参考关节角
- */
-static void posture_planner_compute(const Pose *target_pose,
-                                    const double current_q[7],
-                                    const double q_preferred[7], double alpha,
-                                    double q_ref_out[7]) {
-  double q_init[7];
-  for (int i = 0; i < 7; i++) {
-    q_init[i] = current_q[i] + alpha * (q_preferred[i] - current_q[i]);
-  }
-
-  double q_result[7];
-  uint8_t ok = kinematics_compute_inverse_pose_dls(&g_kin_solver, target_pose,
-                                                   q_init, q_result, 30);
-
-  if (!ok) {
-    memcpy(q_ref_out, current_q, sizeof(double) * 7);
-    return;
-  }
-
-  double smooth = 0.5;
-  if (g_planner_first_call) {
-    memcpy(g_q_ref_filtered, current_q, sizeof(double) * 7);
-    g_planner_first_call = 0;
-  }
-
-  for (int i = 0; i < 7; i++) {
-    g_q_ref_filtered[i] += smooth * (q_result[i] - g_q_ref_filtered[i]);
-    q_ref_out[i] = g_q_ref_filtered[i];
-  }
-}
-#endif
-
 /* ================================================================
  *  公开 API
  * ================================================================ */
@@ -238,7 +196,6 @@ static void control_init_context(int side) {
   ControlArmContext *ctx = control_get_context(side);
   if (ctx->initialized)
     return;
-  kinematics_init(&ctx->kin_solver);
   build_am_d02_arm_model(normalize_side(side), &ctx->rbdl_model);
   
   for (int i = 0; i < ARM_JOINTS; i++) {
@@ -298,122 +255,6 @@ void control_calc_gravity_compensation_arm(int side,
   rbdl_calc_gravity(&ctx->rbdl_model, q, G);
 }
 
-void control_calc_gravity_compensation(const double q[ARM_JOINTS],
-                                       double G[ARM_JOINTS]) {
-  control_calc_gravity_compensation_arm(ARM_LEFT, q, G);
-}
-
-/* 计算重力补偿 + 关节 PD */
-void control_calc_gravity_pd_compensation(const double q[ARM_JOINTS],
-                                          const double qd[ARM_JOINTS],
-                                          const double q_target[ARM_JOINTS],
-                                          double tau_out[ARM_JOINTS]) {
-  ControlArmContext *ctx = control_get_context(ARM_LEFT);
-  control_init_context(ARM_LEFT);
-
-  double G[ARM_JOINTS];
-  rbdl_calc_gravity(&ctx->rbdl_model, q, G);
-
-  const double joint_kp[ARM_JOINTS] = {
-      KP_JOINT_1, KP_JOINT_2, KP_JOINT_3, KP_JOINT_4,
-      KP_JOINT_5, KP_JOINT_6, KP_JOINT_7};
-  const double joint_kd[ARM_JOINTS] = {
-      KD_JOINT_1, KD_JOINT_2, KD_JOINT_3, KD_JOINT_4,
-      KD_JOINT_5, KD_JOINT_6, KD_JOINT_7};
-
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    double eq = normalize_angle(q_target[i] - q[i]);
-    tau_out[i] = G[i] + joint_kp[i] * eq - joint_kd[i] * qd[i];
-
-    /* 施加关节力矩饱和限位 */
-    if (tau_out[i] > TORQUE_LIMIT[i])
-      tau_out[i] = TORQUE_LIMIT[i];
-    if (tau_out[i] < -TORQUE_LIMIT[i])
-      tau_out[i] = -TORQUE_LIMIT[i];
-  }
-}
-
-/* 计算 重力补偿 + 关节 PD + 笛卡尔 PD */
-void control_calc_cartesian_joint_pd_compensation(
-    const double q[ARM_JOINTS], const double qd[ARM_JOINTS],
-    const double q_target[ARM_JOINTS],
-    const double target_pos[3], const double target_quat[4],
-    double tau_out[ARM_JOINTS]) {
-  ControlArmContext *ctx = control_get_context(ARM_LEFT);
-  control_init_context(ARM_LEFT);
-
-  // 1. 重力补偿
-  double G[ARM_JOINTS];
-  rbdl_calc_gravity(&ctx->rbdl_model, q, G);
-
-  // 2. 关节空间 PD 增益与误差
-  const double joint_kp[ARM_JOINTS] = {
-      KP_JOINT_1, KP_JOINT_2, KP_JOINT_3, KP_JOINT_4,
-      KP_JOINT_5, KP_JOINT_6, KP_JOINT_7};
-  const double joint_kd[ARM_JOINTS] = {
-      KD_JOINT_1, KD_JOINT_2, KD_JOINT_3, KD_JOINT_4,
-      KD_JOINT_5, KD_JOINT_6, KD_JOINT_7};
-
-  double tau_joint[ARM_JOINTS] = {0};
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    double eq = normalize_angle(q_target[i] - q[i]);
-    tau_joint[i] = joint_kp[i] * eq - joint_kd[i] * qd[i];
-  }
-
-  // 3. 笛卡尔空间 PD (参考 control_step_v2 的误差计算逻辑)
-  const double cartesian_K[6] = {KP_CART_X,    KP_CART_Y,     KP_CART_Z,
-                                 KP_CART_ROLL, KP_CART_PITCH, KP_CART_YAW};
-  const double cartesian_D[6] = {KD_CART_X,    KD_CART_Y,     KD_CART_Z,
-                                 KD_CART_ROLL, KD_CART_PITCH, KD_CART_YAW};
-
-  double pos_ee[3], quat_xyzw[4], J_1D[42];
-  rbdl_forward_kinematics(&ctx->rbdl_model, q, pos_ee, quat_xyzw);
-  rbdl_calc_jacobian(&ctx->rbdl_model, q, J_1D);
-
-  double J[6][ARM_JOINTS];
-  for (int r = 0; r < 6; r++)
-    for (int c = 0; c < ARM_JOINTS; c++)
-      J[r][c] = J_1D[r + 6 * c];
-  apply_tcp_offset(pos_ee, quat_xyzw, TCP_OFFSETS[ARM_LEFT], J);
-  apply_tcp_frame_orientation(ARM_LEFT, quat_xyzw);
-
-  double e6[6], v_ee[6] = {0};
-  // A. 位置误差
-  e6[0] = target_pos[0] - pos_ee[0];
-  e6[1] = target_pos[1] - pos_ee[1];
-  e6[2] = target_pos[2] - pos_ee[2];
-
-  // B. 姿态误差 (轴角小量)
-  quat_error_to_axis_angle(target_quat, quat_xyzw, &e6[3]);
-
-  // C. 末端速度 v_ee = J * qd
-  for (int i = 0; i < 6; i++) {
-    for (int j = 0; j < ARM_JOINTS; j++) {
-      v_ee[i] += J[i][j] * qd[j];
-    }
-  }
-
-  // D. 笛卡尔力矩 tau_cart = J^T * (K*e - D*v)
-  double tau_cart[ARM_JOINTS] = {0};
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    for (int j = 0; j < 6; j++) {
-      double F_j = cartesian_K[j] * e6[j] - cartesian_D[j] * v_ee[j];
-      tau_cart[i] += J[j][i] * F_j;
-    }
-  }
-
-  // 4. 总力矩融合: Tau = G + Tau_joint + Tau_cart
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    tau_out[i] = G[i] + tau_joint[i] + tau_cart[i];
-
-    /* 施加关节力矩饱和限位 */
-    if (tau_out[i] > TORQUE_LIMIT[i])
-      tau_out[i] = TORQUE_LIMIT[i];
-    if (tau_out[i] < -TORQUE_LIMIT[i])
-      tau_out[i] = -TORQUE_LIMIT[i];
-  }
-}
-
 /* 计算离心力/科氏力补偿 */
 void control_calc_coriolis_compensation_arm(int side,
                                             const double q[ARM_JOINTS],
@@ -427,12 +268,6 @@ void control_calc_coriolis_compensation_arm(int side,
   rbdl_calc_gravity(&ctx->rbdl_model, q, G);
   for (int i = 0; i < ARM_JOINTS; i++)
     tau_c[i] = tau_gc[i] - G[i];
-}
-
-void control_calc_coriolis_compensation(const double q[ARM_JOINTS],
-                                        const double qd[ARM_JOINTS],
-                                        double tau_c[ARM_JOINTS]) {
-  control_calc_coriolis_compensation_arm(ARM_LEFT, q, qd, tau_c);
 }
 
 /* 获取带有 TCP 偏移的正运动学位姿 */
@@ -452,13 +287,8 @@ void control_get_fk_with_offset_arm(int side, const double q[ARM_JOINTS],
   quat[3] = quat_xyzw[2];
 }
 
-void control_get_fk_with_offset(const double q[ARM_JOINTS], double pos[3],
-                                double quat[4]) {
-  control_get_fk_with_offset_arm(ARM_LEFT, q, pos, quat);
-}
-
 /* ================================================================
- *  核心控制逻辑: 双空间阻抗控制 (control_step_v2)
+ *  核心控制逻辑: 双空间阻抗控制
  * ================================================================
  * 函数使用示例 包含默认的值
  *
@@ -527,7 +357,7 @@ void control_step_v2_arm(int side, const double target_pos[3],
   e6[1] = target_pos[1] - pos_ee[1];
   e6[2] = target_pos[2] - pos_ee[2];
 
-  // 姿态误差使用轴角小量，与 pose_error_6d 对齐。
+  // 姿态误差使用轴角小量，与 Python 侧误差约定对齐。
   quat_error_to_axis_angle(target_quat, quat_xyzw, &e6[3]);
 
   /* 2. 计算末端速度: v_ee = J * current_qd */
@@ -649,14 +479,6 @@ void control_step_v2_arm(int side, const double target_pos[3],
   }
 }
 
-void control_step_v2(const double target_pos[3], const double target_quat[4],
-                     const double current_q[ARM_JOINTS],
-                     const double current_qd[ARM_JOINTS],
-                     double tau_out[ARM_JOINTS]) {
-  control_step_v2_arm(ARM_LEFT, target_pos, target_quat, current_q, current_qd,
-                      tau_out);
-}
-
 void control_step_v2_dual(const double target_pos[NUM_ARMS][3],
                           const double target_quat[NUM_ARMS][4],
                           const double current_q[NUM_JOINTS],
@@ -724,11 +546,6 @@ int control_check_safety_arm(int side, const double q[ARM_JOINTS],
   return 0;
 }
 
-int control_check_safety(const double q[ARM_JOINTS],
-                         const double qd[ARM_JOINTS]) {
-  return control_check_safety_arm(ARM_LEFT, q, qd);
-}
-
 void control_filter_velocities_arm(int side, const double qd_raw[ARM_JOINTS],
                                    double qd_filtered[ARM_JOINTS]) {
   ControlArmContext *ctx = control_get_context(side);
@@ -736,9 +553,4 @@ void control_filter_velocities_arm(int side, const double qd_raw[ARM_JOINTS],
   for (int i = 0; i < ARM_JOINTS; i++) {
     qd_filtered[i] = kalman_filter1d_update(&ctx->vel_filters[i], qd_raw[i]);
   }
-}
-
-void control_filter_velocities(const double qd_raw[ARM_JOINTS],
-                               double qd_filtered[ARM_JOINTS]) {
-  control_filter_velocities_arm(ARM_LEFT, qd_raw, qd_filtered);
 }

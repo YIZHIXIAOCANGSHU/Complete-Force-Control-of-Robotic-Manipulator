@@ -90,8 +90,11 @@ q[14] + qd[14]
 MuJoCo 里的目标方块会按该相对位姿随 Body0422 一起平移和旋转；四元数也使用同一个动态目标坐标系。
 C 端不接收 MuJoCo 仿真步长；host wrapper 使用独立的 H7 1MHz 微秒时基测量两次
 UDP 控制循环之间的 elapsed time。sim UDP 保持一收一发：每收到一帧 MuJoCo 状态，
-C 端计算一次力矩并立即发送一次 `tau[14]`；末端参考按 `TRAJ_PLAN_SPEED * elapsed_s`
-推进，Python/MuJoCo 的物理步长不参与路径速度计算。
+C 端计算一次力矩并立即发送一次 `tau[14]`。左右末端参考由 C 端 `LinearPathPlanner`
+按 `TRAJ_PLAN_SPEED` / `TRAJ_PLAN_ACCEL` 做梯形速度直线路径规划，并由 H7 elapsed time
+推进；Python/MuJoCo 的物理步长不参与路径速度计算。
+C 侧不再保留默认左臂 7 轴闭环入口；公开控制链路使用双臂 14 轴接口，底层按
+`ARM_LEFT` / `ARM_RIGHT` 分别计算每只手臂。
 
 ## 常用环境变量
 

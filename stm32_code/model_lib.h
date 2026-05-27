@@ -14,45 +14,6 @@ extern "C" {
 #endif
 
 /* ================================================================
- *  基础类型 (DH, 位姿, 变换)
- * ================================================================ */
-
-/**
- * @brief DH 参数结构体
- */
-typedef struct {
-  double d;     /* 连杆偏移 (沿着上一 Z 轴的距离) */
-  double theta; /* 关节角偏移 (绕着上一 Z 轴的旋转角) */
-  double a;     /* 连杆长度 (沿着 X 轴的距离) */
-  double alpha; /* 连杆扭角 (绕着 X 轴的旋转角) */
-} DHParameters;
-
-/**
- * @brief 4x4 变换矩阵
- */
-typedef struct {
-  double m[4][4];
-} TransformMatrix;
-
-/**
- * @brief 四元数: [x, y, z, w]
- */
-typedef struct {
-  double x;
-  double y;
-  double z;
-  double w;
-} Quaternion;
-
-/**
- * @brief 空间位姿 (包含平移与四元数旋转)
- */
-typedef struct {
-  double position[3];     /* 位置 [x, y, z] */
-  Quaternion orientation; /* 姿态四元数 [x, y, z, w] */
-} Pose;
-
-/* ================================================================
  *  RBDL-Lite 结构体定义
  * ================================================================ */
 
@@ -125,11 +86,6 @@ extern const double AM_D02_RIGHT_LINK_INERTIA[ARM_JOINTS][6];
  * @brief 构建 AM-DPBSURDF0422 指定侧七轴 RBDL 动力学模型
  */
 void build_am_d02_arm_model(int side, RBDLModel *model);
-
-/**
- * @brief 构建 AM-DPBSURDF0422 左臂七轴 RBDL 动力学模型
- */
-void build_am_d02_model(RBDLModel *model);
 
 #ifdef __cplusplus
 }

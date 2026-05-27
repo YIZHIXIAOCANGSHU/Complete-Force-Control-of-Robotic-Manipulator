@@ -8,7 +8,7 @@
  * @file control_logic.h
  * @brief STM32 机械臂双空间阻抗控制逻辑封装
  *
- * 提供基础的运动学封装、动力学补偿以及核心的控制步进函数 (control_step_v2)。
+ * 提供基础的运动学封装、动力学补偿以及核心的双臂控制步进函数。
  */
 #ifndef CONTROL_LOGIC_H
 #define CONTROL_LOGIC_H
@@ -32,7 +32,7 @@ void control_get_body_gravity(double gravity_out[3]);
  * 平移，坐标轴跟随 Body0422 相对零位旋转。target_quat 使用同一个动态目标坐标系。
  */
 /**
- * @brief 核心控制逻辑: 双空间阻抗控制 (基于位置姿态误差计算各关节输出力矩)
+ * @brief 单侧手臂控制逻辑，由 control_step_v2_dual 调用。
  *
  * 将当前机械臂末端与目标末端的差异投射到关节空间，同时在零空间(Null-space)维护首选姿态，
  * 最终输出经过重力与科氏力补偿的控制力矩 tau_out。
@@ -43,10 +43,6 @@ void control_get_body_gravity(double gravity_out[3]);
  * @param current_qd 当前各关节角速度 [qd1..qd7]
  * @param tau_out 传出计算得到的关节期望力矩 [tau1..tau7]
  */
-void control_step_v2(const double target_pos[3], const double target_quat[4],
-                     const double current_q[ARM_JOINTS],
-                     const double current_qd[ARM_JOINTS],
-                     double tau_out[ARM_JOINTS]);
 void control_step_v2_arm(int side, const double target_pos[3],
                          const double target_quat[4],
                          const double current_q[ARM_JOINTS],
@@ -59,29 +55,14 @@ void control_step_v2_dual(const double target_pos[NUM_ARMS][3],
                           double tau_out[NUM_JOINTS]);
 
 /* 显式暴露的补偿函数 */
-void control_calc_gravity_compensation(const double q[ARM_JOINTS],
-                                       double G[ARM_JOINTS]);
 void control_calc_gravity_compensation_arm(int side, const double q[ARM_JOINTS],
                                            double G[ARM_JOINTS]);
-void control_calc_gravity_pd_compensation(const double q[ARM_JOINTS],
-                                          const double qd[ARM_JOINTS],
-                                          const double q_target[ARM_JOINTS],
-                                          double tau_out[ARM_JOINTS]);
-void control_calc_cartesian_joint_pd_compensation(
-    const double q[ARM_JOINTS], const double qd[ARM_JOINTS],
-    const double q_target[ARM_JOINTS], const double target_pos[3],
-    const double target_quat[4], double tau_out[ARM_JOINTS]);
-void control_calc_coriolis_compensation(const double q[ARM_JOINTS],
-                                        const double qd[ARM_JOINTS],
-                                        double tau_c[ARM_JOINTS]);
 void control_calc_coriolis_compensation_arm(int side,
                                             const double q[ARM_JOINTS],
                                             const double qd[ARM_JOINTS],
                                             double tau_c[ARM_JOINTS]);
 
 /* 带有 TCP 偏移的正运动学辅助函数 */
-void control_get_fk_with_offset(const double q[ARM_JOINTS], double pos[3],
-                                double quat[4]);
 void control_get_fk_with_offset_arm(int side, const double q[ARM_JOINTS],
                                     double pos[3], double quat[4]);
 
@@ -91,8 +72,6 @@ void control_get_fk_with_offset_arm(int side, const double q[ARM_JOINTS],
  * @param qd 当前各关节角速度
  * @return 0 if safe, -1 if position limit violated, -2 if velocity limit violated
  */
-int control_check_safety(const double q[ARM_JOINTS],
-                         const double qd[ARM_JOINTS]);
 int control_check_safety_arm(int side, const double q[ARM_JOINTS],
                              const double qd[ARM_JOINTS]);
 
@@ -101,8 +80,6 @@ int control_check_safety_arm(int side, const double q[ARM_JOINTS],
  * @param qd_raw 原始输入速度
  * @param qd_filtered 滤波后的输出速度
  */
-void control_filter_velocities(const double qd_raw[ARM_JOINTS],
-                               double qd_filtered[ARM_JOINTS]);
 void control_filter_velocities_arm(int side, const double qd_raw[ARM_JOINTS],
                                    double qd_filtered[ARM_JOINTS]);
 

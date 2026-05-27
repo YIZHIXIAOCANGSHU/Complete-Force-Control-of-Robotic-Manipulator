@@ -7,11 +7,10 @@ STM32_SRCS = $(STM32_DIR)/control_logic.c \
              $(STM32_DIR)/trajectory_lib.c \
              $(STM32_DIR)/stm_controller.c
 
-HOST_BRIDGE_SRCS = sim_bridge.c
 H7_CLOCK_SRCS = h7_clock_sim/h7_clock_sim.c
 
-c_main: main.c main_stm.c sim_interface.c $(HOST_BRIDGE_SRCS) $(STM32_SRCS) $(STM32_DIR)/config.h
-	gcc -o c_main main.c main_stm.c sim_interface.c $(HOST_BRIDGE_SRCS) $(H7_CLOCK_SRCS) $(STM32_SRCS) -I$(STM32_DIR) -Ih7_clock_sim -O2 -Wall -lm
+c_main: main.c main_stm.c sim_interface.c $(STM32_SRCS) $(STM32_DIR)/config.h
+	gcc -o c_main main.c main_stm.c sim_interface.c $(H7_CLOCK_SRCS) $(STM32_SRCS) -I$(STM32_DIR) -Ih7_clock_sim -O2 -Wall -lm
 
 clean:
 	rm -f c_main

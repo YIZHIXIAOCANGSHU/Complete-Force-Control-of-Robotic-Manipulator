@@ -1,6 +1,7 @@
 #include "stm_controller.h"
 
 #include "control_logic.h"
+#include "trajectory_lib.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,6 +17,8 @@ typedef struct {
   double target_quat[NUM_ARMS][4];
   double ref_pos[NUM_ARMS][3];
   double ref_quat[NUM_ARMS][4];
+  LinearPathPlanner path_planner[NUM_ARMS];
+  double path_start_t[NUM_ARMS];
 } StmControllerState;
 
 static StmControllerState g_controller = {0};
@@ -41,6 +44,25 @@ static int stm_controller_is_finite_vec(const double *values, int count) {
     }
   }
   return 1;
+}
+
+static int stm_controller_pose_changed(int arm, const double target_pos[3],
+                                       const double target_quat[4]) {
+  if (!g_controller.target_valid[arm]) {
+    return 1;
+  }
+
+  for (int i = 0; i < 3; ++i) {
+    if (fabs(target_pos[i] - g_controller.target_pos[arm][i]) > 1e-9) {
+      return 1;
+    }
+  }
+
+  double dot = 0.0;
+  for (int i = 0; i < 4; ++i) {
+    dot += target_quat[i] * g_controller.target_quat[arm][i];
+  }
+  return fabs(fabs(dot) - 1.0) > 1e-9;
 }
 
 static void stm_controller_sanitize_target_pose(const stm_input_t *in,
@@ -86,13 +108,10 @@ static void stm_controller_update_reference_arm(int arm,
                                                 const double target_quat[4],
                                                 double step_s, double ref_pos[3],
                                                 double ref_quat[4]) {
-  double delta[3];
-  double distance;
-  double ratio;
+  int replan = stm_controller_pose_changed(arm, target_pos, target_quat);
+  double path_t;
 
-  memcpy(g_controller.target_pos[arm], target_pos, sizeof(double) * 3);
-  memcpy(g_controller.target_quat[arm], target_quat, sizeof(double) * 4);
-  g_controller.target_valid[arm] = 1;
+  (void)step_s;
 
   if (!g_controller.ref_valid[arm]) {
     memcpy(g_controller.ref_pos[arm], current_pos, sizeof(double) * 3);
@@ -100,31 +119,23 @@ static void stm_controller_update_reference_arm(int arm,
     g_controller.ref_valid[arm] = 1;
   }
 
-  for (int i = 0; i < 3; ++i) {
-    delta[i] = target_pos[i] - g_controller.ref_pos[arm][i];
-  }
-  distance = sqrt(delta[0] * delta[0] + delta[1] * delta[1] +
-                  delta[2] * delta[2]);
-
-  if (distance <= 1e-9) {
-    ratio = 1.0;
-    memcpy(g_controller.ref_pos[arm], target_pos, sizeof(double) * 3);
-  } else {
-    double max_step = TRAJ_PLAN_SPEED * step_s;
-    ratio = max_step / distance;
-    if (ratio > 1.0) {
-      ratio = 1.0;
-    }
-    if (ratio < 0.0 || !isfinite(ratio)) {
-      ratio = 0.0;
-    }
-    for (int i = 0; i < 3; ++i) {
-      g_controller.ref_pos[arm][i] += ratio * delta[i];
-    }
+  if (replan) {
+    linear_path_init(&g_controller.path_planner[arm], g_controller.ref_pos[arm],
+                     g_controller.ref_quat[arm], target_pos, target_quat,
+                     TRAJ_PLAN_SPEED, TRAJ_PLAN_ACCEL);
+    g_controller.path_start_t[arm] = g_controller.traj_t;
+    memcpy(g_controller.target_pos[arm], target_pos, sizeof(double) * 3);
+    memcpy(g_controller.target_quat[arm], target_quat, sizeof(double) * 4);
+    g_controller.target_valid[arm] = 1;
   }
 
-  quat_slerp(g_controller.ref_quat[arm], target_quat, ratio,
-             g_controller.ref_quat[arm]);
+  path_t = g_controller.traj_t + step_s - g_controller.path_start_t[arm];
+  if (path_t < 0.0 || !isfinite(path_t)) {
+    path_t = 0.0;
+  }
+  linear_path_evaluate(&g_controller.path_planner[arm], path_t,
+                       g_controller.ref_pos[arm],
+                       g_controller.ref_quat[arm]);
 
   memcpy(ref_pos, g_controller.ref_pos[arm], sizeof(double) * 3);
   memcpy(ref_quat, g_controller.ref_quat[arm], sizeof(double) * 4);
@@ -208,6 +219,8 @@ void stm_controller_reset(void) {
   memset(g_controller.target_quat, 0, sizeof(g_controller.target_quat));
   memset(g_controller.ref_pos, 0, sizeof(g_controller.ref_pos));
   memset(g_controller.ref_quat, 0, sizeof(g_controller.ref_quat));
+  memset(g_controller.path_planner, 0, sizeof(g_controller.path_planner));
+  memset(g_controller.path_start_t, 0, sizeof(g_controller.path_start_t));
 }
 
 void stm_controller_init(void) {
