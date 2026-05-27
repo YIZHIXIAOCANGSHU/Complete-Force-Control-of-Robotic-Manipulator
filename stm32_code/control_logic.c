@@ -464,7 +464,7 @@ void control_get_fk_with_offset(const double q[ARM_JOINTS], double pos[3],
  *
  * 函数输入的内容
  * target_pos: 目标末端位置 (Body0422 动态目标坐标系) 格式为[x,y,z]
- * target_quat: 目标末端姿态，坐标轴方向保持初始 URDF/base 方向，格式为[w,x,y,z]
+ * target_quat: 目标末端姿态，使用随 Body0422 相对零位旋转的动态目标坐标系，格式为[w,x,y,z]
  * current_q: 当前关节角度 格式为[q1,q2,q3,q4,q5,q6,q7]
  * current_qd: 当前关节速度
  * 格式为[qd1,qd2,qd3,qd4,qd5,qd6,qd7] cartesian_K: 笛卡尔空间位置/姿态比例增益

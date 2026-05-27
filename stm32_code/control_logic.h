@@ -29,7 +29,7 @@ void control_get_body_gravity(double gravity_out[3]);
 
 /* 步进 V2: 规划 + 双空间阻抗控制
  * 注意: target_pos 使用 Body0422 动态目标坐标系；该坐标系原点跟随 Body0422_Link
- * 平移，坐标轴保持初始 URDF/base 方向。target_quat 仍使用同一固定方向坐标轴。
+ * 平移，坐标轴跟随 Body0422 相对零位旋转。target_quat 使用同一个动态目标坐标系。
  */
 /**
  * @brief 核心控制逻辑: 双空间阻抗控制 (基于位置姿态误差计算各关节输出力矩)

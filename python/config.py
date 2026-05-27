@@ -104,7 +104,7 @@ class Config:
     RIGHT_TCP_FRAME_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
     TCP_FRAME_QUATS = np.vstack([LEFT_TCP_FRAME_QUAT, RIGHT_TCP_FRAME_QUAT])
 
-    # 目标方块位置坐标系：原点跟随 Body0422_Link 平移，坐标轴保持初始 URDF/base 方向。
+    # 目标方块坐标系：原点跟随 Body0422_Link，坐标轴跟随其相对零位旋转。
     TARGET_FRAME_BODY_NAME = "Body0422_Link"
     TARGET_FRAME_MARKER_BODY = "target_frame_body0422"
     TARGET_FRAME_ORIGIN_BASE_ZERO = np.array([0.0, 0.0715607946769668, 0.213])

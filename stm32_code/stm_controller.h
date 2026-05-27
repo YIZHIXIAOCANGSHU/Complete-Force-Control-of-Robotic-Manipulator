@@ -12,7 +12,7 @@ typedef struct {
   double qd[NUM_JOINTS];
   /* Sim-only Body0422 torso command: Waist01, Waist02, Body0422. */
   double body_q[NUM_BODY_JOINTS];
-  /* Target TCP pose in the Body0422 dynamic target frame. */
+  /* Target TCP pose in the Body0422 dynamic frame, including relative rotation. */
   double target_pos[NUM_ARMS][3];
   double target_quat[NUM_ARMS][4];
   double dt_s;
