@@ -12,7 +12,7 @@ static struct sockaddr_in server_addr;
 static socklen_t addr_len = sizeof(server_addr);
 
 enum {
-  CONTROL_INPUT_PACKET_DOUBLES = 46,
+  CONTROL_INPUT_PACKET_DOUBLES = 45,
   TORQUE_OUTPUT_PACKET_DOUBLES = 14,
   NUM_ARMS_SIM = 2,
   ARM_JOINTS_SIM = 7,
@@ -25,11 +25,10 @@ enum {
   LEFT_TARGET_QUAT_OFFSET = 34,
   RIGHT_TARGET_POS_OFFSET = 38,
   RIGHT_TARGET_QUAT_OFFSET = 41,
-  DT_OFFSET = 45,
 };
 
 // 缓存 Python 转发给 C 闭环控制器的输入：
-// qpos(14), qvel(14), body_q(3), left_pos(3), left_quat(4), right_pos(3), right_quat(4), dt_s(1)
+// qpos(14), qvel(14), body_q(3), left_pos(3), left_quat(4), right_pos(3), right_quat(4)
 static double cached_state[CONTROL_INPUT_PACKET_DOUBLES];
 
 // 辅助函数，阻塞等待接收控制输入包
@@ -99,8 +98,7 @@ int sim_init(const char *ip, int port) {
 void sim_get_state(double *qpos, double *qvel, double ee_pos[2][3],
                    double ee_quat[2][4], double target_pos[2][3],
                    double target_quat[2][4]) {
-  double unused_dt = 0.0;
-  sim_get_control_input(qpos, qvel, NULL, target_pos, target_quat, &unused_dt);
+  sim_get_control_input(qpos, qvel, NULL, target_pos, target_quat);
   if (ee_pos)
     memset(ee_pos, 0, NUM_ARMS_SIM * 3 * sizeof(double));
   if (ee_quat) {
@@ -112,7 +110,7 @@ void sim_get_state(double *qpos, double *qvel, double ee_pos[2][3],
 
 void sim_get_control_input(double *qpos, double *qvel, double *body_q,
                            double target_pos[2][3],
-                           double target_quat[2][4], double *dt_s) {
+                           double target_quat[2][4]) {
   if (qpos)
     memcpy(qpos, cached_state + Q_OFFSET, NUM_JOINTS_SIM * sizeof(double));
   if (qvel)
@@ -128,8 +126,6 @@ void sim_get_control_input(double *qpos, double *qvel, double *body_q,
     memcpy(target_quat[0], cached_state + LEFT_TARGET_QUAT_OFFSET, 4 * sizeof(double));
     memcpy(target_quat[1], cached_state + RIGHT_TARGET_QUAT_OFFSET, 4 * sizeof(double));
   }
-  if (dt_s)
-    *dt_s = cached_state[DT_OFFSET];
 }
 
 int sim_apply_torque(const double *tau) {

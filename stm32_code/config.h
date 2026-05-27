@@ -118,14 +118,14 @@
 #define Q_PREF_6 0.0
 #define Q_PREF_7 0.0
 
-#define POSTURE_ALPHA 0.3
-#define W_CARTESIAN 0.8
-#define W_JOINT 0.2
+#define POSTURE_ALPHA 0.35
+#define W_CARTESIAN 0.75
+#define W_JOINT 0.25
 #define NULLSPACE_POS_DEADBAND 0.001 /* m，目标附近禁用零空间偏置 */
 #define NULLSPACE_ORI_DEADBAND 0.002 /* rad，目标附近禁用零空间偏置 */
 #define NULLSPACE_POS_FULL_SCALE 0.02 /* m，远离目标后恢复轻度零空间 */
 #define NULLSPACE_ORI_FULL_SCALE 0.05 /* rad，远离目标后恢复轻度零空间 */
-#define NULLSPACE_TORQUE_LIMIT 0.05  /* N.m，轻度零空间补偿限幅 */
+#define NULLSPACE_TORQUE_LIMIT 0.08  /* N.m，温和零空间补偿限幅 */
 
 /* ================================================================
  *  运动学与逆解参数

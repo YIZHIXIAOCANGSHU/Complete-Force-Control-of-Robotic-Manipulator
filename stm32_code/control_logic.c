@@ -18,10 +18,11 @@ static const double TCP_OFFSETS[NUM_ARMS][3] = {
     {TCP_RIGHT_OFFSET_X, TCP_RIGHT_OFFSET_Y, TCP_RIGHT_OFFSET_Z},
 };
 
-/* TCP 局部姿态 (xyzw)。左臂绕本地 Z 轴转 180 度，使左右 TCP 坐标轴方向统一。 */
+/* TCP 局部姿态 (xyzw)。TCP +Z 指向机器人前方(当前 URDF 零位 base/world +X)，
+ * 同时保持左右末端坐标轴方向统一。 */
 static const double TCP_FRAME_QUATS_XYZW[NUM_ARMS][4] = {
-    {0.0, 0.0, 1.0, 0.0},
-    {0.0, 0.0, 0.0, 1.0},
+    {0.0, 0.7071067811865476, 0.7071067811865476, 0.0},
+    {0.7071067811865476, 0.0, 0.0, 0.7071067811865476},
 };
 
 /* AM-D02 的关节力矩限制 */

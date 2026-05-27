@@ -76,19 +76,20 @@ ArmR07Output_Link
 C 控制器仍只输出左右双臂 14 轴力矩。Python 只把三躯干角度发送给 C，重力方向解算在 C 端完成。
 如需关闭滑条并恢复 14 DOF 固定躯干模型，可设置 `AM_D02_ENABLE_BODY_GUI=0`。
 
-仿真 UDP 协议使用 46 个 `double` 输入和 14 个 `double` 输出：
+仿真 UDP 协议使用 45 个 `double` 输入和 14 个 `double` 输出：
 
 ```text
 q[14] + qd[14]
 + body_q[3]
 + left_target_pos[3] + left_target_quat[4]
 + right_target_pos[3] + right_target_quat[4]
-+ dt[1]
 ```
 
 其中 `left_target_pos` / `right_target_pos` 使用 Body0422 动态目标坐标系：
 坐标原点跟随当前 `Body0422_Link`，坐标轴方向使用 `Body0422_Link` 相对零位的旋转。
 MuJoCo 里的目标方块会按该相对位姿随 Body0422 一起平移和旋转；四元数也使用同一个动态目标坐标系。
+C 端不接收 MuJoCo 仿真步长；host wrapper 使用独立的 H7 控制时钟模拟层按 `CONTROL_DT`
+补跑固定控制 tick，末端参考按 `TRAJ_PLAN_SPEED * CONTROL_DT` 定速推进。
 
 ## 常用环境变量
 

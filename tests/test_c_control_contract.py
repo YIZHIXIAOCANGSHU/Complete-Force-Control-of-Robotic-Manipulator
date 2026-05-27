@@ -52,6 +52,28 @@ def _compile_c_probe(
     return probe_bin
 
 
+def _compile_host_probe(tmp_path: Path, source: str, sources: list[str]) -> Path:
+    probe_c = tmp_path / "host_probe.c"
+    probe_bin = tmp_path / "host_probe"
+    probe_c.write_text(source, encoding="utf-8")
+    cmd = [
+        "gcc",
+        "-o",
+        str(probe_bin),
+        str(probe_c),
+        *[str(PROJECT_ROOT / src) for src in sources],
+        "-I",
+        str(PROJECT_ROOT / "stm32_code"),
+        "-I",
+        str(PROJECT_ROOT / "c_interface" / "h7_clock_sim"),
+        "-O2",
+        "-Wall",
+        "-lm",
+    ]
+    subprocess.run(cmd, cwd=PROJECT_ROOT, check=True)
+    return probe_bin
+
+
 def _quat_equiv(actual: np.ndarray, expected: np.ndarray, atol: float) -> None:
     if np.linalg.norm(actual + expected) < np.linalg.norm(actual - expected):
         actual = -actual
@@ -125,11 +147,10 @@ def test_c_fk_matches_mujoco_tcp_pose_in_body0422_frame(tmp_path: Path):
             _quat_equiv(row[4:8], env.base_to_target_frame_quat(env.get_ee_quat(arm)), atol=2e-3)
 
 
-def test_python_to_c_control_packet_contains_feedback_target_and_dt():
+def test_python_to_c_control_packet_contains_feedback_and_target_without_dt():
     from state_packets import (
         BODY_Q_OFFSET,
         CONTROL_INPUT_PACKET_SIZE,
-        DT_OFFSET,
         LEFT_TARGET_POS_OFFSET,
         LEFT_TARGET_QUAT_OFFSET,
         QD_OFFSET,
@@ -138,7 +159,7 @@ def test_python_to_c_control_packet_contains_feedback_target_and_dt():
         fill_control_input_packet,
     )
 
-    assert CONTROL_INPUT_PACKET_SIZE == 46
+    assert CONTROL_INPUT_PACKET_SIZE == 45
 
     packet = np.empty(CONTROL_INPUT_PACKET_SIZE, dtype=np.float64)
     fill_control_input_packet(
@@ -150,7 +171,6 @@ def test_python_to_c_control_packet_contains_feedback_target_and_dt():
         np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
         np.array([-0.1, -0.2, -0.3], dtype=np.float64),
         np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64),
-        0.01,
     )
 
     np.testing.assert_allclose(packet[0:QD_OFFSET], np.arange(14, dtype=np.float64))
@@ -159,8 +179,7 @@ def test_python_to_c_control_packet_contains_feedback_target_and_dt():
     np.testing.assert_allclose(packet[LEFT_TARGET_POS_OFFSET:LEFT_TARGET_QUAT_OFFSET], [0.1, 0.2, 0.3])
     np.testing.assert_allclose(packet[LEFT_TARGET_QUAT_OFFSET:RIGHT_TARGET_POS_OFFSET], [1.0, 0.0, 0.0, 0.0])
     np.testing.assert_allclose(packet[RIGHT_TARGET_POS_OFFSET:RIGHT_TARGET_QUAT_OFFSET], [-0.1, -0.2, -0.3])
-    np.testing.assert_allclose(packet[RIGHT_TARGET_QUAT_OFFSET:DT_OFFSET], [0.0, 1.0, 0.0, 0.0])
-    assert packet[DT_OFFSET] == pytest.approx(0.01)
+    np.testing.assert_allclose(packet[RIGHT_TARGET_QUAT_OFFSET:CONTROL_INPUT_PACKET_SIZE], [0.0, 1.0, 0.0, 0.0])
 
 
 def test_mujoco_state_packet_sends_target_pose_not_actual_tcp():
@@ -171,7 +190,6 @@ def test_mujoco_state_packet_sends_target_pose_not_actual_tcp():
     from state_packets import (
         BODY_Q_OFFSET,
         CONTROL_INPUT_PACKET_SIZE,
-        DT_OFFSET,
         LEFT_TARGET_POS_OFFSET,
         LEFT_TARGET_QUAT_OFFSET,
         QD_OFFSET,
@@ -197,8 +215,7 @@ def test_mujoco_state_packet_sends_target_pose_not_actual_tcp():
     np.testing.assert_allclose(packet[LEFT_TARGET_POS_OFFSET:LEFT_TARGET_QUAT_OFFSET], target_pos)
     np.testing.assert_allclose(packet[LEFT_TARGET_QUAT_OFFSET:RIGHT_TARGET_POS_OFFSET], target_quat)
     np.testing.assert_allclose(packet[RIGHT_TARGET_POS_OFFSET:RIGHT_TARGET_QUAT_OFFSET], right_target_pos)
-    np.testing.assert_allclose(packet[RIGHT_TARGET_QUAT_OFFSET:DT_OFFSET], right_target_quat)
-    assert packet[DT_OFFSET] == pytest.approx(Config.DT)
+    np.testing.assert_allclose(packet[RIGHT_TARGET_QUAT_OFFSET:CONTROL_INPUT_PACKET_SIZE], right_target_quat)
     assert not np.allclose(packet[LEFT_TARGET_POS_OFFSET:LEFT_TARGET_QUAT_OFFSET], env.get_ee_pos(Config.LEFT_ARM))
     assert not np.allclose(packet[RIGHT_TARGET_POS_OFFSET:RIGHT_TARGET_QUAT_OFFSET], env.get_ee_pos(Config.RIGHT_ARM))
 
@@ -412,14 +429,14 @@ def test_c_safety_uses_urdf_right_arm_position_limits_and_per_joint_velocity(tmp
     assert statuses["left_vel_low"] == [-2]
 
 
-def test_stm_controller_uses_input_dt_with_control_dt_fallback(tmp_path: Path):
+def test_stm_controller_uses_fixed_control_dt(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "stm_controller.h"
         #include <stdio.h>
         #include <string.h>
 
-        static void fill_input(stm_input_t *in, double dt_s) {
+        static void fill_input(stm_input_t *in) {
           memset(in, 0, sizeof(*in));
           in->q[3] = 1.5707963267948966;
           in->q[10] = 1.5707963267948966;
@@ -432,7 +449,6 @@ def test_stm_controller_uses_input_dt_with_control_dt_fallback(tmp_path: Path):
             in->target_quat[arm][2] = -0.500000000000;
             in->target_quat[arm][3] = 0.500000000000;
           }
-          in->dt_s = dt_s;
         }
 
         int main(void) {
@@ -441,14 +457,12 @@ def test_stm_controller_uses_input_dt_with_control_dt_fallback(tmp_path: Path):
 
           stm_controller_init();
           stm_controller_reset();
-          fill_input(&in, 0.02);
-          stm_controller_step(&in, &out);
+          fill_input(&in);
+          for (int i = 0; i < 5; ++i) {
+            stm_controller_step(&in, &out);
+          }
           printf("%.9f\\n", out.traj_t);
-
-          stm_controller_reset();
-          fill_input(&in, -1.0);
-          stm_controller_step(&in, &out);
-          printf("%.9f\\n", out.traj_t);
+          printf("%d\\n", out.step_count);
           return 0;
         }
         """
@@ -459,8 +473,80 @@ def test_stm_controller_uses_input_dt_with_control_dt_fallback(tmp_path: Path):
         for line in subprocess.check_output([str(probe)], text=True).splitlines()
     ]
 
-    assert values[0] == pytest.approx(0.02)
-    assert values[1] == pytest.approx(0.001)
+    assert values[0] == pytest.approx(5 * 0.001)
+    assert values[1] == pytest.approx(5)
+
+
+def test_stm_input_no_longer_exposes_sim_dt(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "stm_controller.h"
+
+        int main(void) {
+          stm_input_t in;
+          in.dt_s = 0.01;
+          return 0;
+        }
+        """
+    )
+    probe_c = tmp_path / "probe.c"
+    probe_bin = tmp_path / "probe"
+    probe_c.write_text(source, encoding="utf-8")
+    cmd = [
+        "gcc",
+        "-o",
+        str(probe_bin),
+        str(probe_c),
+        "-I",
+        str(PROJECT_ROOT / "stm32_code"),
+        "-O2",
+        "-Wall",
+        "-Werror",
+        "-lm",
+    ]
+    completed = subprocess.run(cmd, cwd=PROJECT_ROOT, text=True, capture_output=True)
+    assert completed.returncode != 0
+    assert "dt_s" in completed.stderr
+
+
+def test_h7_clock_sim_due_ticks_from_fixed_control_frequency(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "h7_clock_sim.h"
+        #include <stdio.h>
+
+        static double fake_times_ms[] = {1000.0, 1005.2, 1005.8, 1035.8};
+        static int fake_index = 0;
+
+        static double fake_now_ms(void *user_ctx) {
+          (void)user_ctx;
+          return fake_times_ms[fake_index++];
+        }
+
+        int main(void) {
+          h7_clock_sim_t clock;
+          h7_clock_sim_init(&clock, 0.001);
+          h7_clock_sim_set_now_fn(&clock, fake_now_ms, 0);
+          h7_clock_sim_set_max_catchup(&clock, 0.02);
+          printf("%d\\n", h7_clock_sim_due_ticks(&clock));
+          printf("%d\\n", h7_clock_sim_due_ticks(&clock));
+          printf("%d\\n", h7_clock_sim_due_ticks(&clock));
+          printf("%d\\n", h7_clock_sim_due_ticks(&clock));
+          return 0;
+        }
+        """
+    )
+    probe = _compile_host_probe(
+        tmp_path,
+        source,
+        ["c_interface/h7_clock_sim/h7_clock_sim.c"],
+    )
+    values = [
+        int(line)
+        for line in subprocess.check_output([str(probe)], text=True).splitlines()
+    ]
+
+    assert values == [1, 5, 0, 20]
 
 
 def test_stm_controller_reference_moves_by_configured_speed_without_reset(tmp_path: Path):
@@ -480,14 +566,14 @@ def test_stm_controller_reference_moves_by_configured_speed_without_reset(tmp_pa
 
           stm_controller_reset();
           stm_controller_update_reference(current_pos, current_quat, target_a,
-                                          target_quat, 0.1, ref_pos, ref_quat);
+                                          target_quat, CONTROL_DT, ref_pos, ref_quat);
           printf("%.9f %.9f %.9f\\n", ref_pos[0], ref_pos[1], ref_pos[2]);
 
           current_pos[0] = -5.0;
           current_pos[1] = -5.0;
           current_pos[2] = -5.0;
           stm_controller_update_reference(current_pos, current_quat, target_b,
-                                          target_quat, 0.1, ref_pos, ref_quat);
+                                          target_quat, CONTROL_DT, ref_pos, ref_quat);
           printf("%.9f %.9f %.9f\\n", ref_pos[0], ref_pos[1], ref_pos[2]);
           return 0;
         }}
@@ -502,7 +588,7 @@ def test_stm_controller_reference_moves_by_configured_speed_without_reset(tmp_pa
         dtype=np.float64,
     )
 
-    first_step = 0.75 * 0.1
+    first_step = 0.75 * 0.001
     np.testing.assert_allclose(rows[0], [first_step, 0.0, 0.0], atol=1e-9)
 
     direction = np.array([1.0, 1.0, 0.0]) - rows[0]

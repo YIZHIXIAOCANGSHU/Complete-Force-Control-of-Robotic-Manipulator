@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 import mujoco_viewer
+import udp_server
 
 
 class DummyViewerModule:
@@ -35,3 +36,32 @@ def test_launch_passive_viewer_hides_both_side_panels(monkeypatch):
             },
         )
     ]
+
+
+class DummyEnv:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def step(self) -> None:
+        self.calls.append("step")
+
+
+class DummyViewer:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def sync(self) -> None:
+        self.calls.append("sync")
+
+
+def test_step_env_with_viewer_sync_pulls_perturbations_before_step():
+    env = DummyEnv()
+    viewer = DummyViewer()
+    order: list[str] = []
+
+    env.calls = order
+    viewer.calls = order
+
+    udp_server._step_env_with_viewer_sync(env, viewer)
+
+    assert order == ["sync", "step", "sync"]

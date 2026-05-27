@@ -76,6 +76,7 @@ class MujocoSimEnv:
         self.locked_qpos_ids = self._resolve_uncontrolled_qpos_ids()
         self._torque_buffer = np.empty(Config.NUM_JOINTS, dtype=np.float64)
         self._mass_matrix = np.zeros((self.model.nv, self.model.nv), dtype=np.float64)
+        self._external_qfrc = np.zeros(self.model.nv, dtype=np.float64)
         self._arm_rhs = np.empty(Config.NUM_JOINTS, dtype=np.float64)
         self._arm_qacc = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
         self._zero_pos = np.zeros(3, dtype=np.float64)
@@ -418,7 +419,6 @@ class MujocoSimEnv:
             target_quat[Config.LEFT_ARM],
             target_pos[Config.RIGHT_ARM],
             target_quat[Config.RIGHT_ARM],
-            Config.DT,
         )
 
     def get_jacobian(self, arm: int = Config.LEFT_ARM) -> tuple[np.ndarray, np.ndarray]:
@@ -562,10 +562,22 @@ class MujocoSimEnv:
         self.set_body_qpos(self._body_qpos_command)
         mujoco.mj_forward(self.model, self.data)
         mujoco.mj_fullM(self.model, self._mass_matrix, self.data.qM)
+        self._external_qfrc.fill(0.0)
+        for body_id in np.nonzero(np.any(self.data.xfrc_applied != 0.0, axis=1))[0]:
+            mujoco.mj_applyFT(
+                self.model,
+                self.data,
+                self.data.xfrc_applied[body_id, :3],
+                self.data.xfrc_applied[body_id, 3:],
+                self.data.xipos[body_id],
+                int(body_id),
+                self._external_qfrc,
+            )
 
         arm_mass = self._mass_matrix[np.ix_(self.dof_ids, self.dof_ids)]
         self._arm_rhs[:] = (
             self.data.qfrc_applied[self.dof_ids]
+            + self._external_qfrc[self.dof_ids]
             - self.data.qfrc_bias[self.dof_ids]
         )
         self._arm_qacc[:] = np.linalg.solve(arm_mass, self._arm_rhs)

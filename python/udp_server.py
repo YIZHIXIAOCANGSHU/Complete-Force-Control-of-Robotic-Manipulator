@@ -26,6 +26,15 @@ WORKSPACE_PADDING_RATIO = 0.08
 WORKSPACE_MIN_HALF_SIZE = 0.01
 
 
+def _step_env_with_viewer_sync(env, viewer) -> None:
+    """同步 viewer 扰动力后步进仿真，再刷新 viewer 显示。"""
+    if viewer:
+        viewer.sync()
+    env.step()
+    if viewer:
+        viewer.sync()
+
+
 @dataclass(frozen=True)
 class RangeSnapshot:
     count: int
@@ -1268,14 +1277,12 @@ def run_udp_server(ready_file: str | None = None) -> None:
                 clipped_tau = env.clip_torque(tau)
                 t_start = time.perf_counter()
                 env.apply_torque(clipped_tau)
-                env.step()
+                _step_env_with_viewer_sync(env, viewer)
                 clipped = env.enforce_joint_limits()
                 cycle_time_ms = (time.perf_counter() - t_start) * 1000.0
 
                 if clipped:
                     env.forward()
-                if viewer:
-                    viewer.sync()
 
                 if Config.ENABLE_RERUN:
                     q, qd, pos_current, quat_current, pos_desired, quat_desired = env.get_state_snapshot()

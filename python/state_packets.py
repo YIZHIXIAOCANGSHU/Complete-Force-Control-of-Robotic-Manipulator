@@ -17,9 +17,8 @@ LEFT_TARGET_POS_OFFSET = BODY_Q_OFFSET + NUM_BODY_JOINTS
 LEFT_TARGET_QUAT_OFFSET = LEFT_TARGET_POS_OFFSET + 3
 RIGHT_TARGET_POS_OFFSET = LEFT_TARGET_QUAT_OFFSET + 4
 RIGHT_TARGET_QUAT_OFFSET = RIGHT_TARGET_POS_OFFSET + 3
-DT_OFFSET = RIGHT_TARGET_QUAT_OFFSET + 4
 
-CONTROL_INPUT_PACKET_SIZE = DT_OFFSET + 1
+CONTROL_INPUT_PACKET_SIZE = RIGHT_TARGET_QUAT_OFFSET + 4
 TORQUE_OUTPUT_PACKET_SIZE = NUM_JOINTS
 
 # Backward-compatible alias for tests/utilities that still import the old name.
@@ -35,7 +34,6 @@ def fill_control_input_packet(
     left_target_quat: np.ndarray,
     right_target_pos_body: np.ndarray,
     right_target_quat: np.ndarray,
-    dt_s: float,
 ) -> None:
     control_packet[Q_OFFSET:QD_OFFSET] = q
     control_packet[QD_OFFSET:BODY_Q_OFFSET] = qd
@@ -43,8 +41,7 @@ def fill_control_input_packet(
     control_packet[LEFT_TARGET_POS_OFFSET:LEFT_TARGET_QUAT_OFFSET] = left_target_pos_body
     control_packet[LEFT_TARGET_QUAT_OFFSET:RIGHT_TARGET_POS_OFFSET] = left_target_quat
     control_packet[RIGHT_TARGET_POS_OFFSET:RIGHT_TARGET_QUAT_OFFSET] = right_target_pos_body
-    control_packet[RIGHT_TARGET_QUAT_OFFSET:DT_OFFSET] = right_target_quat
-    control_packet[DT_OFFSET] = float(dt_s)
+    control_packet[RIGHT_TARGET_QUAT_OFFSET:CONTROL_INPUT_PACKET_SIZE] = right_target_quat
 
 
 def fill_state_packet(
@@ -65,5 +62,4 @@ def fill_state_packet(
         quat_desired,
         pos_desired,
         quat_desired,
-        0.0,
     )

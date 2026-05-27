@@ -98,10 +98,10 @@ class Config:
     RIGHT_TCP_OFFSET = np.array([0.0, -0.07, 0.03])
     TCP_OFFSETS = np.vstack([LEFT_TCP_OFFSET, RIGHT_TCP_OFFSET])
     TCP_OFFSET = LEFT_TCP_OFFSET
-    # MuJoCo body quat 使用 [w, x, y, z]。左 TCP 绕本地 Z 轴转 180 度，
-    # 让左右末端坐标轴方向统一；位置偏移保持不变。
-    LEFT_TCP_FRAME_QUAT = np.array([0.0, 0.0, 0.0, 1.0])
-    RIGHT_TCP_FRAME_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
+    # MuJoCo body quat 使用 [w, x, y, z]。TCP +Z 指向机器人前方
+    # (当前 URDF 零位 base/world +X)，同时保持左右末端坐标轴方向统一。
+    LEFT_TCP_FRAME_QUAT = np.array([0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)])
+    RIGHT_TCP_FRAME_QUAT = np.array([np.sqrt(0.5), np.sqrt(0.5), 0.0, 0.0])
     TCP_FRAME_QUATS = np.vstack([LEFT_TCP_FRAME_QUAT, RIGHT_TCP_FRAME_QUAT])
 
     # 目标方块坐标系：原点跟随 Body0422_Link，坐标轴跟随其相对零位旋转。

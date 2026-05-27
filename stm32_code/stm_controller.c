@@ -43,13 +43,6 @@ static int stm_controller_is_finite_vec(const double *values, int count) {
   return 1;
 }
 
-static double stm_controller_step_dt(const stm_input_t *in) {
-  if (isfinite(in->dt_s) && in->dt_s > 0.0 && in->dt_s < 1.0) {
-    return in->dt_s;
-  }
-  return CONTROL_DT;
-}
-
 static void stm_controller_sanitize_target_pose(const stm_input_t *in,
                                                 int arm,
                                                 const double fallback_pos[3],
@@ -91,7 +84,7 @@ static void stm_controller_update_reference_arm(int arm,
                                                 const double current_quat[4],
                                                 const double target_pos[3],
                                                 const double target_quat[4],
-                                                double dt_s, double ref_pos[3],
+                                                double step_s, double ref_pos[3],
                                                 double ref_quat[4]) {
   double delta[3];
   double distance;
@@ -117,7 +110,7 @@ static void stm_controller_update_reference_arm(int arm,
     ratio = 1.0;
     memcpy(g_controller.ref_pos[arm], target_pos, sizeof(double) * 3);
   } else {
-    double max_step = TRAJ_PLAN_SPEED * dt_s;
+    double max_step = TRAJ_PLAN_SPEED * step_s;
     ratio = max_step / distance;
     if (ratio > 1.0) {
       ratio = 1.0;
@@ -141,7 +134,7 @@ static void stm_controller_update_reference(const double current_pos[3],
                                             const double current_quat[4],
                                             const double target_pos[3],
                                             const double target_quat[4],
-                                            double dt_s, double ref_pos[3],
+                                            double step_s, double ref_pos[3],
                                             double ref_quat[4])
     __attribute__((unused));
 
@@ -149,10 +142,10 @@ static void stm_controller_update_reference(const double current_pos[3],
                                             const double current_quat[4],
                                             const double target_pos[3],
                                             const double target_quat[4],
-                                            double dt_s, double ref_pos[3],
+                                            double step_s, double ref_pos[3],
                                             double ref_quat[4]) {
   stm_controller_update_reference_arm(ARM_LEFT, current_pos, current_quat,
-                                      target_pos, target_quat, dt_s, ref_pos,
+                                      target_pos, target_quat, step_s, ref_pos,
                                       ref_quat);
 }
 
@@ -233,7 +226,6 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   double target_quat[NUM_ARMS][4];
   double ref_pos[NUM_ARMS][3];
   double ref_quat[NUM_ARMS][4];
-  double dt_s;
   double start_ms;
   double end_ms;
 
@@ -247,7 +239,6 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
 
   stm_controller_prepare_output(out);
   start_ms = stm_controller_now_ms();
-  dt_s = stm_controller_step_dt(in);
   if (stm_controller_is_finite_vec(in->body_q, NUM_BODY_JOINTS)) {
     control_update_body_gravity(in->body_q);
   }
@@ -268,7 +259,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
     stm_controller_update_reference_arm(arm, out->ee_pos[arm], out->ee_quat[arm],
-                                        target_pos[arm], target_quat[arm], dt_s,
+                                        target_pos[arm], target_quat[arm], CONTROL_DT,
                                         ref_pos[arm], ref_quat[arm]);
   }
 
@@ -281,7 +272,7 @@ void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
   }
 
 finalize_step:
-  g_controller.traj_t += dt_s;
+  g_controller.traj_t += CONTROL_DT;
   g_controller.step_count++;
   out->traj_t = g_controller.traj_t;
   out->step_count = g_controller.step_count;

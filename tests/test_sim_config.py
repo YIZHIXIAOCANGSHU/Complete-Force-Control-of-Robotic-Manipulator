@@ -285,8 +285,9 @@ def test_right_arm_tcp_offset_is_at_dual_output_link_tip():
 
 
 def test_tcp_frame_quats_align_left_tcp_axes_with_right_arm():
-    np.testing.assert_allclose(Config.LEFT_TCP_FRAME_QUAT, [0.0, 0.0, 0.0, 1.0])
-    np.testing.assert_allclose(Config.RIGHT_TCP_FRAME_QUAT, [1.0, 0.0, 0.0, 0.0])
+    half_sqrt = np.sqrt(0.5)
+    np.testing.assert_allclose(Config.LEFT_TCP_FRAME_QUAT, [0.0, 0.0, half_sqrt, half_sqrt])
+    np.testing.assert_allclose(Config.RIGHT_TCP_FRAME_QUAT, [half_sqrt, half_sqrt, 0.0, 0.0])
     assert Config.TCP_FRAME_QUATS.shape == (Config.NUM_ARMS, 4)
 
 
@@ -302,6 +303,17 @@ def test_mujoco_initial_tcp_frames_are_aligned_between_arms():
     np.testing.assert_allclose(
         env.get_ee_rotmat(Config.LEFT_ARM),
         env.get_ee_rotmat(Config.RIGHT_ARM),
+        atol=2e-5,
+    )
+    robot_forward_base = np.array([1.0, 0.0, 0.0])
+    np.testing.assert_allclose(
+        env.get_ee_rotmat(Config.LEFT_ARM)[:, 2],
+        robot_forward_base,
+        atol=2e-5,
+    )
+    np.testing.assert_allclose(
+        env.get_ee_rotmat(Config.RIGHT_ARM)[:, 2],
+        robot_forward_base,
         atol=2e-5,
     )
 
@@ -581,6 +593,35 @@ def test_mujoco_env_keeps_body_joints_for_gui_by_default():
     np.testing.assert_allclose(env.data.qvel[env.body_dof_ids], 0.0)
     np.testing.assert_allclose(env.data.qacc[env.body_dof_ids], 0.0)
     np.testing.assert_allclose(env.data.qacc[env.dof_ids], 0.0, atol=1e-9)
+
+
+def test_commanded_body_sim_applies_viewer_external_force_to_arm_dofs():
+    pytest.importorskip("mujoco")
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    env.reset(Config.INIT_QPOS)
+    body_q = np.array([0.3, -0.4, 0.2], dtype=np.float64)
+    env.set_body_qpos(body_q)
+    env.forward()
+
+    env.apply_torque(env.get_qfrc_bias())
+    env.step()
+    qacc_without_force = env.data.qacc[env.dof_ids].copy()
+
+    env.reset(Config.INIT_QPOS)
+    env.set_body_qpos(body_q)
+    env.forward()
+    env.apply_torque(env.get_qfrc_bias())
+    env.data.xfrc_applied[env.ee_body_ids[Config.LEFT_ARM], :3] = [10.0, 0.0, 0.0]
+    env.step()
+
+    assert np.linalg.norm(env.data.qacc[env.dof_ids] - qacc_without_force) > 1e-3
+    assert np.linalg.norm(env.data.qacc[env.dof_ids[:Config.ARM_JOINTS]]) > 1e-3
+    np.testing.assert_allclose(env.get_body_qpos(), body_q)
+    np.testing.assert_allclose(env.data.qvel[env.body_dof_ids], 0.0)
+    np.testing.assert_allclose(env.data.qacc[env.body_dof_ids], 0.0)
 
 
 def test_mujoco_env_fixes_uncontrolled_joints_when_body_gui_disabled():

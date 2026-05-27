@@ -15,7 +15,6 @@ typedef struct {
   /* Target TCP pose in the Body0422 dynamic frame, including relative rotation. */
   double target_pos[NUM_ARMS][3];
   double target_quat[NUM_ARMS][4];
-  double dt_s;
 } stm_input_t;
 
 typedef struct {

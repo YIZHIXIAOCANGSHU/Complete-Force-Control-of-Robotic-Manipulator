@@ -10,11 +10,21 @@
 
 #include "main_stm.h"
 #include "sim_interface.h"
+#include "h7_clock_sim.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
+
+static int wait_for_h7_due_ticks(h7_clock_sim_t *h7_clock) {
+  int due_ticks = h7_clock_sim_due_ticks(h7_clock);
+  while (due_ticks == 0) {
+    usleep(100);
+    due_ticks = h7_clock_sim_due_ticks(h7_clock);
+  }
+  return due_ticks;
+}
 
 int main(void) {
   printf("=========================================\n");
@@ -36,10 +46,14 @@ int main(void) {
   double q[NUM_JOINTS], qd[NUM_JOINTS];
   double body_q[NUM_BODY_JOINTS];
   double target_pos[NUM_ARMS][3], target_quat[NUM_ARMS][4];
-  double dt_s;
   
   stm_input_t stm_in;
   stm_output_t stm_out;
+  h7_clock_sim_t h7_clock;
+  double last_tau[NUM_JOINTS] = {0};
+
+  h7_clock_sim_init(&h7_clock, CONTROL_DT);
+  memset(&stm_out, 0, sizeof(stm_out));
 
   printf("[INFO] Starting control loop...\n\n");
 
@@ -48,7 +62,7 @@ int main(void) {
    * ================================================================ */
   while (1) {
     /* -- 3a. 获取 Python 转发的反馈和 Body0422 动态目标坐标 -- */
-    sim_get_control_input(q, qd, body_q, target_pos, target_quat, &dt_s);
+    sim_get_control_input(q, qd, body_q, target_pos, target_quat);
 
     /* -- 3b. C 控制器执行完整闭环，Python 不参与控制逻辑 -- */
     memcpy(stm_in.q, q, sizeof(q));
@@ -56,19 +70,24 @@ int main(void) {
     memcpy(stm_in.body_q, body_q, sizeof(body_q));
     memcpy(stm_in.target_pos, target_pos, sizeof(target_pos));
     memcpy(stm_in.target_quat, target_quat, sizeof(target_quat));
-    stm_in.dt_s = dt_s;
 
-    /* -- 3c. 执行底层控制步进 (Portable Logic) -- */
-    stm_step(&stm_in, &stm_out);
+    /* -- 3c. 按独立 H7 控制时钟补跑控制 tick，只保留最后一次力矩 -- */
+    int due_ticks = wait_for_h7_due_ticks(&h7_clock);
+    for (int tick = 0; tick < due_ticks; ++tick) {
+      stm_step(&stm_in, &stm_out);
+    }
+    if (due_ticks > 0) {
+      memcpy(last_tau, stm_out.tau, sizeof(last_tau));
+    }
 
     /* -- 3d. 安全检查处理 -- */
-    if (stm_out.status < 0) {
+    if (due_ticks > 0 && stm_out.status < 0) {
       printf("[SAFETY] Limit violated! EMERGENCY STOP.\n");
       exit(1);
     }
 
     /* -- 3e. 发送力矩，步进仿真 -- */
-    if (sim_apply_torque(stm_out.tau) < 0) {
+    if (sim_apply_torque(last_tau) < 0) {
       printf("[ERROR] Connection lost or simulation closed.\n");
       break;
     }

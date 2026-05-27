@@ -23,11 +23,10 @@ int sim_init(const char *ip, int port);
  * @param body_q 躯干关节角度 (3维: Waist01, Waist02, Body0422)
  * @param target_pos 左右目标 TCP 位置 (Body0422 动态目标坐标, 2x3)
  * @param target_quat 左右目标 TCP 姿态四元数 [w,x,y,z] (2x4)
- * @param dt_s Python/MuJoCo 仿真步长 (秒)
  */
 void sim_get_control_input(double *qpos, double *qvel, double *body_q,
                            double target_pos[2][3],
-                           double target_quat[2][4], double *dt_s);
+                           double target_quat[2][4]);
 
 void sim_get_state(double *qpos, double *qvel, double ee_pos[2][3],
                    double ee_quat[2][4], double target_pos[2][3],
