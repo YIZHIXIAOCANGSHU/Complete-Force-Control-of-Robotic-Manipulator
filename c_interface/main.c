@@ -13,7 +13,6 @@
 #include "h7_clock_sim.h"
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 
 int main(void) {
   printf("=========================================\n");
@@ -39,6 +38,7 @@ int main(void) {
   stm_input_t stm_in;
   stm_output_t stm_out;
   h7_clock_sim_t h7_clock;
+  int last_status = STM_STATUS_OK;
 
   h7_clock_sim_init(&h7_clock);
   memset(&stm_out, 0, sizeof(stm_out));
@@ -55,6 +55,7 @@ int main(void) {
     /* -- 3b. C 控制器执行完整闭环，Python 不参与控制逻辑 -- */
     memcpy(stm_in.q, q, sizeof(q));
     memcpy(stm_in.qd, qd, sizeof(qd));
+    stm_in.active_arm_mask = STM_ARM_MASK_BOTH;
     memcpy(stm_in.body_q, body_q, sizeof(body_q));
     memcpy(stm_in.target_pos, target_pos, sizeof(target_pos));
     memcpy(stm_in.target_quat, target_quat, sizeof(target_quat));
@@ -63,10 +64,16 @@ int main(void) {
     double elapsed_s = h7_clock_sim_elapsed_s(&h7_clock);
     stm_step_elapsed(&stm_in, &stm_out, elapsed_s);
 
-    /* -- 3d. 安全检查处理 -- */
-    if (stm_out.status < 0) {
-      printf("[SAFETY] Limit violated! EMERGENCY STOP.\n");
-      exit(1);
+    /* -- 3d. 安全状态提示。仿真不退出，继续发送控制器给出的 0 力矩。 -- */
+    if (stm_out.status != last_status) {
+      if (stm_out.status == STM_STATUS_SAFETY_LATCHED) {
+        printf("[SAFETY] Entered safety latch. Sending zero torque while waiting for recovery.\n");
+      } else if (stm_out.status == STM_STATUS_WAITING_ZERO) {
+        printf("[SAFETY] Waiting for all arm joint velocities to stay near zero.\n");
+      } else if (stm_out.status == STM_STATUS_OK && last_status < 0) {
+        printf("[SAFETY] Recovery complete. Control resumed with a replanned path.\n");
+      }
+      last_status = stm_out.status;
     }
 
     /* -- 3e. 发送力矩，步进仿真 -- */

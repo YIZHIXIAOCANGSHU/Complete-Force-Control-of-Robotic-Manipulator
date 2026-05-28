@@ -93,8 +93,9 @@ UDP 控制循环之间的 elapsed time。sim UDP 保持一收一发：每收到�
 C 端计算一次力矩并立即发送一次 `tau[14]`。左右末端参考由 C 端 `LinearPathPlanner`
 按 `TRAJ_PLAN_SPEED` / `TRAJ_PLAN_ACCEL` 做梯形速度直线路径规划，并由 H7 elapsed time
 推进；Python/MuJoCo 的物理步长不参与路径速度计算。
-C 侧不再保留默认左臂 7 轴闭环入口；公开控制链路使用双臂 14 轴接口，底层按
-`ARM_LEFT` / `ARM_RIGHT` 分别计算每只手臂。
+C 侧不再保留默认左臂 7 轴闭环入口；公开控制链路统一使用
+`stm_controller_step_elapsed()`，并可通过 `stm_input_t.active_arm_mask`
+选择左臂、右臂或双臂。本仓库的 UDP 仿真默认填 `STM_ARM_MASK_BOTH`。
 
 ## 常用环境变量
 

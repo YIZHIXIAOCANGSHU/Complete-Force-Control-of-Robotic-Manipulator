@@ -2,6 +2,15 @@
 #define STM_CONTROLLER_H
 
 #include "config.h"
+#include <stdint.h>
+
+#define STM_STATUS_OK 0
+#define STM_STATUS_SAFETY_LATCHED -1
+#define STM_STATUS_WAITING_ZERO -2
+
+#define STM_ARM_MASK_LEFT (1u << ARM_LEFT)
+#define STM_ARM_MASK_RIGHT (1u << ARM_RIGHT)
+#define STM_ARM_MASK_BOTH (STM_ARM_MASK_LEFT | STM_ARM_MASK_RIGHT)
 
 #ifdef __cplusplus
 extern "C" {
@@ -10,6 +19,8 @@ extern "C" {
 typedef struct {
   double q[NUM_JOINTS];
   double qd[NUM_JOINTS];
+  /* Runtime arm selection. 0 is treated as STM_ARM_MASK_BOTH. */
+  uint8_t active_arm_mask;
   /* Sim-only Body0422 torso command: Waist01, Waist02, Body0422. */
   double body_q[NUM_BODY_JOINTS];
   /* Target TCP pose in the Body0422 dynamic frame, including relative rotation. */
@@ -24,22 +35,20 @@ typedef struct {
   double ee_quat[NUM_ARMS][4];
   double traj_t;
   int step_count;
-  double calc_time_ms;
 } stm_output_t;
 
-typedef double (*stm_now_ms_fn)(void *user_ctx);
-
-typedef struct {
-  stm_now_ms_fn now_ms;
-  void *user_ctx;
-} stm_platform_hooks_t;
-
 void stm_controller_init(void);
-void stm_controller_step(const stm_input_t *in, stm_output_t *out);
+
+/**
+ * @brief Execute one dual-arm control update.
+ *
+ * elapsed_s is supplied by the platform layer and represents the real time
+ * elapsed since the previous control call, in seconds. stm32_code does not own
+ * or assume any hardware timer frequency.
+ */
 void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
                                  double elapsed_s);
 void stm_controller_reset(void);
-void stm_controller_set_platform_hooks(const stm_platform_hooks_t *hooks);
 
 #ifdef __cplusplus
 }

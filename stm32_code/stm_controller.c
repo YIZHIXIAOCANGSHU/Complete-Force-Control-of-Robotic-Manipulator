@@ -3,16 +3,18 @@
 #include "control_logic.h"
 #include "trajectory_lib.h"
 #include <math.h>
-#include <stdio.h>
 #include <string.h>
 
 typedef struct {
   double traj_t;
   int step_count;
   int initialized;
+  int safety_latched;
+  int last_safety_reason;
+  uint8_t safety_arm_mask;
   int target_valid[NUM_ARMS];
   int ref_valid[NUM_ARMS];
-  stm_platform_hooks_t hooks;
+  double zero_hold_s;
   double target_pos[NUM_ARMS][3];
   double target_quat[NUM_ARMS][4];
   double ref_pos[NUM_ARMS][3];
@@ -30,19 +32,77 @@ static const double TORQUE_LIMIT_CHECK[NUM_JOINTS] = {
     JOINT_TORQUE_LIMIT_3, JOINT_TORQUE_LIMIT_4, 9.0, 9.0,
     JOINT_TORQUE_LIMIT_7};
 
-static double stm_controller_now_ms(void) {
-  if (g_controller.hooks.now_ms == NULL) {
-    return 0.0;
-  }
-  return g_controller.hooks.now_ms(g_controller.hooks.user_ctx);
-}
-
 static int stm_controller_is_finite_vec(const double *values, int count) {
   for (int i = 0; i < count; ++i) {
     if (!isfinite(values[i])) {
       return 0;
     }
   }
+  return 1;
+}
+
+static void stm_controller_clear_path_state(void) {
+  memset(g_controller.target_valid, 0, sizeof(g_controller.target_valid));
+  memset(g_controller.ref_valid, 0, sizeof(g_controller.ref_valid));
+  memset(g_controller.target_pos, 0, sizeof(g_controller.target_pos));
+  memset(g_controller.target_quat, 0, sizeof(g_controller.target_quat));
+  memset(g_controller.ref_pos, 0, sizeof(g_controller.ref_pos));
+  memset(g_controller.ref_quat, 0, sizeof(g_controller.ref_quat));
+  memset(g_controller.path_planner, 0, sizeof(g_controller.path_planner));
+  memset(g_controller.path_start_t, 0, sizeof(g_controller.path_start_t));
+}
+
+static uint8_t stm_controller_normalize_arm_mask(uint8_t active_arm_mask) {
+  uint8_t mask = active_arm_mask & STM_ARM_MASK_BOTH;
+  return mask == 0u ? STM_ARM_MASK_BOTH : mask;
+}
+
+static void stm_controller_enter_safety_latch(int reason, uint8_t active_arm_mask) {
+  g_controller.safety_latched = 1;
+  g_controller.zero_hold_s = 0.0;
+  g_controller.last_safety_reason = reason;
+  g_controller.safety_arm_mask = stm_controller_normalize_arm_mask(active_arm_mask);
+}
+
+static int stm_controller_joints_still(const double qd[NUM_JOINTS],
+                                       uint8_t active_arm_mask) {
+  uint8_t mask = stm_controller_normalize_arm_mask(active_arm_mask);
+  for (int arm = 0; arm < NUM_ARMS; ++arm) {
+    if ((mask & (1u << arm)) == 0u) {
+      continue;
+    }
+    int offset = arm * ARM_JOINTS;
+    for (int i = 0; i < ARM_JOINTS; ++i) {
+      if (!isfinite(qd[offset + i])) {
+        return 0;
+      }
+      if (fabs(qd[offset + i]) > SAFETY_RECOVERY_QD_ZERO_TOL) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static int stm_controller_update_safety_recovery(const double qd[NUM_JOINTS],
+                                                 double elapsed_s) {
+  if (!g_controller.safety_latched) {
+    return 0;
+  }
+
+  if (stm_controller_joints_still(qd, g_controller.safety_arm_mask)) {
+    g_controller.zero_hold_s += elapsed_s;
+    if (g_controller.zero_hold_s >= SAFETY_RECOVERY_HOLD_S) {
+      g_controller.safety_latched = 0;
+      g_controller.zero_hold_s = 0.0;
+      g_controller.last_safety_reason = STM_STATUS_OK;
+      g_controller.safety_arm_mask = STM_ARM_MASK_BOTH;
+      stm_controller_clear_path_state();
+    }
+  } else {
+    g_controller.zero_hold_s = 0.0;
+  }
+
   return 1;
 }
 
@@ -141,86 +201,68 @@ static void stm_controller_update_reference_arm(int arm,
   memcpy(ref_quat, g_controller.ref_quat[arm], sizeof(double) * 4);
 }
 
-static void stm_controller_update_reference(const double current_pos[3],
-                                            const double current_quat[4],
-                                            const double target_pos[3],
-                                            const double target_quat[4],
-                                            double step_s, double ref_pos[3],
-                                            double ref_quat[4])
-    __attribute__((unused));
-
-static void stm_controller_update_reference(const double current_pos[3],
-                                            const double current_quat[4],
-                                            const double target_pos[3],
-                                            const double target_quat[4],
-                                            double step_s, double ref_pos[3],
-                                            double ref_quat[4]) {
-  stm_controller_update_reference_arm(ARM_LEFT, current_pos, current_quat,
-                                      target_pos, target_quat, step_s, ref_pos,
-                                      ref_quat);
-}
-
 static void stm_controller_prepare_output(stm_output_t *out) {
   memset(out, 0, sizeof(*out));
-  out->status = -1;
+  out->status = STM_STATUS_SAFETY_LATCHED;
 }
 
 static int stm_controller_check_joint_safety(const double q[NUM_JOINTS],
                                              const double qd[NUM_JOINTS],
-                                             const double tau[NUM_JOINTS]) {
-  if (!stm_controller_is_finite_vec(q, NUM_JOINTS) ||
-      !stm_controller_is_finite_vec(qd, NUM_JOINTS)) {
-    fprintf(stderr, "[SAFETY] Non-finite joint state detected.\n");
-    return -1;
-  }
+                                             const double tau[NUM_JOINTS],
+                                             uint8_t active_arm_mask) {
+  uint8_t mask = stm_controller_normalize_arm_mask(active_arm_mask);
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
+    if ((mask & (1u << arm)) == 0u) {
+      continue;
+    }
     int offset = arm * ARM_JOINTS;
+    if (!stm_controller_is_finite_vec(q + offset, ARM_JOINTS) ||
+        !stm_controller_is_finite_vec(qd + offset, ARM_JOINTS)) {
+      STM_LOG_ERROR("[SAFETY] Arm %d non-finite joint state detected.\n", arm);
+      return -1;
+    }
     int status = control_check_safety_arm(arm, q + offset, qd + offset);
     if (status < 0) {
       if (status == -1) {
-        fprintf(stderr, "[SAFETY] Arm %d joint position limit violated!\n", arm);
+        STM_LOG_ERROR("[SAFETY] Arm %d joint position limit violated!\n", arm);
       } else if (status == -2) {
-        fprintf(stderr, "[SAFETY] Arm %d joint velocity limit violated!\n", arm);
+        STM_LOG_ERROR("[SAFETY] Arm %d joint velocity limit violated!\n", arm);
       }
       return -1;
     }
   }
 
-  for (int i = 0; i < NUM_JOINTS; ++i) {
-    if (!isfinite(tau[i])) {
-      fprintf(stderr, "[SAFETY] J%d torque is non-finite.\n", i + 1);
-      return -1;
+  for (int arm = 0; arm < NUM_ARMS; ++arm) {
+    if ((mask & (1u << arm)) == 0u) {
+      continue;
     }
-    if (fabs(tau[i]) > TORQUE_LIMIT_CHECK[i]) {
-      fprintf(stderr, "[SAFETY] J%d torque error: %.4f\n", i + 1, tau[i]);
-      return -1;
+    int offset = arm * ARM_JOINTS;
+    for (int i = 0; i < ARM_JOINTS; ++i) {
+      int joint = offset + i;
+      if (!isfinite(tau[joint])) {
+        STM_LOG_ERROR("[SAFETY] J%d torque is non-finite.\n", joint + 1);
+        return -1;
+      }
+      if (fabs(tau[joint]) > TORQUE_LIMIT_CHECK[joint]) {
+        STM_LOG_ERROR("[SAFETY] J%d torque error: %.4f\n", joint + 1,
+                      tau[joint]);
+        return -1;
+      }
     }
   }
 
   return 0;
 }
 
-void stm_controller_set_platform_hooks(const stm_platform_hooks_t *hooks) {
-  if (hooks == NULL) {
-    memset(&g_controller.hooks, 0, sizeof(g_controller.hooks));
-    return;
-  }
-
-  g_controller.hooks = *hooks;
-}
-
 void stm_controller_reset(void) {
   g_controller.traj_t = 0.0;
   g_controller.step_count = 0;
-  memset(g_controller.target_valid, 0, sizeof(g_controller.target_valid));
-  memset(g_controller.ref_valid, 0, sizeof(g_controller.ref_valid));
-  memset(g_controller.target_pos, 0, sizeof(g_controller.target_pos));
-  memset(g_controller.target_quat, 0, sizeof(g_controller.target_quat));
-  memset(g_controller.ref_pos, 0, sizeof(g_controller.ref_pos));
-  memset(g_controller.ref_quat, 0, sizeof(g_controller.ref_quat));
-  memset(g_controller.path_planner, 0, sizeof(g_controller.path_planner));
-  memset(g_controller.path_start_t, 0, sizeof(g_controller.path_start_t));
+  g_controller.safety_latched = 0;
+  g_controller.zero_hold_s = 0.0;
+  g_controller.last_safety_reason = STM_STATUS_OK;
+  g_controller.safety_arm_mask = STM_ARM_MASK_BOTH;
+  stm_controller_clear_path_state();
 }
 
 void stm_controller_init(void) {
@@ -240,8 +282,8 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
   double target_quat[NUM_ARMS][4];
   double ref_pos[NUM_ARMS][3];
   double ref_quat[NUM_ARMS][4];
-  double start_ms;
-  double end_ms;
+  control_arm_kinematics_t arm_kinematics[NUM_ARMS];
+  uint8_t active_arm_mask;
 
   if (in == NULL || out == NULL) {
     return;
@@ -253,39 +295,80 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
 
   if (elapsed_s < 0.0 || !isfinite(elapsed_s)) {
     elapsed_s = 0.0;
+  } else if (elapsed_s > CONTROL_MAX_ELAPSED_S) {
+    elapsed_s = CONTROL_MAX_ELAPSED_S;
   }
 
   stm_controller_prepare_output(out);
-  start_ms = stm_controller_now_ms();
+  active_arm_mask = stm_controller_normalize_arm_mask(in->active_arm_mask);
+
+  if (stm_controller_update_safety_recovery(in->qd, elapsed_s)) {
+    out->status = STM_STATUS_WAITING_ZERO;
+    memset(out->tau, 0, sizeof(out->tau));
+    goto finalize_step;
+  }
+
   if (stm_controller_is_finite_vec(in->body_q, NUM_BODY_JOINTS)) {
     control_update_body_gravity(in->body_q);
   }
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
+    if ((active_arm_mask & (1u << arm)) == 0u) {
+      continue;
+    }
     int offset = arm * ARM_JOINTS;
+    if (!stm_controller_is_finite_vec(in->q + offset, ARM_JOINTS) ||
+        !stm_controller_is_finite_vec(in->qd + offset, ARM_JOINTS)) {
+      stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
+                                        active_arm_mask);
+      out->status = STM_STATUS_SAFETY_LATCHED;
+      memset(out->tau, 0, sizeof(out->tau));
+      goto finalize_step;
+    }
     control_filter_velocities_arm(arm, in->qd + offset, filtered_qd + offset);
-    control_get_fk_with_offset_arm(arm, in->q + offset, out->ee_pos[arm],
-                                   out->ee_quat[arm]);
+    control_get_arm_kinematics_with_offset(arm, in->q + offset,
+                                           &arm_kinematics[arm]);
+    memcpy(out->ee_pos[arm], arm_kinematics[arm].pos, sizeof(double) * 3);
+    memcpy(out->ee_quat[arm], arm_kinematics[arm].quat_wxyz,
+           sizeof(double) * 4);
     stm_controller_sanitize_target_pose(in, arm, out->ee_pos[arm],
                                         out->ee_quat[arm], target_pos[arm],
                                         target_quat[arm]);
     if (control_check_safety_arm(arm, in->q + offset, filtered_qd + offset) < 0) {
+      stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
+                                        active_arm_mask);
+      out->status = STM_STATUS_SAFETY_LATCHED;
       memset(out->tau, 0, sizeof(out->tau));
       goto finalize_step;
     }
   }
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
+    if ((active_arm_mask & (1u << arm)) == 0u) {
+      continue;
+    }
     stm_controller_update_reference_arm(arm, out->ee_pos[arm], out->ee_quat[arm],
                                         target_pos[arm], target_quat[arm], elapsed_s,
                                         ref_pos[arm], ref_quat[arm]);
   }
 
-  control_step_v2_dual(ref_pos, ref_quat, in->q, filtered_qd, out->tau);
+  for (int arm = 0; arm < NUM_ARMS; ++arm) {
+    if ((active_arm_mask & (1u << arm)) == 0u) {
+      continue;
+    }
+    int offset = arm * ARM_JOINTS;
+    control_step_v2_arm_with_state(arm, ref_pos[arm], ref_quat[arm],
+                                   in->q + offset, filtered_qd + offset,
+                                   &arm_kinematics[arm], out->tau + offset);
+  }
 
-  if (stm_controller_check_joint_safety(in->q, filtered_qd, out->tau) == 0) {
-    out->status = 0;
+  if (stm_controller_check_joint_safety(in->q, filtered_qd, out->tau,
+                                        active_arm_mask) == 0) {
+    out->status = STM_STATUS_OK;
   } else {
+    stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
+                                      active_arm_mask);
+    out->status = STM_STATUS_SAFETY_LATCHED;
     memset(out->tau, 0, sizeof(out->tau));
   }
 
@@ -294,13 +377,4 @@ finalize_step:
   g_controller.step_count++;
   out->traj_t = g_controller.traj_t;
   out->step_count = g_controller.step_count;
-
-  end_ms = stm_controller_now_ms();
-  if (g_controller.hooks.now_ms != NULL && end_ms >= start_ms) {
-    out->calc_time_ms = end_ms - start_ms;
-  }
-}
-
-void stm_controller_step(const stm_input_t *in, stm_output_t *out) {
-  stm_controller_step_elapsed(in, out, CONTROL_DT);
 }

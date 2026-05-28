@@ -28,7 +28,19 @@
 /* ================================================================
  *  基础运行参数
  * ================================================================ */
-#define CONTROL_DT 0.001  /* 控制步长 (秒) */
+/* CONTROL_DT 只作为名义控制周期和调参参考；实际路径推进时间由
+ * stm_controller_step_elapsed(..., elapsed_s) 的 elapsed_s 传入。
+ */
+#define CONTROL_DT 0.001  /* 名义控制周期 (s)，默认按 1 kHz 设计 */
+/* elapsed_s 的单步上限保护。调大后暂停/卡顿恢复时路径会跳得更远；
+ * 调小后大延迟会被压平，但路径实际推进会更保守。
+ */
+#define CONTROL_MAX_ELAPSED_S 0.02 /* 单步路径规划最大推进时间 (s) */
+/* 安全锁定恢复只看激活臂 qd 是否接近 0，不要求 q 回零。阈值调大恢复更快
+ * 但可能在轻微运动中恢复；调小更严格但恢复更慢。
+ */
+#define SAFETY_RECOVERY_QD_ZERO_TOL 0.02 /* 安全恢复静止阈值 (rad/s) */
+#define SAFETY_RECOVERY_HOLD_S 0.1       /* 速度静止保持时间 (s) */
 #define ARM_JOINTS 7     /* 单臂关节数量 */
 #define NUM_ARMS 2       /* 左右双臂 */
 #define NUM_JOINTS 14    /* 机器人受控关节数量 */
@@ -41,7 +53,10 @@
 /* ================================================================
  *  TCP 偏移
  * ================================================================ */
-/* TCP 偏移量 (相对于 ArmL07Output_Link，本地坐标系，单位 m) */
+/* TCP 偏移量相对于 ArmL07Output_Link / ArmR07Output_Link 本地坐标系，单位 m。
+ * 当前控制实际使用 TCP_LEFT_OFFSET_* 和 TCP_RIGHT_OFFSET_*；通用 TCP_OFFSET_*
+ * 保留兼容。左右 Y/Z 符号不同，用于保持两侧 TCP 坐标系和夹爪几何一致。
+ */
 #define TCP_OFFSET_X 0.0
 #define TCP_OFFSET_Y 0.07
 #define TCP_OFFSET_Z -0.03
@@ -54,6 +69,8 @@
 
 /* Body0422 动态目标坐标系零位原点（相对于 URDF base_link，单位 m）。
  * C 控制内部的 7 轴模型以该原点为根；目标位置也使用该坐标系。
+ * 这个零位必须和 python/config.py 的 TARGET_FRAME_ORIGIN_BASE_ZERO 保持一致；
+ * 如果只改 C 或只改 Python，会造成目标方块显示和 C 端 FK/控制坐标不一致。
  */
 #define TARGET_FRAME_ORIGIN_BASE_X 0.0
 #define TARGET_FRAME_ORIGIN_BASE_Y 0.0715607946769668
@@ -62,6 +79,11 @@
 /* ================================================================
  *  笛卡尔空间 PD 增益
  * ================================================================ */
+/* 作用在 TCP 位置/姿态误差上，输出笛卡尔任务力再通过 J^T 转成关节力矩。
+ * KP_CART_* 调大: 末端跟踪更硬、误差收敛更快，但更容易振荡/饱和。
+ * KD_CART_* 调大: 阻尼更强、超调更小，但过大可能放大速度噪声并让动作发涩。
+ * XYZ 单位近似 N/m；ROLL/PITCH/YAW 作用在轴角姿态误差上。
+ */
 #define KP_CART_X 120.0
 #define KP_CART_Y 120.0
 #define KP_CART_Z 120.0
@@ -79,6 +101,10 @@
 /* ================================================================
  *  关节空间 PD 增益
  * ================================================================ */
+/* 当前关节 PD 主要用于零空间首选姿态，不是独立的关节位置闭环。
+ * KP_JOINT_* 调大: 关节更积极靠近 Q_PREF_*；KD_JOINT_* 调大: 零空间动作更稳。
+ * 若末端跟踪优先级不足，优先检查 W_CARTESIAN/W_JOINT 和 NULLSPACE_TORQUE_LIMIT。
+ */
 #define KP_JOINT_1 115.0
 #define KP_JOINT_2 100.0
 #define KP_JOINT_3 30.0
@@ -98,7 +124,9 @@
 /* ================================================================
  *  力矩限制
  * ================================================================ */
-/* 关节力矩限制 (N.m)，与 AM-D02-AemLURDF0413 URDF limit effort 对齐 */
+/* 关节力矩限制 (N.m)。control_logic 中用于最终输出饱和，stm_controller 中也用于
+ * 力矩安全检查；调小会更安全但更容易跟踪失败，调大前需要确认驱动器/减速器能力。
+ */
 #define JOINT_TORQUE_LIMIT_1 40.0
 #define JOINT_TORQUE_LIMIT_2 40.0
 #define JOINT_TORQUE_LIMIT_3 27.0
@@ -108,8 +136,11 @@
 #define JOINT_TORQUE_LIMIT_7 9.0
 
 /* ================================================================
- *  偏好姿态与双空间权重 (control_step_v2_arm / control_step_v2_dual)
+ *  偏好姿态与双空间权重 (stm_controller_step_elapsed 控制内核)
  * ================================================================ */
+/* Q_PREF_* 是零空间希望靠近的 7 轴姿态，单位 rad。
+ * POSTURE_ALPHA 越大，零空间参考越偏向 Q_PREF_*；越小，越偏向由 TCP 误差反推的小步。
+ */
 #define Q_PREF_1 0.0
 #define Q_PREF_2 0.0
 #define Q_PREF_3 0.0
@@ -119,8 +150,14 @@
 #define Q_PREF_7 0.0
 
 #define POSTURE_ALPHA 0.35
+/* 总力矩融合: tau = W_CARTESIAN * 笛卡尔任务 + W_JOINT * 零空间 + 动力学补偿。
+ * W_CARTESIAN 调大增强末端跟踪；W_JOINT 调大增强回偏好姿态能力。
+ */
 #define W_CARTESIAN 0.75
 #define W_JOINT 0.25
+/* deadband 内禁用零空间，避免末端接近目标时关节还在“抢控制权”。
+ * full_scale 表示误差大到多少时零空间完全恢复；TORQUE_LIMIT 是零空间单轴限幅。
+ */
 #define NULLSPACE_POS_DEADBAND 0.001 /* m，目标附近禁用零空间偏置 */
 #define NULLSPACE_ORI_DEADBAND 0.002 /* rad，目标附近禁用零空间偏置 */
 #define NULLSPACE_POS_FULL_SCALE 0.02 /* m，远离目标后恢复轻度零空间 */
@@ -130,6 +167,10 @@
 /* ================================================================
  *  运动学与逆解参数
  * ================================================================ */
+/* 保留兼容参数：当前 stm_controller 主闭环不直接调用旧数值 IK，
+ * 末端运动主要由 LinearPathPlanner + 笛卡尔 PD + 零空间完成。
+ * 调这些 IK_* 不会直接改变当前主控制链路的末端跟踪表现。
+ */
 #define IK_MAX_ITERATIONS 50
 #define IK_TOL_POS 0.005 /* 5mm 容差 */
 #define IK_T_ORI 0.01    /* ~0.57 度容差 */
@@ -139,7 +180,9 @@
 /* ================================================================
  *  关节安全限位
  * ================================================================ */
-/* 位置限位输入单位为度, 内部自动转换为 rad 供控制与运动学模块使用 */
+/* 左臂位置限位使用 degree 记录，下面 JOINT_POS_MIN/MAX_* 会转换为 rad。
+ * control_check_safety_arm() 使用 rad 限位，并留 0.01 rad 容差避免边界抖动。
+ */
 #define JOINT_POS_MIN_1_DEG (-89.971835)
 #define JOINT_POS_MAX_1_DEG (89.971835)
 #define JOINT_POS_MIN_2_DEG (-20.587610)
@@ -170,7 +213,9 @@
 #define JOINT_POS_MIN_7 DEG2RAD(JOINT_POS_MIN_7_DEG)
 #define JOINT_POS_MAX_7 DEG2RAD(JOINT_POS_MAX_7_DEG)
 
-/* 右臂位置限位来自当前双臂 URDF（单位 rad）。 */
+/* 右臂位置限位来自当前双臂 URDF（单位 rad），不再经过 degree 转换。
+ * 修改 URDF 或真机机械限位后，需要同步检查这里和左臂限位的安全范围。
+ */
 #define RIGHT_JOINT_POS_MIN_1 (-2.405)
 #define RIGHT_JOINT_POS_MAX_1 (2.2175)
 #define RIGHT_JOINT_POS_MIN_2 (-0.6605)
@@ -186,7 +231,9 @@
 #define RIGHT_JOINT_POS_MIN_7 (-1.1075)
 #define RIGHT_JOINT_POS_MAX_7 (1.068)
 
-/* 速度限位 (rad/s) */
+/* 速度限位 (rad/s)。当前左右臂每轴都统一为 5.0 rad/s；
+ * URDF 中 velocity="0" 视为未有效指定，不能直接作为速度上限。
+ */
 #define JOINT_VEL_LIMIT 5.0
 #define JOINT_VEL_LIMIT_1 JOINT_VEL_LIMIT
 #define JOINT_VEL_LIMIT_2 JOINT_VEL_LIMIT
@@ -204,15 +251,23 @@
 #define RIGHT_JOINT_VEL_LIMIT_6 JOINT_VEL_LIMIT
 #define RIGHT_JOINT_VEL_LIMIT_7 JOINT_VEL_LIMIT
 
-/* 卡尔曼滤波参数 (速度) */
+/* 卡尔曼滤波参数 (速度)。
+ * KALMAN_Q_VEL 调大: 更信任速度变化，响应更快但更吵。
+ * KALMAN_R_VEL 调大: 更不信任测量，速度更平滑但滞后更大。
+ */
 #define KALMAN_Q_VEL 0.001 /* 过程噪声: 信任模型程度 (较小值增加滤波强度) */
 #define KALMAN_R_VEL 0.1   /* 测量噪声: 信任传感器程度 (较大值增加滤波强度) */
 
 /* ================================================================
  *  路径规划参数（末端笛卡尔直线路径）
  * ================================================================ */
+/* LinearPathPlanner 生成末端参考点，速度由 elapsed_s 推进。
+ * TRAJ_PLAN_SPEED/ACCEL 决定“参考点”的定速/加速，不保证实际 TCP 在力矩饱和、
+ * 限位、安全锁定或外力扰动下仍严格达到该速度。
+ */
 #define TRAJ_PLAN_SPEED 0.75    /* 末端运动速度 (m/s) */
 #define TRAJ_PLAN_ACCEL 1.25    /* 加速度 (m/s^2) */
+/* 当前主控制链路不直接使用 TRAJ_REACH_THRESH；保留给路径到达判定辅助函数。 */
 #define TRAJ_REACH_THRESH 0.005 /* 到达目标的位置阈值 (m) */
 
 #endif /* CONFIG_LIB_H */
