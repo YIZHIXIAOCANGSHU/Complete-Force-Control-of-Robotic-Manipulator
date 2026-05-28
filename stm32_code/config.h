@@ -79,24 +79,26 @@
 /* ================================================================
  *  笛卡尔空间 PD 增益
  * ================================================================ */
-/* 作用在 TCP 位置/姿态误差上，输出笛卡尔任务力再通过 J^T 转成关节力矩。
+/* 终点跟踪增强档：作用在 TCP 位置/姿态误差上，输出笛卡尔任务力再通过 J^T 转成关节力矩。
  * KP_CART_* 调大: 末端跟踪更硬、误差收敛更快，但更容易振荡/饱和。
  * KD_CART_* 调大: 阻尼更强、超调更小，但过大可能放大速度噪声并让动作发涩。
  * XYZ 单位近似 N/m；ROLL/PITCH/YAW 作用在轴角姿态误差上。
  */
-#define KP_CART_X 120.0
-#define KP_CART_Y 120.0
-#define KP_CART_Z 120.0
-#define KP_CART_ROLL 5.0
-#define KP_CART_PITCH 5.0
-#define KP_CART_YAW 5.0
+#define KP_CART_X 260.0
+#define KP_CART_Y 260.0
+#define KP_CART_Z 260.0
 
-#define KD_CART_X 25.0
-#define KD_CART_Y 25.0
-#define KD_CART_Z 25.0
-#define KD_CART_ROLL 0.8
-#define KD_CART_PITCH 0.8
-#define KD_CART_YAW 0.8
+#define KD_CART_X 55.0
+#define KD_CART_Y 55.0
+#define KD_CART_Z 55.0
+
+#define KP_CART_ROLL 12.0
+#define KP_CART_PITCH 12.0
+#define KP_CART_YAW 12.0
+
+#define KD_CART_ROLL 1.8
+#define KD_CART_PITCH 1.8
+#define KD_CART_YAW 1.8
 
 /* ================================================================
  *  关节空间 PD 增益

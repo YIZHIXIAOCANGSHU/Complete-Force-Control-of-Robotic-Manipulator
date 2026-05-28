@@ -150,6 +150,18 @@ class Config:
     JOINT_DAMPING = np.tile(ARM_JOINT_DAMPING, NUM_ARMS)
     JOINT_ARMATURE = np.tile(ARM_JOINT_ARMATURE, NUM_ARMS)
 
+    # OpenArm Follower 七轴 tanh 摩擦模型，作为独立仿真物理摩擦注入，不写入 URDF。
+    # tau_f = Fo + Fv * dq + Fc * tanh(0.1 * k * dq)
+    ENABLE_FOLLOWER_FRICTION = _env_bool("AM_D02_ENABLE_FOLLOWER_FRICTION", True)
+    FOLLOWER_FRICTION_FC = np.array([0.306, 0.306, 0.400, 0.166, 0.050, 0.093, 0.172], dtype=np.float64)
+    FOLLOWER_FRICTION_K = np.array([28.417, 28.417, 29.065, 130.038, 151.771, 242.287, 7.888], dtype=np.float64)
+    FOLLOWER_FRICTION_FV = np.array([0.063, 0.063, 0.604, 0.813, 0.029, 0.072, 0.084], dtype=np.float64)
+    FOLLOWER_FRICTION_FO = np.array([0.088, 0.088, 0.008, -0.058, 0.005, 0.009, -0.059], dtype=np.float64)
+    FOLLOWER_FRICTION_FC_14 = np.tile(FOLLOWER_FRICTION_FC, NUM_ARMS)
+    FOLLOWER_FRICTION_K_14 = np.tile(FOLLOWER_FRICTION_K, NUM_ARMS)
+    FOLLOWER_FRICTION_FV_14 = np.tile(FOLLOWER_FRICTION_FV, NUM_ARMS)
+    FOLLOWER_FRICTION_FO_14 = np.tile(FOLLOWER_FRICTION_FO, NUM_ARMS)
+
     # === 仿真参数 ===
     DT = 0.01  # 仿真步长 (秒)，对应 100 Hz
     

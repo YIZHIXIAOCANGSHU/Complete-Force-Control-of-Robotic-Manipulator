@@ -38,6 +38,10 @@ REAL_RIGHT_ARM_JOINT_LIMITS_RAD = [
     (-0.6015, 0.6755),
     (-1.1075, 1.068),
 ]
+OPENARM_FOLLOWER_FRICTION_FC = [0.306, 0.306, 0.400, 0.166, 0.050, 0.093, 0.172]
+OPENARM_FOLLOWER_FRICTION_K = [28.417, 28.417, 29.065, 130.038, 151.771, 242.287, 7.888]
+OPENARM_FOLLOWER_FRICTION_FV = [0.063, 0.063, 0.604, 0.813, 0.029, 0.072, 0.084]
+OPENARM_FOLLOWER_FRICTION_FO = [0.088, 0.088, 0.008, -0.058, 0.005, 0.009, -0.059]
 
 
 def _repo_root() -> Path:
@@ -562,6 +566,105 @@ def test_mujoco_env_uses_real_machine_joint_limits_for_clipping():
     np.testing.assert_allclose(env.get_qpos(), expected_limits[:, 1])
 
 
+def test_config_exposes_openarm_follower_friction_parameters():
+    np.testing.assert_allclose(Config.FOLLOWER_FRICTION_FC, OPENARM_FOLLOWER_FRICTION_FC)
+    np.testing.assert_allclose(Config.FOLLOWER_FRICTION_K, OPENARM_FOLLOWER_FRICTION_K)
+    np.testing.assert_allclose(Config.FOLLOWER_FRICTION_FV, OPENARM_FOLLOWER_FRICTION_FV)
+    np.testing.assert_allclose(Config.FOLLOWER_FRICTION_FO, OPENARM_FOLLOWER_FRICTION_FO)
+    np.testing.assert_allclose(
+        Config.FOLLOWER_FRICTION_FC_14,
+        np.tile(OPENARM_FOLLOWER_FRICTION_FC, Config.NUM_ARMS),
+    )
+    assert Config.FOLLOWER_FRICTION_FC_14.shape == (Config.NUM_JOINTS,)
+
+
+def test_openarm_follower_friction_can_be_disabled_by_env():
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.path.insert(0, "python")
+        from config import Config
+        print(Config.ENABLE_FOLLOWER_FRICTION)
+        """
+    )
+    env = os.environ.copy()
+    env["AM_D02_ENABLE_FOLLOWER_FRICTION"] = "0"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert result.stdout.strip() == "False"
+
+
+def test_mujoco_env_computes_openarm_follower_friction_torque():
+    pytest.importorskip("mujoco")
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    qvel = np.linspace(-1.2, 1.4, Config.NUM_JOINTS)
+    expected = (
+        Config.FOLLOWER_FRICTION_FO_14
+        + Config.FOLLOWER_FRICTION_FV_14 * qvel
+        + Config.FOLLOWER_FRICTION_FC_14 * np.tanh(0.1 * Config.FOLLOWER_FRICTION_K_14 * qvel)
+    )
+
+    np.testing.assert_allclose(env.get_follower_friction_torque(qvel), expected)
+    np.testing.assert_allclose(
+        env.get_follower_friction_torque(np.zeros(Config.NUM_JOINTS)),
+        Config.FOLLOWER_FRICTION_FO_14,
+    )
+
+
+def test_mujoco_env_friction_returns_zero_when_disabled():
+    pytest.importorskip("mujoco")
+
+    script = textwrap.dedent(
+        """
+        import numpy as np
+        import sys
+        sys.path.insert(0, "python")
+        from config import Config
+        from sim_env import MujocoSimEnv
+
+        env = MujocoSimEnv()
+        print(Config.ENABLE_FOLLOWER_FRICTION)
+        print(np.linalg.norm(env.get_follower_friction_torque(np.ones(Config.NUM_JOINTS))))
+        """
+    )
+    env = os.environ.copy()
+    env["AM_D02_ENABLE_FOLLOWER_FRICTION"] = "0"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert result.stdout.strip().splitlines() == ["False", "0.0"]
+
+
+def test_mujoco_env_friction_changes_arm_acceleration_without_compensation():
+    pytest.importorskip("mujoco")
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    env.reset(Config.INIT_QPOS)
+    env.forward()
+
+    env.apply_torque(env.get_qfrc_bias())
+    env.step()
+
+    assert np.linalg.norm(env.get_applied_friction_torque()) > 0.0
+    assert np.linalg.norm(env.data.qacc[env.dof_ids]) > 1e-6
+
+
 def test_mujoco_env_keeps_body_joints_for_gui_by_default():
     pytest.importorskip("mujoco")
 
@@ -587,7 +690,7 @@ def test_mujoco_env_keeps_body_joints_for_gui_by_default():
     np.testing.assert_allclose(env.get_body_qpos(), body_q)
     np.testing.assert_allclose(env.data.qvel[env.body_dof_ids], 0.0)
     np.testing.assert_allclose(env.data.qacc[env.body_dof_ids], 0.0)
-    env.apply_torque(env.get_qfrc_bias())
+    env.apply_torque(env.get_qfrc_bias() + env.get_follower_friction_torque())
     env.step()
     np.testing.assert_allclose(env.get_body_qpos(), body_q)
     np.testing.assert_allclose(env.data.qvel[env.body_dof_ids], 0.0)
@@ -606,14 +709,14 @@ def test_commanded_body_sim_applies_viewer_external_force_to_arm_dofs():
     env.set_body_qpos(body_q)
     env.forward()
 
-    env.apply_torque(env.get_qfrc_bias())
+    env.apply_torque(env.get_qfrc_bias() + env.get_follower_friction_torque())
     env.step()
     qacc_without_force = env.data.qacc[env.dof_ids].copy()
 
     env.reset(Config.INIT_QPOS)
     env.set_body_qpos(body_q)
     env.forward()
-    env.apply_torque(env.get_qfrc_bias())
+    env.apply_torque(env.get_qfrc_bias() + env.get_follower_friction_torque())
     env.data.xfrc_applied[env.ee_body_ids[Config.LEFT_ARM], :3] = [10.0, 0.0, 0.0]
     env.step()
 

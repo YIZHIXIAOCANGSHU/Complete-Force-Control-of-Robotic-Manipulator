@@ -75,6 +75,8 @@ class MujocoSimEnv:
         self.locked_dof_ids = self._resolve_uncontrolled_dof_ids()
         self.locked_qpos_ids = self._resolve_uncontrolled_qpos_ids()
         self._torque_buffer = np.empty(Config.NUM_JOINTS, dtype=np.float64)
+        self._command_tau = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
+        self._friction_tau = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
         self._mass_matrix = np.zeros((self.model.nv, self.model.nv), dtype=np.float64)
         self._external_qfrc = np.zeros(self.model.nv, dtype=np.float64)
         self._arm_rhs = np.empty(Config.NUM_JOINTS, dtype=np.float64)
@@ -555,7 +557,31 @@ class MujocoSimEnv:
         施加关节力矩
         tau: (14,) 各关节力矩 (N·m)
         """
-        self.data.qfrc_applied[self.dof_ids] = tau
+        self._command_tau[:] = np.asarray(tau, dtype=np.float64)
+        self._friction_tau[:] = self.get_follower_friction_torque()
+        self.data.qfrc_applied[self.dof_ids] = self._command_tau - self._friction_tau
+
+    def get_follower_friction_torque(self, qvel: np.ndarray | None = None) -> np.ndarray:
+        """计算 OpenArm Follower 七轴 tanh 摩擦模型，左右臂各复制一份。"""
+        if not Config.ENABLE_FOLLOWER_FRICTION:
+            return np.zeros(Config.NUM_JOINTS, dtype=np.float64)
+
+        if qvel is None:
+            qvel = self.get_qvel()
+        qvel = np.asarray(qvel, dtype=np.float64)
+        if qvel.shape != (Config.NUM_JOINTS,):
+            raise ValueError(f"qvel must have shape ({Config.NUM_JOINTS},)")
+
+        return (
+            Config.FOLLOWER_FRICTION_FO_14
+            + Config.FOLLOWER_FRICTION_FV_14 * qvel
+            + Config.FOLLOWER_FRICTION_FC_14
+            * np.tanh(0.1 * Config.FOLLOWER_FRICTION_K_14 * qvel)
+        )
+
+    def get_applied_friction_torque(self) -> np.ndarray:
+        """返回最近一次 apply_torque() 计算出的 14 轴物理摩擦力矩。"""
+        return self._friction_tau.copy()
 
     def _step_with_commanded_body_joints(self) -> None:
         """在躯干关节外部锁定时，只对 14 个双臂自由度做动力学积分。"""
@@ -576,8 +602,9 @@ class MujocoSimEnv:
 
         arm_mass = self._mass_matrix[np.ix_(self.dof_ids, self.dof_ids)]
         self._arm_rhs[:] = (
-            self.data.qfrc_applied[self.dof_ids]
+            self._command_tau
             + self._external_qfrc[self.dof_ids]
+            - self._friction_tau
             - self.data.qfrc_bias[self.dof_ids]
         )
         self._arm_qacc[:] = np.linalg.solve(arm_mass, self._arm_rhs)

@@ -1473,6 +1473,30 @@ def test_stm32h7_porting_doc_describes_elapsed_time_contract():
     assert "STM_LOG_ERROR" in text
 
 
+def test_cartesian_pd_gains_are_endpoint_tracking_tuned(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "config.h"
+        #include <stdio.h>
+
+        int main(void) {
+          printf("%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f\\n",
+                 KP_CART_X, KP_CART_Y, KP_CART_Z,
+                 KP_CART_ROLL, KP_CART_PITCH, KP_CART_YAW,
+                 KD_CART_X, KD_CART_Y, KD_CART_Z,
+                 KD_CART_ROLL, KD_CART_PITCH, KD_CART_YAW);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
+    values = [float(value) for value in subprocess.check_output([str(probe)], text=True).split()]
+
+    assert values == pytest.approx(
+        [220.0, 220.0, 220.0, 10.0, 10.0, 10.0, 42.0, 42.0, 42.0, 1.3, 1.3, 1.3]
+    )
+
+
 def test_stm_controller_uses_linear_path_planner_with_acceleration(tmp_path: Path):
     source = textwrap.dedent(
         """
