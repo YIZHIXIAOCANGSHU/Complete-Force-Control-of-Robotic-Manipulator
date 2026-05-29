@@ -143,10 +143,12 @@ class Config:
     RIGHT_JOINT_LIMITS_DEG = np.rad2deg(RIGHT_JOINT_LIMITS_RAD)
     JOINT_LIMITS_DEG = np.vstack([LEFT_JOINT_LIMITS_DEG, RIGHT_JOINT_LIMITS_DEG])
     JOINT_LIMITS_RAD = np.deg2rad(JOINT_LIMITS_DEG)
+    CONTROL_JOINT_LIMIT_INSET_RATIO = 0.01
+    JOINT_VEL_LIMIT = 4.0
 
-    # 新模型腕部惯量较轻，给纯力矩仿真补一点被动阻尼/转子惯量，避免默认目标启动时冲过速度保护。
-    ARM_JOINT_DAMPING = np.array([2.0, 2.0, 1.5, 1.5, 0.8, 0.8, 0.8])
-    ARM_JOINT_ARMATURE = np.array([0.02, 0.02, 0.015, 0.015, 0.01, 0.01, 0.01])
+    # MuJoCo 不额外添加 dof damping/armature；仿真被动项只使用下面的 follower friction 模型。
+    ARM_JOINT_DAMPING = np.zeros(ARM_JOINTS, dtype=np.float64)
+    ARM_JOINT_ARMATURE = np.zeros(ARM_JOINTS, dtype=np.float64)
     JOINT_DAMPING = np.tile(ARM_JOINT_DAMPING, NUM_ARMS)
     JOINT_ARMATURE = np.tile(ARM_JOINT_ARMATURE, NUM_ARMS)
 
@@ -162,14 +164,52 @@ class Config:
     FOLLOWER_FRICTION_FV_14 = np.tile(FOLLOWER_FRICTION_FV, NUM_ARMS)
     FOLLOWER_FRICTION_FO_14 = np.tile(FOLLOWER_FRICTION_FO, NUM_ARMS)
 
+    # === 控制器镜像参数 (kept in sync with stm32_code/config.h) ===
+    KP_CART_X = 260.0
+    KP_CART_Y = 260.0
+    KP_CART_Z = 260.0
+    KD_CART_X = 70.0
+    KD_CART_Y = 70.0
+    KD_CART_Z = 70.0
+    KP_CART_ROLL = 12.0
+    KP_CART_PITCH = 12.0
+    KP_CART_YAW = 12.0
+    KD_CART_ROLL = 4.0
+    KD_CART_PITCH = 4.0
+    KD_CART_YAW = 4.0
+    KP_JOINT = np.array([115.0, 100.0, 30.0, 40.0, 20.0, 20.0, 20.0], dtype=np.float64)
+    KD_JOINT = np.array([5.0, 5.0, 2.0, 2.0, 1.0, 1.0, 1.0], dtype=np.float64)
+    Q_PREFERRED = np.array([0.0, 0.0, 0.0, np.pi / 3.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    POSTURE_ALPHA = 0.35
+    W_CARTESIAN = 0.75
+    W_JOINT = 0.25
+    NULLSPACE_POS_DEADBAND = 0.001
+    NULLSPACE_ORI_DEADBAND = 0.002
+    NULLSPACE_POS_FULL_SCALE = 0.02
+    NULLSPACE_ORI_FULL_SCALE = 0.05
+    NULLSPACE_TORQUE_LIMIT = 0.08
+    TRAJ_PLAN_SPEED = 0.5
+    TRAJ_PLAN_ACCEL = 0.2
+    CONTROL_PATH_GATE_FULL_ERROR_M = 0.005
+    CONTROL_PATH_GATE_STOP_ERROR_M = 0.020
+    CONTROL_PATH_GATE_RISE_TIME_S = 0.080
+    CONTROL_PATH_GATE_FALL_TIME_S = 0.030
+    CONTROL_PATH_LOOKAHEAD_M = 0.008
+    CONTROL_PATH_LOOKAHEAD_RAMP_S = 0.30
+    CONTROL_TARGET_REPLAN_POS_EPS_M = 0.001
+    CONTROL_TARGET_REPLAN_ORI_EPS_RAD = 0.002
+
     # === 仿真参数 ===
-    DT = 0.01  # 仿真步长 (秒)，对应 100 Hz
+    DT = 0.001  # 仿真步长 (秒)，对应 100 Hz
     
     # === 初始位置 ===
-    # 机械臂初始关节定义：左右臂均为全 0，第四关节为 pi/2。初始目标由该构型 FK 得到。
+    # INIT_QPOS 只用于计算默认目标 TCP；仿真机器人本体启动姿态使用 HOME_QPOS。
+    # 保持目标点起始仍来自旧的第四轴 pi/2 构型。
     ARM_INIT_QPOS = np.array([0.0, 0.0, 0.0, np.pi / 2, 0.0, 0.0, 0.0])
     INIT_QPOS = np.tile(ARM_INIT_QPOS, NUM_ARMS)
-    HOME_QPOS = INIT_QPOS.copy()
+    # 仿真启动姿态：双臂 14 轴全 0。
+    ARM_HOME_QPOS = np.zeros(ARM_JOINTS, dtype=np.float64)
+    HOME_QPOS = np.tile(ARM_HOME_QPOS, NUM_ARMS)
 
     # === 目标位置 (Target Posture) ===
     # 用于重力补偿与 PD 控制的目标位置 (rad)

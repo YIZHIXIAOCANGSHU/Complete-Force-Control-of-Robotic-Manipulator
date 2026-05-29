@@ -20,7 +20,9 @@ typedef struct {
   double ref_pos[NUM_ARMS][3];
   double ref_quat[NUM_ARMS][4];
   LinearPathPlanner path_planner[NUM_ARMS];
-  double path_start_t[NUM_ARMS];
+  double path_progress_t[NUM_ARMS];
+  double path_gate[NUM_ARMS];
+  double path_lookahead_m[NUM_ARMS];
 } StmControllerState;
 
 static StmControllerState g_controller = {0};
@@ -49,7 +51,73 @@ static void stm_controller_clear_path_state(void) {
   memset(g_controller.ref_pos, 0, sizeof(g_controller.ref_pos));
   memset(g_controller.ref_quat, 0, sizeof(g_controller.ref_quat));
   memset(g_controller.path_planner, 0, sizeof(g_controller.path_planner));
-  memset(g_controller.path_start_t, 0, sizeof(g_controller.path_start_t));
+  memset(g_controller.path_progress_t, 0, sizeof(g_controller.path_progress_t));
+  memset(g_controller.path_gate, 0, sizeof(g_controller.path_gate));
+  memset(g_controller.path_lookahead_m, 0, sizeof(g_controller.path_lookahead_m));
+}
+
+static double stm_controller_clamp(double value, double low, double high) {
+  if (value < low) {
+    return low;
+  }
+  if (value > high) {
+    return high;
+  }
+  return value;
+}
+
+static double stm_controller_vec3_distance(const double a[3],
+                                           const double b[3]) {
+  double dx = a[0] - b[0];
+  double dy = a[1] - b[1];
+  double dz = a[2] - b[2];
+  return sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+static double stm_controller_path_distance_at_time(const LinearPathPlanner *lp,
+                                                   double t) {
+  if (lp == NULL || lp->L < 1e-6 || t <= 0.0 || !isfinite(t)) {
+    return 0.0;
+  }
+  if (t >= lp->total_time) {
+    return lp->L;
+  }
+  if (t < lp->t_a) {
+    return 0.5 * lp->a * t * t;
+  }
+  if (t < lp->t_a + lp->t_c) {
+    return lp->d_a + lp->v_max * (t - lp->t_a);
+  }
+
+  double dt = t - lp->t_a - lp->t_c;
+  double s = lp->d_a + lp->v_max * lp->t_c + lp->v_max * dt -
+             0.5 * lp->a * dt * dt;
+  return stm_controller_clamp(s, 0.0, lp->L);
+}
+
+static double stm_controller_path_time_at_distance(const LinearPathPlanner *lp,
+                                                   double s) {
+  if (lp == NULL || lp->L < 1e-6 || s <= 0.0 || !isfinite(s)) {
+    return 0.0;
+  }
+  if (s >= lp->L) {
+    return lp->total_time;
+  }
+  if (lp->a <= 0.0 || !isfinite(lp->a)) {
+    return 0.0;
+  }
+  if (s <= lp->d_a) {
+    return sqrt(2.0 * s / lp->a);
+  }
+  if (lp->t_c > 0.0 && s <= lp->d_a + lp->v_max * lp->t_c) {
+    return lp->t_a + (s - lp->d_a) / lp->v_max;
+  }
+
+  double remaining = lp->L - s;
+  if (remaining <= 0.0) {
+    return lp->total_time;
+  }
+  return lp->total_time - sqrt(2.0 * remaining / lp->a);
 }
 
 static uint8_t stm_controller_normalize_arm_mask(uint8_t active_arm_mask) {
@@ -113,7 +181,8 @@ static int stm_controller_pose_changed(int arm, const double target_pos[3],
   }
 
   for (int i = 0; i < 3; ++i) {
-    if (fabs(target_pos[i] - g_controller.target_pos[arm][i]) > 1e-9) {
+    if (fabs(target_pos[i] - g_controller.target_pos[arm][i]) >
+        CONTROL_TARGET_REPLAN_POS_EPS_M) {
       return 1;
     }
   }
@@ -122,7 +191,10 @@ static int stm_controller_pose_changed(int arm, const double target_pos[3],
   for (int i = 0; i < 4; ++i) {
     dot += target_quat[i] * g_controller.target_quat[arm][i];
   }
-  return fabs(fabs(dot) - 1.0) > 1e-9;
+  double dot_abs = fabs(dot);
+  dot_abs = stm_controller_clamp(dot_abs, 0.0, 1.0);
+  double angle = 2.0 * acos(dot_abs);
+  return angle > CONTROL_TARGET_REPLAN_ORI_EPS_RAD;
 }
 
 static void stm_controller_sanitize_target_pose(const stm_input_t *in,
@@ -161,6 +233,41 @@ static void stm_controller_sanitize_target_pose(const stm_input_t *in,
   }
 }
 
+static double stm_controller_tracking_gate(double error_m, double elapsed_s,
+                                           double previous_gate) {
+  double gate_cmd;
+  double gate_delta;
+  double full_error = CONTROL_PATH_GATE_FULL_ERROR_M;
+  double stop_error = CONTROL_PATH_GATE_STOP_ERROR_M;
+
+  if (!isfinite(error_m)) {
+    gate_cmd = 0.0;
+  } else if (error_m <= full_error) {
+    gate_cmd = 1.0;
+  } else if (error_m >= stop_error || stop_error <= full_error) {
+    gate_cmd = 0.0;
+  } else {
+    double x = (stop_error - error_m) / (stop_error - full_error);
+    x = stm_controller_clamp(x, 0.0, 1.0);
+    gate_cmd = x * x * (3.0 - 2.0 * x);
+  }
+
+  if (elapsed_s <= 0.0 || !isfinite(elapsed_s)) {
+    return stm_controller_clamp(previous_gate, 0.0, 1.0);
+  }
+
+  gate_delta = gate_cmd - previous_gate;
+  if (gate_delta >= 0.0) {
+    double max_rise = elapsed_s / CONTROL_PATH_GATE_RISE_TIME_S;
+    gate_delta = stm_controller_clamp(gate_delta, 0.0, max_rise);
+  } else {
+    double max_fall = elapsed_s / CONTROL_PATH_GATE_FALL_TIME_S;
+    gate_delta = stm_controller_clamp(gate_delta, -max_fall, 0.0);
+  }
+
+  return stm_controller_clamp(previous_gate + gate_delta, 0.0, 1.0);
+}
+
 static void stm_controller_update_reference_arm(int arm,
                                                 const double current_pos[3],
                                                 const double current_quat[4],
@@ -169,31 +276,69 @@ static void stm_controller_update_reference_arm(int arm,
                                                 double step_s, double ref_pos[3],
                                                 double ref_quat[4]) {
   int replan = stm_controller_pose_changed(arm, target_pos, target_quat);
-  double path_t;
-
-  (void)step_s;
+  double tracking_error;
+  double lookahead_step;
+  double base_distance;
+  double eval_distance;
+  double eval_t;
 
   if (!g_controller.ref_valid[arm]) {
     memcpy(g_controller.ref_pos[arm], current_pos, sizeof(double) * 3);
     memcpy(g_controller.ref_quat[arm], current_quat, sizeof(double) * 4);
     g_controller.ref_valid[arm] = 1;
+    g_controller.path_gate[arm] = 1.0;
+    g_controller.path_progress_t[arm] = 0.0;
+    g_controller.path_lookahead_m[arm] = 0.0;
   }
 
   if (replan) {
+    tracking_error =
+        stm_controller_vec3_distance(current_pos, g_controller.ref_pos[arm]);
+    if (tracking_error >= CONTROL_PATH_GATE_STOP_ERROR_M) {
+      memcpy(g_controller.ref_pos[arm], current_pos, sizeof(double) * 3);
+      memcpy(g_controller.ref_quat[arm], current_quat, sizeof(double) * 4);
+      g_controller.path_gate[arm] = 0.0;
+      g_controller.path_lookahead_m[arm] = 0.0;
+    }
     linear_path_init(&g_controller.path_planner[arm], g_controller.ref_pos[arm],
                      g_controller.ref_quat[arm], target_pos, target_quat,
                      TRAJ_PLAN_SPEED, TRAJ_PLAN_ACCEL);
-    g_controller.path_start_t[arm] = g_controller.traj_t;
+    g_controller.path_progress_t[arm] = 0.0;
     memcpy(g_controller.target_pos[arm], target_pos, sizeof(double) * 3);
     memcpy(g_controller.target_quat[arm], target_quat, sizeof(double) * 4);
     g_controller.target_valid[arm] = 1;
   }
 
-  path_t = g_controller.traj_t + step_s - g_controller.path_start_t[arm];
-  if (path_t < 0.0 || !isfinite(path_t)) {
-    path_t = 0.0;
+  tracking_error =
+      stm_controller_vec3_distance(current_pos, g_controller.ref_pos[arm]);
+  g_controller.path_gate[arm] =
+      stm_controller_tracking_gate(tracking_error, step_s, g_controller.path_gate[arm]);
+  g_controller.path_progress_t[arm] += step_s * g_controller.path_gate[arm];
+  if (g_controller.path_progress_t[arm] < 0.0 ||
+      !isfinite(g_controller.path_progress_t[arm])) {
+    g_controller.path_progress_t[arm] = 0.0;
   }
-  linear_path_evaluate(&g_controller.path_planner[arm], path_t,
+
+  if (step_s > 0.0 && isfinite(step_s) &&
+      CONTROL_PATH_LOOKAHEAD_RAMP_S > 0.0) {
+    lookahead_step =
+        CONTROL_PATH_LOOKAHEAD_M * step_s / CONTROL_PATH_LOOKAHEAD_RAMP_S;
+    g_controller.path_lookahead_m[arm] += lookahead_step;
+    if (g_controller.path_lookahead_m[arm] > CONTROL_PATH_LOOKAHEAD_M) {
+      g_controller.path_lookahead_m[arm] = CONTROL_PATH_LOOKAHEAD_M;
+    }
+  }
+
+  base_distance = stm_controller_path_distance_at_time(
+      &g_controller.path_planner[arm], g_controller.path_progress_t[arm]);
+  eval_distance = base_distance + g_controller.path_lookahead_m[arm];
+  if (eval_distance > g_controller.path_planner[arm].L) {
+    eval_distance = g_controller.path_planner[arm].L;
+  }
+  eval_t = stm_controller_path_time_at_distance(&g_controller.path_planner[arm],
+                                                eval_distance);
+  linear_path_evaluate(&g_controller.path_planner[arm],
+                       eval_t,
                        g_controller.ref_pos[arm],
                        g_controller.ref_quat[arm]);
 

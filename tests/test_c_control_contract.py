@@ -491,6 +491,12 @@ def test_c_safety_uses_urdf_right_arm_position_limits_and_per_joint_velocity(tmp
           printf("%s %d\\n", label, control_check_safety_arm(side, q, qd));
         }
 
+        static void fill_mid(double q[7], const double qmin[7], const double qmax[7]) {
+          for (int i = 0; i < 7; ++i) {
+            q[i] = 0.5 * (qmin[i] + qmax[i]);
+          }
+        }
+
         int main(void) {
           double right_min[7] = {
             RIGHT_JOINT_POS_MIN_1, RIGHT_JOINT_POS_MIN_2, RIGHT_JOINT_POS_MIN_3,
@@ -523,27 +529,31 @@ def test_c_safety_uses_urdf_right_arm_position_limits_and_per_joint_velocity(tmp
           double qd[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
           control_init();
+          fill_mid(q, right_min, right_max);
           print_status("right_center", ARM_RIGHT, q, qd);
           for (int i = 0; i < 7; ++i) {
             q[i] = right_min[i] - 0.011;
             print_status("right_low", ARM_RIGHT, q, qd);
             q[i] = right_max[i] + 0.011;
             print_status("right_high", ARM_RIGHT, q, qd);
-            q[i] = 0.0;
+            q[i] = 0.5 * (right_min[i] + right_max[i]);
           }
 
+          fill_mid(q, left_min, left_max);
           q[0] = left_min[0] - 0.011;
           print_status("left_j1_low", ARM_LEFT, q, qd);
-          q[0] = 0.0;
+          q[0] = 0.5 * (left_min[0] + left_max[0]);
           q[6] = left_max[6] + 0.011;
           print_status("left_j7_high", ARM_LEFT, q, qd);
-          q[6] = 0.0;
+          q[6] = 0.5 * (left_min[6] + left_max[6]);
 
+          fill_mid(q, right_min, right_max);
           qd[0] = right_vel[0] - 0.001;
           print_status("right_vel_ok", ARM_RIGHT, q, qd);
           qd[0] = right_vel[0] + 0.001;
           print_status("right_vel_high", ARM_RIGHT, q, qd);
           qd[0] = 0.0;
+          fill_mid(q, left_min, left_max);
           qd[6] = -left_vel[6] - 0.001;
           print_status("left_vel_low", ARM_LEFT, q, qd);
           return 0;
@@ -685,6 +695,10 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_replans(t
         static void fill_zero_input(stm_input_t *in) {
           memset(in, 0, sizeof(*in));
           for (int arm = 0; arm < NUM_ARMS; ++arm) {
+            int offset = arm * ARM_JOINTS;
+            in->q[offset + 3] = 1.0;
+          }
+          for (int arm = 0; arm < NUM_ARMS; ++arm) {
             for (int i = 0; i < 3; ++i) {
               in->target_pos[arm][i] = NAN;
             }
@@ -705,9 +719,14 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_replans(t
         static void step_and_print(const char *label, stm_input_t *in,
                                    stm_output_t *out, double elapsed_s) {
           stm_controller_step_elapsed(in, out, elapsed_s);
-          printf("%s %d %.12f %d %d %.6f\\n", label, out->status,
+          printf("%s %d %.12f %d %d %d %.12f %.12f %.12f %.6f\\n", label, out->status,
                  tau_abs_sum(out), g_controller.safety_latched,
-                 g_controller.target_valid[ARM_LEFT], out->traj_t);
+                 g_controller.target_valid[ARM_LEFT],
+                 g_controller.ref_valid[ARM_LEFT],
+                 g_controller.path_progress_t[ARM_LEFT],
+                 g_controller.path_gate[ARM_LEFT],
+                 g_controller.path_lookahead_m[ARM_LEFT],
+                 out->traj_t);
         }
 
         int main(void) {
@@ -747,12 +766,27 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_replans(t
     probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
     rows = {}
     for line in subprocess.check_output([str(probe)], text=True).splitlines():
-        label, status, tau_sum, latched, target_valid, traj_t = line.split()
+        (
+            label,
+            status,
+            tau_sum,
+            latched,
+            target_valid,
+            ref_valid,
+            path_progress_t,
+            path_gate,
+            path_lookahead_m,
+            traj_t,
+        ) = line.split()
         rows[label] = {
             "status": int(status),
             "tau_sum": float(tau_sum),
             "latched": int(latched),
             "target_valid": int(target_valid),
+            "ref_valid": int(ref_valid),
+            "path_progress_t": float(path_progress_t),
+            "path_gate": float(path_gate),
+            "path_lookahead_m": float(path_lookahead_m),
             "traj_t": float(traj_t),
         }
 
@@ -779,11 +813,19 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_replans(t
     assert rows["hold_10"]["status"] == -2
     assert rows["hold_10"]["latched"] == 0
     assert rows["hold_10"]["target_valid"] == 0
+    assert rows["hold_10"]["ref_valid"] == 0
+    assert rows["hold_10"]["path_progress_t"] == pytest.approx(0.0)
+    assert rows["hold_10"]["path_gate"] == pytest.approx(0.0)
+    assert rows["hold_10"]["path_lookahead_m"] == pytest.approx(0.0)
     assert rows["hold_10"]["tau_sum"] == pytest.approx(0.0)
 
     assert rows["recovered"]["status"] == 0
     assert rows["recovered"]["latched"] == 0
     assert rows["recovered"]["target_valid"] == 1
+    assert rows["recovered"]["ref_valid"] == 1
+    assert rows["recovered"]["path_progress_t"] > 0.0
+    assert rows["recovered"]["path_gate"] == pytest.approx(1.0)
+    assert rows["recovered"]["path_lookahead_m"] > 0.0
     assert rows["recovered"]["traj_t"] > rows["hold_10"]["traj_t"]
 
 
@@ -828,6 +870,48 @@ def test_stm_controller_velocity_limit_enters_safety_latch_with_zero_torque(tmp_
 
     assert int(status) == -1
     assert float(tau_sum) == pytest.approx(0.0)
+
+
+def test_control_safety_insets_position_limits_and_uses_4rad_velocity_limit(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "control_logic.h"
+        #include <stdio.h>
+
+        int main(void) {
+          double q[7] = {0.0};
+          double qd[7] = {0.0};
+          double span = RIGHT_JOINT_POS_MAX_1 - RIGHT_JOINT_POS_MIN_1;
+          double safe_min = RIGHT_JOINT_POS_MIN_1 + CONTROL_JOINT_LIMIT_INSET_RATIO * span;
+          double safe_max = RIGHT_JOINT_POS_MAX_1 - CONTROL_JOINT_LIMIT_INSET_RATIO * span;
+
+          for (int i = 0; i < 7; ++i) {
+            q[i] = 0.5 * (RIGHT_JOINT_POS_MIN_1 + RIGHT_JOINT_POS_MAX_1);
+          }
+
+          q[0] = safe_min - 0.0001;
+          printf("inset_low %d\\n", control_check_safety_arm(ARM_RIGHT, q, qd));
+          q[0] = safe_max + 0.0001;
+          printf("inset_high %d\\n", control_check_safety_arm(ARM_RIGHT, q, qd));
+          q[0] = 0.5 * (safe_min + safe_max);
+          qd[0] = 4.001;
+          printf("vel_high %d %.3f %.2f\\n", control_check_safety_arm(ARM_RIGHT, q, qd),
+                 JOINT_VEL_LIMIT, CONTROL_JOINT_LIMIT_INSET_RATIO);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source)
+    rows = {}
+    for line in subprocess.check_output([str(probe)], text=True).splitlines():
+        parts = line.split()
+        rows[parts[0]] = parts[1:]
+
+    assert int(rows["inset_low"][0]) == -1
+    assert int(rows["inset_high"][0]) == -1
+    assert int(rows["vel_high"][0]) == -2
+    assert float(rows["vel_high"][1]) == pytest.approx(4.0)
+    assert float(rows["vel_high"][2]) == pytest.approx(0.01)
 
 
 def test_stm_controller_active_arm_mask_controls_only_selected_arm(tmp_path: Path):
@@ -1493,7 +1577,7 @@ def test_cartesian_pd_gains_are_endpoint_tracking_tuned(tmp_path: Path):
     values = [float(value) for value in subprocess.check_output([str(probe)], text=True).split()]
 
     assert values == pytest.approx(
-        [220.0, 220.0, 220.0, 10.0, 10.0, 10.0, 42.0, 42.0, 42.0, 1.3, 1.3, 1.3]
+        [260.0, 260.0, 260.0, 12.0, 12.0, 12.0, 70.0, 70.0, 70.0, 4.0, 4.0, 4.0]
     )
 
 
@@ -1529,6 +1613,8 @@ def test_stm_controller_uses_linear_path_planner_with_acceleration(tmp_path: Pat
           stm_output_t out;
           double first_step = 0.5 * TRAJ_PLAN_ACCEL * CONTROL_DT * CONTROL_DT;
           double second_step = 0.5 * TRAJ_PLAN_ACCEL * (2.0 * CONTROL_DT) * (2.0 * CONTROL_DT);
+          double first_lookahead = CONTROL_PATH_LOOKAHEAD_M * CONTROL_DT / CONTROL_PATH_LOOKAHEAD_RAMP_S;
+          double second_lookahead = CONTROL_PATH_LOOKAHEAD_M * (2.0 * CONTROL_DT) / CONTROL_PATH_LOOKAHEAD_RAMP_S;
           double start_pos[3];
           double previous_ref[3];
           double changed_start[3];
@@ -1538,26 +1624,35 @@ def test_stm_controller_uses_linear_path_planner_with_acceleration(tmp_path: Pat
           fill_input(&in, 1.0, 0.0);
           stm_controller_step_elapsed(&in, &out, CONTROL_DT);
           memcpy(start_pos, g_controller.path_planner[ARM_LEFT].start_pos, sizeof(start_pos));
-          printf("%.12f %.12f %.12f\\n",
+          printf("%.12f %.12f %.12f %.12f %.12f %.12f\\n",
                  dist3(g_controller.ref_pos[ARM_LEFT], start_pos),
-                 first_step,
-                 g_controller.path_planner[ARM_LEFT].v_max);
+                 first_step + first_lookahead,
+                 g_controller.path_progress_t[ARM_LEFT],
+                 CONTROL_DT,
+                 g_controller.path_planner[ARM_LEFT].v_max,
+                 TRAJ_PLAN_SPEED);
 
           stm_controller_step_elapsed(&in, &out, CONTROL_DT);
           memcpy(previous_ref, g_controller.ref_pos[ARM_LEFT], sizeof(previous_ref));
-          printf("%.12f %.12f %.12f\\n",
+          printf("%.12f %.12f %.12f %.12f %.12f %.12f\\n",
                  dist3(g_controller.ref_pos[ARM_LEFT], start_pos),
-                 second_step,
-                 g_controller.path_planner[ARM_LEFT].a);
+                 second_step + second_lookahead,
+                 g_controller.path_progress_t[ARM_LEFT],
+                 2.0 * CONTROL_DT,
+                 g_controller.path_planner[ARM_LEFT].a,
+                 TRAJ_PLAN_ACCEL);
 
           fill_input(&in, 1.0, 1.0);
           stm_controller_step_elapsed(&in, &out, CONTROL_DT);
           memcpy(changed_start, g_controller.path_planner[ARM_LEFT].start_pos,
                  sizeof(changed_start));
-          printf("%.12f %.12f %.12f\\n",
+          printf("%.12f %.12f %.12f %.12f %.12f %.12f\\n",
                  dist3(g_controller.ref_pos[ARM_LEFT], changed_start),
-                 first_step,
-                 dist3(changed_start, previous_ref));
+                 first_step + second_lookahead + first_lookahead,
+                 g_controller.path_progress_t[ARM_LEFT],
+                 CONTROL_DT,
+                 dist3(changed_start, previous_ref),
+                 0.0);
           return 0;
         }
         """
@@ -1572,12 +1667,248 @@ def test_stm_controller_uses_linear_path_planner_with_acceleration(tmp_path: Pat
     )
 
     np.testing.assert_allclose(rows[0, 0], rows[0, 1], atol=1e-9)
-    np.testing.assert_allclose(rows[0, 2], 0.75, atol=1e-12)
+    np.testing.assert_allclose(rows[0, 2], rows[0, 3], atol=1e-12)
+    assert rows[0, 4] <= rows[0, 5] + 1e-12
     np.testing.assert_allclose(rows[1, 0], rows[1, 1], atol=1e-9)
     assert rows[1, 0] > rows[0, 0]
-    np.testing.assert_allclose(rows[1, 2], 1.25, atol=1e-12)
+    np.testing.assert_allclose(rows[1, 2], rows[1, 3], atol=1e-12)
+    np.testing.assert_allclose(rows[1, 4], rows[1, 5], atol=1e-12)
     np.testing.assert_allclose(rows[2, 0], rows[2, 1], atol=1e-9)
-    np.testing.assert_allclose(rows[2, 2], 0.0, atol=1e-12)
+    np.testing.assert_allclose(rows[2, 2], rows[2, 3], atol=1e-12)
+    np.testing.assert_allclose(rows[2, 4], 0.0, atol=1e-12)
+
+
+def test_stm_controller_path_gate_slows_reference_when_tcp_lags(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "stm_controller.c"
+        #include <math.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        static double dist3(const double a[3], const double b[3]) {
+          double dx = a[0] - b[0];
+          double dy = a[1] - b[1];
+          double dz = a[2] - b[2];
+          return sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        static void fill_input(stm_input_t *in, double start_pos[3]) {
+          control_arm_kinematics_t kin;
+          memset(in, 0, sizeof(*in));
+          in->active_arm_mask = STM_ARM_MASK_LEFT;
+          in->q[3] = 1.0;
+          control_get_arm_kinematics_with_offset(ARM_LEFT, in->q, &kin);
+          memcpy(start_pos, kin.pos, sizeof(double) * 3);
+          memcpy(in->target_pos[ARM_LEFT], kin.pos, sizeof(double) * 3);
+          memcpy(in->target_quat[ARM_LEFT], kin.quat_wxyz, sizeof(double) * 4);
+          in->target_pos[ARM_LEFT][0] += 0.50;
+        }
+
+        int main(void) {
+          stm_input_t in;
+          stm_output_t out;
+          double start_pos[3];
+
+          stm_controller_init();
+          stm_controller_reset();
+          fill_input(&in, start_pos);
+
+          for (int i = 0; i < 2000; ++i) {
+            stm_controller_step_elapsed(&in, &out, CONTROL_DT);
+          }
+
+          printf("%.12f %.12f %.12f %.12f %.12f\\n",
+                 dist3(g_controller.ref_pos[ARM_LEFT], start_pos),
+                 g_controller.path_progress_t[ARM_LEFT],
+                 g_controller.path_gate[ARM_LEFT],
+                 g_controller.path_lookahead_m[ARM_LEFT],
+                 CONTROL_PATH_GATE_STOP_ERROR_M);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
+    ref_error, progress_t, gate, lookahead, stop_error = [
+        float(value) for value in subprocess.check_output([str(probe)], text=True).split()
+    ]
+
+    assert ref_error < 0.05
+    assert ref_error <= stop_error + lookahead + 0.01
+    assert progress_t < 0.5
+    assert gate < 0.1
+    assert lookahead == pytest.approx(0.008)
+
+
+def test_stm_controller_path_lookahead_ramps_smoothly(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "stm_controller.c"
+        #include <math.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        static double dist3(const double a[3], const double b[3]) {
+          double dx = a[0] - b[0];
+          double dy = a[1] - b[1];
+          double dz = a[2] - b[2];
+          return sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        static void fill_input(stm_input_t *in, double start_pos[3]) {
+          control_arm_kinematics_t kin;
+          memset(in, 0, sizeof(*in));
+          in->active_arm_mask = STM_ARM_MASK_LEFT;
+          in->q[3] = 1.0;
+          control_get_arm_kinematics_with_offset(ARM_LEFT, in->q, &kin);
+          memcpy(start_pos, kin.pos, sizeof(double) * 3);
+          memcpy(in->target_pos[ARM_LEFT], kin.pos, sizeof(double) * 3);
+          memcpy(in->target_quat[ARM_LEFT], kin.quat_wxyz, sizeof(double) * 4);
+          in->target_pos[ARM_LEFT][0] += 0.50;
+        }
+
+        int main(void) {
+          stm_input_t in;
+          stm_output_t out;
+          double start_pos[3];
+
+          stm_controller_init();
+          stm_controller_reset();
+          fill_input(&in, start_pos);
+
+          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
+          printf("%.12f %.12f %.12f\\n",
+                 g_controller.path_lookahead_m[ARM_LEFT],
+                 CONTROL_PATH_LOOKAHEAD_M * CONTROL_DT / CONTROL_PATH_LOOKAHEAD_RAMP_S,
+                 dist3(g_controller.ref_pos[ARM_LEFT], start_pos));
+
+          for (int i = 1; i < 300; ++i) {
+            stm_controller_step_elapsed(&in, &out, CONTROL_DT);
+          }
+          printf("%.12f %.12f\\n",
+                 g_controller.path_lookahead_m[ARM_LEFT],
+                 CONTROL_PATH_LOOKAHEAD_M);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
+    rows = [
+        [float(value) for value in line.split()]
+        for line in subprocess.check_output([str(probe)], text=True).splitlines()
+    ]
+
+    np.testing.assert_allclose(rows[0][0], rows[0][1], atol=1e-9)
+    assert 0.0 < rows[0][0] < 0.008
+    assert rows[0][2] < 0.001
+    np.testing.assert_allclose(rows[1][0], rows[1][1], atol=1e-9)
+
+
+def test_stm_controller_path_gate_changes_smoothly(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "stm_controller.c"
+        #include <math.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        static void fill_input(stm_input_t *in, double current_pos[3]) {
+          control_arm_kinematics_t kin;
+          memset(in, 0, sizeof(*in));
+          in->active_arm_mask = STM_ARM_MASK_LEFT;
+          in->q[3] = 1.0;
+          control_get_arm_kinematics_with_offset(ARM_LEFT, in->q, &kin);
+          memcpy(current_pos, kin.pos, sizeof(double) * 3);
+          memcpy(in->target_pos[ARM_LEFT], kin.pos, sizeof(double) * 3);
+          memcpy(in->target_quat[ARM_LEFT], kin.quat_wxyz, sizeof(double) * 4);
+          in->target_pos[ARM_LEFT][0] += 0.50;
+        }
+
+        int main(void) {
+          stm_input_t in;
+          stm_output_t out;
+          double current_pos[3];
+
+          stm_controller_init();
+          stm_controller_reset();
+          fill_input(&in, current_pos);
+          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
+
+          memcpy(g_controller.ref_pos[ARM_LEFT], current_pos, sizeof(current_pos));
+          g_controller.ref_pos[ARM_LEFT][0] += CONTROL_PATH_GATE_STOP_ERROR_M + 0.01;
+          g_controller.path_gate[ARM_LEFT] = 1.0;
+          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
+          printf("%.12f %.12f\\n",
+                 g_controller.path_gate[ARM_LEFT],
+                 1.0 - CONTROL_DT / CONTROL_PATH_GATE_FALL_TIME_S);
+
+          memcpy(g_controller.ref_pos[ARM_LEFT], current_pos, sizeof(current_pos));
+          g_controller.path_gate[ARM_LEFT] = 0.0;
+          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
+          printf("%.12f %.12f\\n",
+                 g_controller.path_gate[ARM_LEFT],
+                 CONTROL_DT / CONTROL_PATH_GATE_RISE_TIME_S);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
+    rows = np.array(
+        [
+            [float(value) for value in line.split()]
+            for line in subprocess.check_output([str(probe)], text=True).splitlines()
+        ],
+        dtype=np.float64,
+    )
+
+    np.testing.assert_allclose(rows[:, 0], rows[:, 1], atol=1e-9)
+    assert 0.0 < rows[0, 0] < 1.0
+    assert 0.0 < rows[1, 0] < 1.0
+
+
+def test_trajectory_speed_is_real_safe_tuned(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "config.h"
+        #include <stdio.h>
+
+        int main(void) {
+          printf("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\\n",
+                 TRAJ_PLAN_SPEED,
+                 TRAJ_PLAN_ACCEL,
+                 JOINT_VEL_LIMIT,
+                 CONTROL_JOINT_LIMIT_INSET_RATIO,
+                 CONTROL_PATH_GATE_FULL_ERROR_M,
+                 CONTROL_PATH_GATE_STOP_ERROR_M,
+                 CONTROL_PATH_GATE_RISE_TIME_S,
+                 CONTROL_PATH_GATE_FALL_TIME_S,
+                 CONTROL_PATH_LOOKAHEAD_M,
+                 CONTROL_PATH_LOOKAHEAD_RAMP_S,
+                 CONTROL_TARGET_REPLAN_POS_EPS_M,
+                 CONTROL_TARGET_REPLAN_ORI_EPS_RAD);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
+    values = [float(value) for value in subprocess.check_output([str(probe)], text=True).split()]
+
+    assert values == pytest.approx(
+        [0.5, 0.2, 4.0, 0.01, 0.005, 0.02, 0.08, 0.03, 0.008, 0.30, 0.001, 0.002]
+    )
+
+
+def test_python_config_mirrors_c_path_gate_defaults():
+    from config import Config
+
+    assert Config.CONTROL_PATH_GATE_FULL_ERROR_M == pytest.approx(0.005)
+    assert Config.CONTROL_PATH_GATE_STOP_ERROR_M == pytest.approx(0.020)
+    assert Config.CONTROL_PATH_GATE_RISE_TIME_S == pytest.approx(0.080)
+    assert Config.CONTROL_PATH_GATE_FALL_TIME_S == pytest.approx(0.030)
+    assert Config.CONTROL_PATH_LOOKAHEAD_M == pytest.approx(0.008)
+    assert Config.CONTROL_PATH_LOOKAHEAD_RAMP_S == pytest.approx(0.30)
+    assert Config.CONTROL_TARGET_REPLAN_POS_EPS_M == pytest.approx(0.001)
+    assert Config.CONTROL_TARGET_REPLAN_ORI_EPS_RAD == pytest.approx(0.002)
 
 
 def test_stm_controller_step_elapsed_hot_path_benchmark_probe(tmp_path: Path):

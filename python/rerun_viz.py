@@ -44,6 +44,8 @@ _JOINT_COLORS = [
 
 _POSITION_DISPLAY_UNIT = "mm"
 _POSITION_DISPLAY_SCALE = 1000.0
+_SAFETY_LOG_MARGIN_RAD = 0.02
+_SAFETY_LOG_MARGIN_RAD_S = 0.2
 
 
 _POSE_NAME_MAP = {
@@ -142,6 +144,46 @@ def compute_rotation_error_single(quat_actual: np.ndarray, quat_desired: np.ndar
     if q_err[0] < 0:
         q_err = -q_err
     return np.rad2deg(quat_to_euler(q_err))
+
+
+def _joint_safe_limits_rad() -> tuple[np.ndarray, np.ndarray]:
+    limits = np.asarray(Config.JOINT_LIMITS_RAD, dtype=np.float64)
+    span = limits[:, 1] - limits[:, 0]
+    inset = float(Config.CONTROL_JOINT_LIMIT_INSET_RATIO) * span
+    return limits[:, 0] + inset, limits[:, 1] - inset
+
+
+def _joint_safety_margins(q: np.ndarray | None, qd: np.ndarray | None):
+    q_margin_low = q_margin_high = vel_margin = None
+    if q is not None:
+        q_values = np.asarray(q, dtype=np.float64).reshape(Config.NUM_JOINTS)
+        safe_min, safe_max = _joint_safe_limits_rad()
+        q_margin_low = q_values - safe_min
+        q_margin_high = safe_max - q_values
+    if qd is not None:
+        qd_values = np.asarray(qd, dtype=np.float64).reshape(Config.NUM_JOINTS)
+        vel_margin = float(Config.JOINT_VEL_LIMIT) - np.abs(qd_values)
+    return q_margin_low, q_margin_high, vel_margin
+
+
+def _format_safety_warnings(
+    q_margin_low: np.ndarray | None,
+    q_margin_high: np.ndarray | None,
+    vel_margin: np.ndarray | None,
+) -> str | None:
+    warnings = []
+    for arm, arm_label in enumerate(_ARM_LABELS):
+        offset = arm * Config.ARM_JOINTS
+        for i in range(Config.ARM_JOINTS):
+            joint = f"{arm_label}/J{i + 1}"
+            index = offset + i
+            if q_margin_low is not None and q_margin_low[index] <= _SAFETY_LOG_MARGIN_RAD:
+                warnings.append(f"{joint} low_limit_margin={q_margin_low[index]:.4f}rad")
+            if q_margin_high is not None and q_margin_high[index] <= _SAFETY_LOG_MARGIN_RAD:
+                warnings.append(f"{joint} high_limit_margin={q_margin_high[index]:.4f}rad")
+            if vel_margin is not None and vel_margin[index] <= _SAFETY_LOG_MARGIN_RAD_S:
+                warnings.append(f"{joint} vel_margin={vel_margin[index]:.4f}rad/s")
+    return "; ".join(warnings) if warnings else None
 
 def init_rerun(app_name: str = "AM-D02 Simulation"):
     """初始化 Rerun (不发送 Blueprint，等数据写入后再发)"""
@@ -271,6 +313,21 @@ def _setup_arm_realtime_styles() -> None:
                 rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} Tau Gap"], widths=[2.0]),
                 static=True,
             )
+            rr.log(
+                f"arms/{arm_label}/velocity_margin/{joint}",
+                rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} Velocity Margin"], widths=[2.0]),
+                static=True,
+            )
+            rr.log(
+                f"arms/{arm_label}/limit_margin_low/{joint}",
+                rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} Low Limit Margin"], widths=[1.5]),
+                static=True,
+            )
+            rr.log(
+                f"arms/{arm_label}/limit_margin_high/{joint}",
+                rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} High Limit Margin"], widths=[1.5]),
+                static=True,
+            )
 
 def setup_realtime_styles():
     """设置交互式 Rerun 的曲线样式和试图蓝图，在仿真启动前调用"""
@@ -295,6 +352,9 @@ def setup_realtime_styles():
             rr.log(f"arms/{arm_label}/torque/{joint}/command", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/torque_actual/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/torque_gap/{joint}/value", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/velocity_margin/{joint}/value", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/limit_margin_low/{joint}/value", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/limit_margin_high/{joint}/value", rr.Scalars(0.0))
     rr.log("performance/c_engine_time", rr.Scalars(0.0))
     rr.log("performance/link_latency", rr.Scalars(0.0))
     rr.log("performance/link_cycle_hz", rr.Scalars(0.0))
@@ -385,6 +445,12 @@ def setup_realtime_styles():
             arm_joint_axis_view("right", "Right", "torque", "Torque", "N*m"),
             arm_joint_axis_view("left", "Left", "torque_gap", "Torque Gap", "N*m"),
             arm_joint_axis_view("right", "Right", "torque_gap", "Torque Gap", "N*m"),
+            arm_joint_axis_view("left", "Left", "velocity_margin", "Velocity Safety Margin", "rad/s"),
+            arm_joint_axis_view("right", "Right", "velocity_margin", "Velocity Safety Margin", "rad/s"),
+            arm_joint_axis_view("left", "Left", "limit_margin_low", "Low Limit Margin", "rad"),
+            arm_joint_axis_view("right", "Right", "limit_margin_low", "Low Limit Margin", "rad"),
+            arm_joint_axis_view("left", "Left", "limit_margin_high", "High Limit Margin", "rad"),
+            arm_joint_axis_view("right", "Right", "limit_margin_high", "High Limit Margin", "rad"),
             rrb.Vertical(
                 python_time_view,
                 link_cycle_rate_view,
@@ -410,7 +476,10 @@ def log_realtime_step(
     cycle_time: float,
     q: np.ndarray = None,
     qd: np.ndarray = None,
+    tau_raw: np.ndarray = None,
     tau_actual: np.ndarray = None,
+    elapsed_s: float = None,
+    right_j7_diag: dict = None,
     rx_str: str = None,
     tx_str: str = None,
     tx_label: str = "Torques",
@@ -462,16 +531,39 @@ def log_realtime_step(
                 rr.log(f"arms/{arm_label}/joint_qd/J{i+1}/value", rr.Scalars(float(value)))
         
     tau_by_arm = _as_arm_array(tau_total, Config.ARM_JOINTS)
+    tau_raw_by_arm = None if tau_raw is None else _as_arm_array(tau_raw, Config.ARM_JOINTS)
     tau_actual_by_arm = None if tau_actual is None else _as_arm_array(tau_actual, Config.ARM_JOINTS)
     for arm, arm_label in enumerate(_ARM_LABELS[: len(tau_by_arm)]):
         for i, value in enumerate(tau_by_arm[arm]):
             rr.log(f"arms/{arm_label}/torque/J{i+1}/command", rr.Scalars(float(value)))
+            if tau_raw_by_arm is not None:
+                rr.log(f"arms/{arm_label}/torque_raw/J{i+1}/value", rr.Scalars(float(tau_raw_by_arm[arm, i])))
             if tau_actual_by_arm is not None:
                 rr.log(f"arms/{arm_label}/torque_actual/J{i+1}/value", rr.Scalars(float(tau_actual_by_arm[arm, i])))
                 rr.log(
                     f"arms/{arm_label}/torque_gap/J{i+1}/value",
                     rr.Scalars(float(value - tau_actual_by_arm[arm, i])),
                 )
+
+    q_margin_low, q_margin_high, vel_margin = _joint_safety_margins(q, qd)
+    if vel_margin is not None:
+        vel_margin_by_arm = _as_arm_array(vel_margin, Config.ARM_JOINTS)
+        for arm, arm_label in enumerate(_ARM_LABELS[: len(vel_margin_by_arm)]):
+            for i, value in enumerate(vel_margin_by_arm[arm]):
+                rr.log(f"arms/{arm_label}/velocity_margin/J{i+1}/value", rr.Scalars(float(value)))
+    if q_margin_low is not None and q_margin_high is not None:
+        low_by_arm = _as_arm_array(q_margin_low, Config.ARM_JOINTS)
+        high_by_arm = _as_arm_array(q_margin_high, Config.ARM_JOINTS)
+        for arm, arm_label in enumerate(_ARM_LABELS[: len(low_by_arm)]):
+            for i, value in enumerate(low_by_arm[arm]):
+                rr.log(f"arms/{arm_label}/limit_margin_low/J{i+1}/value", rr.Scalars(float(value)))
+                rr.log(f"arms/{arm_label}/limit_margin_high/J{i+1}/value", rr.Scalars(float(high_by_arm[arm, i])))
+
+    safety_warning = _format_safety_warnings(q_margin_low, q_margin_high, vel_margin)
+    if safety_warning:
+        text = f"[{step_count}] SAFETY margin warning: {safety_warning}"
+        rr.log("control_link_log", rr.TextLog(text))
+        print(f"[Rerun Safety] {text}")
             
     # Text Log for Sent/Received Data (Throttled to 10Hz to prevent lag at 1kHz loop)
     if rx_str and tx_str:
@@ -479,6 +571,8 @@ def log_realtime_step(
 
     # Performance
     rr.log("performance/c_engine_time", rr.Scalars(float(cycle_time)))
+    if elapsed_s is not None:
+        rr.log("performance/elapsed_s", rr.Scalars(float(elapsed_s)))
     if uart_latency_ms is not None:
         rr.log("performance/link_latency", rr.Scalars(float(uart_latency_ms)))
     if uart_cycle_hz is not None:
@@ -489,6 +583,11 @@ def log_realtime_step(
         rr.log("performance/stm32_calc_time", rr.Scalars(float(stm32_calc_time_ms)))
     if stm32_calc_hz is not None:
         rr.log("performance/stm32_calc_hz", rr.Scalars(float(stm32_calc_hz)))
+
+    if right_j7_diag:
+        for key in ("q", "qd", "tau_cmd_raw", "tau_cmd_sent", "tau_actual"):
+            if key in right_j7_diag:
+                rr.log(f"diagnostics/right_j7/{key}", rr.Scalars(float(right_j7_diag[key])))
     
     # 3D
     actual_colors = [[230, 100, 50], [50, 150, 230]][: len(pos_actual_by_arm)]

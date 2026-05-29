@@ -12,5 +12,8 @@ H7_CLOCK_SRCS = h7_clock_sim/h7_clock_sim.c
 c_main: main.c main_stm.c sim_interface.c $(STM32_SRCS) $(STM32_DIR)/config.h
 	gcc -o c_main main.c main_stm.c sim_interface.c $(H7_CLOCK_SRCS) $(STM32_SRCS) -I$(STM32_DIR) -Ih7_clock_sim -O2 -Wall -lm
 
+real_controller: real/real_controller.c $(STM32_SRCS) $(STM32_DIR)/config.h
+	gcc -o real/real_controller real/real_controller.c $(STM32_SRCS) -I$(STM32_DIR) -O2 -Wall -lm
+
 clean:
-	rm -f c_main
+	rm -f c_main real/real_controller

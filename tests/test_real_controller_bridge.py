@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import struct
+import subprocess
+from pathlib import Path
+
+import numpy as np
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+REAL_CONTROLLER = PROJECT_ROOT / "c_interface" / "real" / "real_controller"
+MAGIC = 0xAA55
+MODE_CONTROL = 1
+MODE_FK_ONLY = 2
+INPUT_STRUCT = struct.Struct("<HBBd14d14d3d6d8d")
+OUTPUT_STRUCT = struct.Struct("<Hi14d6d8ddi")
+
+
+def _build_packet(mode: int, active_arm_mask: int) -> bytes:
+    q = np.zeros(14, dtype=np.float64)
+    q[3] = np.pi / 2.0
+    q[10] = np.pi / 2.0
+    qd = np.zeros(14, dtype=np.float64)
+    body_q = np.zeros(3, dtype=np.float64)
+    target_pos = np.zeros((2, 3), dtype=np.float64)
+    target_quat = np.tile([1.0, 0.0, 0.0, 0.0], (2, 1))
+    return INPUT_STRUCT.pack(
+        MAGIC,
+        int(mode),
+        int(active_arm_mask),
+        0.001,
+        *q,
+        *qd,
+        *body_q,
+        *target_pos.reshape(-1),
+        *target_quat.reshape(-1),
+    )
+
+
+def _exchange(mode: int, active_arm_mask: int):
+    subprocess.run(["make", "-C", "c_interface", "real_controller"], cwd=PROJECT_ROOT, check=True)
+    completed = subprocess.run(
+        [str(REAL_CONTROLLER)],
+        input=_build_packet(mode, active_arm_mask),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    assert len(completed.stdout) == OUTPUT_STRUCT.size
+    parsed = OUTPUT_STRUCT.unpack(completed.stdout)
+    assert parsed[0] == MAGIC
+    tau = np.asarray(parsed[2:16], dtype=np.float64)
+    ee_pos = np.asarray(parsed[16:22], dtype=np.float64).reshape(2, 3)
+    return parsed[1], tau, ee_pos
+
+
+def test_real_controller_left_mask_zeroes_right_arm_output():
+    status, tau, _ = _exchange(MODE_CONTROL, 1 << 0)
+
+    assert status == 0
+    assert np.any(np.abs(tau[:7]) > 1e-9)
+    np.testing.assert_allclose(tau[7:], 0.0)
+
+
+def test_real_controller_right_mask_zeroes_left_arm_output():
+    status, tau, _ = _exchange(MODE_CONTROL, 1 << 1)
+
+    assert status == 0
+    np.testing.assert_allclose(tau[:7], 0.0)
+    assert np.any(np.abs(tau[7:]) > 1e-9)
+
+
+def test_real_controller_fk_only_returns_pose_and_zero_torque():
+    status, tau, ee_pos = _exchange(MODE_FK_ONLY, (1 << 0) | (1 << 1))
+
+    assert status == 0
+    np.testing.assert_allclose(tau, 0.0)
+    assert np.all(np.isfinite(ee_pos))
+    assert np.linalg.norm(ee_pos[0]) > 0.01
+    assert np.linalg.norm(ee_pos[1]) > 0.01

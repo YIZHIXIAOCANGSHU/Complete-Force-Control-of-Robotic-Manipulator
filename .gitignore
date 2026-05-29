@@ -2,5 +2,6 @@ __pycache__/
 *.py[cod]
 *.log
 .pytest_cache/
+.venv/
 c_interface/c_main
 c_interface/serial_gravity_comp

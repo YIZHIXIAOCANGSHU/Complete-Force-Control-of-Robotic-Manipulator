@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
@@ -200,15 +201,25 @@ def test_log_realtime_step_logs_torque_gap_by_arm(monkeypatch):
 
     tau_total = np.arange(14, dtype=np.float64)
     tau_actual = tau_total - 0.5
+    tau_raw = tau_total + 1.0
     rerun_viz.log_realtime_step(
         t=0.1,
         pos_actual=np.zeros((2, 3), dtype=np.float64),
         pos_desired=np.zeros((2, 3), dtype=np.float64),
         quat_actual=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
         quat_desired=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        tau_raw=tau_raw,
         tau_total=tau_total,
         tau_actual=tau_actual,
         cycle_time=1.25,
+        elapsed_s=0.001,
+        right_j7_diag={
+            "q": 0.7,
+            "qd": -3.2,
+            "tau_cmd_raw": 5.0,
+            "tau_cmd_sent": 4.0,
+            "tau_actual": 3.0,
+        },
         step_count=0,
     )
 
@@ -216,3 +227,47 @@ def test_log_realtime_step_logs_torque_gap_by_arm(monkeypatch):
     assert _logged_scalar(dummy_rr, "arms/right/torque_gap/J1/value") == 0.5
     assert _logged_scalar(dummy_rr, "arms/left/torque_actual/J1/value") == -0.5
     assert _logged_scalar(dummy_rr, "arms/right/torque_actual/J1/value") == 6.5
+    assert _logged_scalar(dummy_rr, "arms/left/torque_raw/J1/value") == 1.0
+    assert _logged_scalar(dummy_rr, "arms/right/torque_raw/J7/value") == 14.0
+    assert _logged_scalar(dummy_rr, "diagnostics/right_j7/qd") == -3.2
+    assert _logged_scalar(dummy_rr, "diagnostics/right_j7/tau_cmd_raw") == 5.0
+    assert _logged_scalar(dummy_rr, "diagnostics/right_j7/tau_cmd_sent") == 4.0
+    assert _logged_scalar(dummy_rr, "diagnostics/right_j7/tau_actual") == 3.0
+    assert _logged_scalar(dummy_rr, "performance/elapsed_s") == 0.001
+
+
+def test_log_realtime_step_logs_joint_safety_margins_and_warning(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+
+    q = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
+    qd = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
+    qd[0] = 4.05
+    safe_min, safe_max = rerun_viz._joint_safe_limits_rad()
+    q[1] = safe_min[1] - 0.001
+    q[rerun_viz.Config.ARM_JOINTS] = safe_max[rerun_viz.Config.ARM_JOINTS] + 0.001
+
+    rerun_viz.log_realtime_step(
+        t=0.1,
+        pos_actual=np.zeros((2, 3), dtype=np.float64),
+        pos_desired=np.zeros((2, 3), dtype=np.float64),
+        quat_actual=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        quat_desired=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        tau_total=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        q=q,
+        qd=qd,
+        cycle_time=1.25,
+        step_count=0,
+    )
+
+    assert _logged_scalar(dummy_rr, "arms/left/velocity_margin/J1/value") == pytest.approx(-0.05)
+    assert _logged_scalar(dummy_rr, "arms/left/limit_margin_low/J2/value") == pytest.approx(-0.001)
+    assert _logged_scalar(dummy_rr, "arms/right/limit_margin_high/J1/value") == pytest.approx(-0.001)
+    text_logs = [
+        payload["text"]
+        for path, payload, _static in dummy_rr.logs
+        if path == "control_link_log" and isinstance(payload, dict)
+    ]
+    assert any("SAFETY margin warning" in text for text in text_logs)
+    assert any("left/J1 vel_margin" in text for text in text_logs)

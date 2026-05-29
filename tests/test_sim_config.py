@@ -86,6 +86,19 @@ def _quat_multiply_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     )
 
 
+def _assert_quat_equivalent(actual: np.ndarray, expected: np.ndarray, atol: float = 1e-12) -> None:
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    if actual.shape == (4,):
+        if np.linalg.norm(actual + expected) < np.linalg.norm(actual - expected):
+            actual = -actual
+        np.testing.assert_allclose(actual, expected, atol=atol)
+        return
+    assert actual.shape == expected.shape
+    for index in np.ndindex(actual.shape[:-1]):
+        _assert_quat_equivalent(actual[index], expected[index], atol=atol)
+
+
 def _read_dual_urdf_zero_pose_axes() -> dict[str, np.ndarray]:
     tree = ET.parse(_repo_root() / "AM-DPBSURDF0422" / "urdf" / "AM-DPBSURDF0422.urdf")
     children_by_parent: dict[str, list[tuple[str, str, np.ndarray, np.ndarray]]] = {}
@@ -252,13 +265,36 @@ def test_fix_uncontrolled_joints_marks_only_non_controlled_joints_fixed():
     assert fixed.find("mimic") is None
 
 
-def test_initial_and_home_qpos_are_elbow_raised_90_degrees():
+def test_initial_target_qpos_keeps_elbow_raised_and_home_qpos_is_all_zero():
     arm_init = [0.0, 0.0, 0.0, np.pi / 2, 0.0, 0.0, 0.0]
     np.testing.assert_allclose(
         Config.INIT_QPOS,
         arm_init + arm_init,
     )
-    np.testing.assert_allclose(Config.HOME_QPOS, Config.INIT_QPOS)
+    np.testing.assert_allclose(Config.ARM_HOME_QPOS, np.zeros(Config.ARM_JOINTS))
+    np.testing.assert_allclose(Config.HOME_QPOS, np.zeros(Config.NUM_JOINTS))
+
+
+def test_sim_home_starts_zero_while_target_still_uses_init_qpos_fk():
+    pytest.importorskip("mujoco")
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    env.reset(Config.INIT_QPOS)
+    env.forward()
+    target_pos = env.get_all_ee_pos().copy()
+    target_quat = env.get_all_ee_quat().copy()
+
+    env.reset(Config.HOME_QPOS)
+    env.forward()
+    env.set_all_target_poses_base(target_pos, target_quat)
+
+    np.testing.assert_allclose(env.get_qpos(), np.zeros(Config.NUM_JOINTS))
+    target_pos_base, target_quat_base = env.get_all_target_poses_base()
+    np.testing.assert_allclose(target_pos_base, target_pos, atol=1e-12)
+    _assert_quat_equivalent(target_quat_base, target_quat, atol=1e-12)
+    assert not np.allclose(env.get_all_ee_pos(), target_pos)
 
 
 def test_left_arm_tcp_offset_is_at_dual_output_link_tip():
@@ -598,6 +634,61 @@ def test_openarm_follower_friction_can_be_disabled_by_env():
         capture_output=True,
     )
     assert result.stdout.strip() == "False"
+
+
+def test_sim_passive_damping_and_armature_are_always_zero():
+    script = textwrap.dedent(
+        """
+        import numpy as np
+        import sys
+        sys.path.insert(0, "python")
+        from config import Config
+        print(float(np.linalg.norm(Config.JOINT_DAMPING)))
+        print(float(np.linalg.norm(Config.JOINT_ARMATURE)))
+        print(Config.ENABLE_FOLLOWER_FRICTION)
+        """
+    )
+    env = os.environ.copy()
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert result.stdout.strip().splitlines() == ["0.0", "0.0", "True"]
+
+
+def test_mujoco_env_has_zero_damping_and_armature_but_keeps_follower_friction():
+    pytest.importorskip("mujoco")
+
+    script = textwrap.dedent(
+        """
+        import numpy as np
+        import sys
+        sys.path.insert(0, "python")
+        from config import Config
+        from sim_env import MujocoSimEnv
+
+        env = MujocoSimEnv()
+        print(float(np.linalg.norm(env.model.dof_damping[env.dof_ids])))
+        print(float(np.linalg.norm(env.model.dof_armature[env.dof_ids])))
+        print(float(np.linalg.norm(env.get_follower_friction_torque(np.ones(Config.NUM_JOINTS)))))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        env=os.environ.copy(),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    values = [float(value) for value in result.stdout.strip().splitlines()]
+    assert values[0] == pytest.approx(0.0)
+    assert values[1] == pytest.approx(0.0)
+    assert values[2] > 0.0
 
 
 def test_mujoco_env_computes_openarm_follower_friction_torque():

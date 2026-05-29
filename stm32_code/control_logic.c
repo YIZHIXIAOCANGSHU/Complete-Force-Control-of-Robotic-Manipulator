@@ -504,15 +504,20 @@ int control_check_safety_arm(int side, const double q[ARM_JOINTS],
       arm_side == ARM_RIGHT ? JOINT_VEL_RIGHT : JOINT_VEL_LEFT;
 
   for (int i = 0; i < ARM_JOINTS; i++) {
-    /* 位置检查 (允许 0.01 rad 的容差以避免边界抖动) */
-    if (q[i] < joint_min[i] - 0.01) {
+    double span = joint_max[i] - joint_min[i];
+    double inset = span * CONTROL_JOINT_LIMIT_INSET_RATIO;
+    double safe_min = joint_min[i] + inset;
+    double safe_max = joint_max[i] - inset;
+
+    /* 位置检查：使用内收后的安全限位。 */
+    if (q[i] < safe_min) {
       STM_LOG_ERROR("[SAFETY] Arm%d J%d position low: %.4f < %.4f\n",
-                    arm_side, i + 1, q[i], joint_min[i]);
+                    arm_side, i + 1, q[i], safe_min);
       return -1;
     }
-    if (q[i] > joint_max[i] + 0.01) {
+    if (q[i] > safe_max) {
       STM_LOG_ERROR("[SAFETY] Arm%d J%d position high: %.4f > %.4f\n",
-                    arm_side, i + 1, q[i], joint_max[i]);
+                    arm_side, i + 1, q[i], safe_max);
       return -1;
     }
     /* 速度检查 */

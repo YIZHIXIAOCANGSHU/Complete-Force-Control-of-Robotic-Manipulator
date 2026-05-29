@@ -88,17 +88,17 @@
 #define KP_CART_Y 260.0
 #define KP_CART_Z 260.0
 
-#define KD_CART_X 55.0
-#define KD_CART_Y 55.0
-#define KD_CART_Z 55.0
+#define KD_CART_X 70.0
+#define KD_CART_Y 70.0
+#define KD_CART_Z 70.0
 
 #define KP_CART_ROLL 12.0
 #define KP_CART_PITCH 12.0
 #define KP_CART_YAW 12.0
 
-#define KD_CART_ROLL 1.8
-#define KD_CART_PITCH 1.8
-#define KD_CART_YAW 1.8
+#define KD_CART_ROLL 4.0
+#define KD_CART_PITCH 4.0
+#define KD_CART_YAW 4.0
 
 /* ================================================================
  *  关节空间 PD 增益
@@ -183,8 +183,10 @@
  *  关节安全限位
  * ================================================================ */
 /* 左臂位置限位使用 degree 记录，下面 JOINT_POS_MIN/MAX_* 会转换为 rad。
- * control_check_safety_arm() 使用 rad 限位，并留 0.01 rad 容差避免边界抖动。
+ * control_check_safety_arm() 会按 CONTROL_JOINT_LIMIT_INSET_RATIO 将每轴
+ * [min,max] 行程向内收缩，留出机械/控制保护余量。
  */
+#define CONTROL_JOINT_LIMIT_INSET_RATIO 0.01 /* 位置安全限位向内收 1% */
 #define JOINT_POS_MIN_1_DEG (-89.971835)
 #define JOINT_POS_MAX_1_DEG (89.971835)
 #define JOINT_POS_MIN_2_DEG (-20.587610)
@@ -233,10 +235,11 @@
 #define RIGHT_JOINT_POS_MIN_7 (-1.1075)
 #define RIGHT_JOINT_POS_MAX_7 (1.068)
 
-/* 速度限位 (rad/s)。当前左右臂每轴都统一为 5.0 rad/s；
+/* 速度限位 (rad/s)。当前左右臂每轴都统一为 4.0 rad/s；
  * URDF 中 velocity="0" 视为未有效指定，不能直接作为速度上限。
+ * 超过该阈值会进入安全锁定并输出当前激活臂全 0 力矩。
  */
-#define JOINT_VEL_LIMIT 5.0
+#define JOINT_VEL_LIMIT 4.0
 #define JOINT_VEL_LIMIT_1 JOINT_VEL_LIMIT
 #define JOINT_VEL_LIMIT_2 JOINT_VEL_LIMIT
 #define JOINT_VEL_LIMIT_3 JOINT_VEL_LIMIT
@@ -267,8 +270,19 @@
  * TRAJ_PLAN_SPEED/ACCEL 决定“参考点”的定速/加速，不保证实际 TCP 在力矩饱和、
  * 限位、安全锁定或外力扰动下仍严格达到该速度。
  */
-#define TRAJ_PLAN_SPEED 0.75    /* 末端运动速度 (m/s) */
-#define TRAJ_PLAN_ACCEL 1.25    /* 加速度 (m/s^2) */
+#define TRAJ_PLAN_SPEED 0.5    /* 末端运动速度 (m/s) */
+#define TRAJ_PLAN_ACCEL 0.2    /* 加速度 (m/s^2) */
+/* Real/Sim 共用的路径跟随门控。真实 TCP 跟不上参考点时，路径时间会平滑减速
+ * 或暂停，避免参考点继续跑远；只约束路径推进，不替代关节速度硬保护。
+ */
+#define CONTROL_PATH_GATE_FULL_ERROR_M 0.005
+#define CONTROL_PATH_GATE_STOP_ERROR_M 0.020
+#define CONTROL_PATH_GATE_RISE_TIME_S 0.080
+#define CONTROL_PATH_GATE_FALL_TIME_S 0.030
+#define CONTROL_PATH_LOOKAHEAD_M 0.008
+#define CONTROL_PATH_LOOKAHEAD_RAMP_S 0.30
+#define CONTROL_TARGET_REPLAN_POS_EPS_M 0.001
+#define CONTROL_TARGET_REPLAN_ORI_EPS_RAD 0.002
 /* 当前主控制链路不直接使用 TRAJ_REACH_THRESH；保留给路径到达判定辅助函数。 */
 #define TRAJ_REACH_THRESH 0.005 /* 到达目标的位置阈值 (m) */
 
