@@ -188,8 +188,8 @@ class Config:
     NULLSPACE_POS_FULL_SCALE = 0.02
     NULLSPACE_ORI_FULL_SCALE = 0.05
     NULLSPACE_TORQUE_LIMIT = 0.08
-    TRAJ_PLAN_SPEED = 0.5
-    TRAJ_PLAN_ACCEL = 0.2
+    TRAJ_PLAN_SPEED = 3.0
+    TRAJ_PLAN_ACCEL = 2.0
     CONTROL_PATH_GATE_FULL_ERROR_M = 0.005
     CONTROL_PATH_GATE_STOP_ERROR_M = 0.020
     CONTROL_PATH_GATE_RISE_TIME_S = 0.080
@@ -207,9 +207,11 @@ class Config:
     # 保持目标点起始仍来自旧的第四轴 pi/2 构型。
     ARM_INIT_QPOS = np.array([0.0, 0.0, 0.0, np.pi / 2, 0.0, 0.0, 0.0])
     INIT_QPOS = np.tile(ARM_INIT_QPOS, NUM_ARMS)
-    # 仿真启动姿态：双臂 14 轴全 0。
-    ARM_HOME_QPOS = np.zeros(ARM_JOINTS, dtype=np.float64)
-    HOME_QPOS = np.tile(ARM_HOME_QPOS, NUM_ARMS)
+    # 仿真启动姿态：右臂 J4 避开内收后的安全下限，避免开局 safety latch。
+    LEFT_HOME_QPOS = np.zeros(ARM_JOINTS, dtype=np.float64)
+    RIGHT_HOME_QPOS = np.array([0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0], dtype=np.float64)
+    ARM_HOME_QPOS = LEFT_HOME_QPOS
+    HOME_QPOS = np.concatenate([LEFT_HOME_QPOS, RIGHT_HOME_QPOS])
 
     # === 目标位置 (Target Posture) ===
     # 用于重力补偿与 PD 控制的目标位置 (rad)

@@ -100,6 +100,48 @@ def _logged_scalar(dummy_rr: DummyRR, path: str) -> float:
     raise AssertionError(f"Missing log for {path}")
 
 
+def _text_logs(dummy_rr: DummyRR) -> list[str]:
+    return [
+        payload["text"]
+        for path, payload, _static in dummy_rr.logs
+        if path == "control_link_log" and isinstance(payload, dict)
+    ]
+
+
+def test_sim_udp_server_passes_step_count_to_rerun_logger():
+    source = (Path(__file__).resolve().parents[1] / "python" / "sim" / "udp_server.py").read_text(
+        encoding="utf-8"
+    )
+    call_start = source.index("rerun_viz.log_realtime_step(")
+    call_end = source.index("env.write_state_packet(state_packet)", call_start)
+    rerun_call = source[call_start:call_end]
+
+    assert "step_count=step_count" in rerun_call
+
+
+def test_setup_realtime_styles_blueprint_does_not_reuse_tile_objects(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+    monkeypatch.setattr(rerun_viz, "rrb", DummyRRB)
+
+    rerun_viz.setup_realtime_styles()
+
+    tile_kinds = {"TimeSeriesView", "TextLogView", "Spatial3DView", "Vertical", "Horizontal", "Tabs"}
+    seen: dict[int, tuple[str, str | None]] = {}
+    duplicates = []
+    for node in _iter_nodes(dummy_rr.blueprint):
+        if node.get("kind") not in tile_kinds:
+            continue
+        node_id = id(node)
+        identity = (node["kind"], node.get("name"))
+        if node_id in seen:
+            duplicates.append((seen[node_id], identity))
+        seen[node_id] = identity
+
+    assert duplicates == []
+
+
 def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
     dummy_rr = DummyRR()
     monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
@@ -264,10 +306,42 @@ def test_log_realtime_step_logs_joint_safety_margins_and_warning(monkeypatch):
     assert _logged_scalar(dummy_rr, "arms/left/velocity_margin/J1/value") == pytest.approx(-0.05)
     assert _logged_scalar(dummy_rr, "arms/left/limit_margin_low/J2/value") == pytest.approx(-0.001)
     assert _logged_scalar(dummy_rr, "arms/right/limit_margin_high/J1/value") == pytest.approx(-0.001)
-    text_logs = [
-        payload["text"]
-        for path, payload, _static in dummy_rr.logs
-        if path == "control_link_log" and isinstance(payload, dict)
-    ]
+    text_logs = _text_logs(dummy_rr)
     assert any("SAFETY margin warning" in text for text in text_logs)
     assert any("left/J1 vel_margin" in text for text in text_logs)
+
+
+def test_log_realtime_step_throttles_repeated_safety_text(monkeypatch, capsys):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+    monkeypatch.setattr(rerun_viz, "_last_safety_warning_signature", None)
+    monkeypatch.setattr(rerun_viz, "_last_safety_warning_step", None)
+
+    safe_min, _safe_max = rerun_viz._joint_safe_limits_rad()
+    q = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
+    qd = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
+    right_j4 = rerun_viz.Config.ARM_JOINTS + 3
+
+    for step, margin in ((0, 0.001), (10, 0.002), (20, 0.003), (500, 0.004)):
+        q[right_j4] = safe_min[right_j4] + margin
+        rerun_viz.log_realtime_step(
+            t=step * 0.001,
+            pos_actual=np.zeros((2, 3), dtype=np.float64),
+            pos_desired=np.zeros((2, 3), dtype=np.float64),
+            quat_actual=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+            quat_desired=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+            tau_total=np.zeros(rerun_viz.Config.NUM_JOINTS),
+            q=q,
+            qd=qd,
+            cycle_time=1.25,
+            step_count=step,
+        )
+
+    text_logs = [text for text in _text_logs(dummy_rr) if "SAFETY margin warning" in text]
+    assert len(text_logs) == 2
+    assert text_logs[0].startswith("[0] SAFETY")
+    assert text_logs[1].startswith("[500] SAFETY")
+
+    printed = capsys.readouterr().out
+    assert printed.count("[Rerun Safety]") == 2

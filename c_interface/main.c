@@ -10,7 +10,6 @@
 
 #include "main_stm.h"
 #include "sim_interface.h"
-#include "h7_clock_sim.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -37,10 +36,8 @@ int main(void) {
   
   stm_input_t stm_in;
   stm_output_t stm_out;
-  h7_clock_sim_t h7_clock;
   int last_status = STM_STATUS_OK;
 
-  h7_clock_sim_init(&h7_clock);
   memset(&stm_out, 0, sizeof(stm_out));
 
   printf("[INFO] Starting control loop...\n\n");
@@ -60,8 +57,10 @@ int main(void) {
     memcpy(stm_in.target_pos, target_pos, sizeof(target_pos));
     memcpy(stm_in.target_quat, target_quat, sizeof(target_quat));
 
-    /* -- 3c. 一收一发：H7 1MHz 时基只决定本轮路径推进量 -- */
-    double elapsed_s = h7_clock_sim_elapsed_s(&h7_clock);
+    /* -- 3c. 仿真按 MuJoCo 固定步长推进，路径时间必须使用同一个仿真 dt。
+     * 如果用 host 墙钟时间，viewer/Rerun/UDP 抖动会直接改变仿真中的参考速度。
+     */
+    double elapsed_s = CONTROL_DT;
     stm_step_elapsed(&stm_in, &stm_out, elapsed_s);
 
     /* -- 3d. 安全状态提示。仿真不退出，继续发送控制器给出的 0 力矩。 -- */

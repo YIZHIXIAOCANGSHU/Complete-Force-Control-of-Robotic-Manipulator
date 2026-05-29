@@ -265,17 +265,30 @@ def test_fix_uncontrolled_joints_marks_only_non_controlled_joints_fixed():
     assert fixed.find("mimic") is None
 
 
-def test_initial_target_qpos_keeps_elbow_raised_and_home_qpos_is_all_zero():
+def test_initial_target_qpos_keeps_elbow_raised_and_home_qpos_starts_safe():
     arm_init = [0.0, 0.0, 0.0, np.pi / 2, 0.0, 0.0, 0.0]
     np.testing.assert_allclose(
         Config.INIT_QPOS,
         arm_init + arm_init,
     )
-    np.testing.assert_allclose(Config.ARM_HOME_QPOS, np.zeros(Config.ARM_JOINTS))
-    np.testing.assert_allclose(Config.HOME_QPOS, np.zeros(Config.NUM_JOINTS))
+    np.testing.assert_allclose(Config.LEFT_HOME_QPOS, np.zeros(Config.ARM_JOINTS))
+    np.testing.assert_allclose(
+        Config.RIGHT_HOME_QPOS,
+        [0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0],
+    )
+    np.testing.assert_allclose(
+        Config.HOME_QPOS,
+        np.concatenate([Config.LEFT_HOME_QPOS, Config.RIGHT_HOME_QPOS]),
+    )
+
+    span = Config.RIGHT_JOINT_LIMITS_RAD[:, 1] - Config.RIGHT_JOINT_LIMITS_RAD[:, 0]
+    safe_min = Config.RIGHT_JOINT_LIMITS_RAD[:, 0] + Config.CONTROL_JOINT_LIMIT_INSET_RATIO * span
+    safe_max = Config.RIGHT_JOINT_LIMITS_RAD[:, 1] - Config.CONTROL_JOINT_LIMIT_INSET_RATIO * span
+    assert np.all(Config.RIGHT_HOME_QPOS >= safe_min)
+    assert np.all(Config.RIGHT_HOME_QPOS <= safe_max)
 
 
-def test_sim_home_starts_zero_while_target_still_uses_init_qpos_fk():
+def test_sim_home_starts_safe_while_target_still_uses_init_qpos_fk():
     pytest.importorskip("mujoco")
 
     from sim_env import MujocoSimEnv
@@ -290,7 +303,7 @@ def test_sim_home_starts_zero_while_target_still_uses_init_qpos_fk():
     env.forward()
     env.set_all_target_poses_base(target_pos, target_quat)
 
-    np.testing.assert_allclose(env.get_qpos(), np.zeros(Config.NUM_JOINTS))
+    np.testing.assert_allclose(env.get_qpos(), Config.HOME_QPOS)
     target_pos_base, target_quat_base = env.get_all_target_poses_base()
     np.testing.assert_allclose(target_pos_base, target_pos, atol=1e-12)
     _assert_quat_equivalent(target_quat_base, target_quat, atol=1e-12)

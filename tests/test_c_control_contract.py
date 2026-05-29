@@ -1509,12 +1509,14 @@ def test_h7_clock_sim_samples_1mhz_elapsed_time_with_clamp(tmp_path: Path):
     assert values == [0, 500, 1700, 20000]
 
 
-def test_c_sim_main_is_one_receive_one_send_without_scheduler_ticks():
+def test_c_sim_main_uses_fixed_sim_dt_for_path_time():
     main_source = (PROJECT_ROOT / "c_interface" / "main.c").read_text(encoding="utf-8")
 
     assert "wait_for_h7_due_ticks" not in main_source
     assert "h7_clock_sim_due_ticks" not in main_source
     assert "stm_step_elapsed" in main_source
+    assert "double elapsed_s = CONTROL_DT;" in main_source
+    assert "h7_clock_sim_elapsed_s" not in main_source
     assert "for (int tick" not in main_source
 
 
@@ -1611,8 +1613,8 @@ def test_stm_controller_uses_linear_path_planner_with_acceleration(tmp_path: Pat
         int main(void) {
           stm_input_t in;
           stm_output_t out;
-          double first_step = 0.5 * TRAJ_PLAN_ACCEL * CONTROL_DT * CONTROL_DT;
-          double second_step = 0.5 * TRAJ_PLAN_ACCEL * (2.0 * CONTROL_DT) * (2.0 * CONTROL_DT);
+          double first_step = 0.5 * (double)TRAJ_PLAN_ACCEL * CONTROL_DT * CONTROL_DT;
+          double second_step = 0.5 * (double)TRAJ_PLAN_ACCEL * (2.0 * CONTROL_DT) * (2.0 * CONTROL_DT);
           double first_lookahead = CONTROL_PATH_LOOKAHEAD_M * CONTROL_DT / CONTROL_PATH_LOOKAHEAD_RAMP_S;
           double second_lookahead = CONTROL_PATH_LOOKAHEAD_M * (2.0 * CONTROL_DT) / CONTROL_PATH_LOOKAHEAD_RAMP_S;
           double start_pos[3];
@@ -1630,7 +1632,7 @@ def test_stm_controller_uses_linear_path_planner_with_acceleration(tmp_path: Pat
                  g_controller.path_progress_t[ARM_LEFT],
                  CONTROL_DT,
                  g_controller.path_planner[ARM_LEFT].v_max,
-                 TRAJ_PLAN_SPEED);
+                 (double)TRAJ_PLAN_SPEED);
 
           stm_controller_step_elapsed(&in, &out, CONTROL_DT);
           memcpy(previous_ref, g_controller.ref_pos[ARM_LEFT], sizeof(previous_ref));
@@ -1640,7 +1642,7 @@ def test_stm_controller_uses_linear_path_planner_with_acceleration(tmp_path: Pat
                  g_controller.path_progress_t[ARM_LEFT],
                  2.0 * CONTROL_DT,
                  g_controller.path_planner[ARM_LEFT].a,
-                 TRAJ_PLAN_ACCEL);
+                 (double)TRAJ_PLAN_ACCEL);
 
           fill_input(&in, 1.0, 1.0);
           stm_controller_step_elapsed(&in, &out, CONTROL_DT);
@@ -1874,8 +1876,8 @@ def test_trajectory_speed_is_real_safe_tuned(tmp_path: Path):
 
         int main(void) {
           printf("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\\n",
-                 TRAJ_PLAN_SPEED,
-                 TRAJ_PLAN_ACCEL,
+                 (double)TRAJ_PLAN_SPEED,
+                 (double)TRAJ_PLAN_ACCEL,
                  JOINT_VEL_LIMIT,
                  CONTROL_JOINT_LIMIT_INSET_RATIO,
                  CONTROL_PATH_GATE_FULL_ERROR_M,
@@ -1894,13 +1896,15 @@ def test_trajectory_speed_is_real_safe_tuned(tmp_path: Path):
     values = [float(value) for value in subprocess.check_output([str(probe)], text=True).split()]
 
     assert values == pytest.approx(
-        [0.5, 0.2, 4.0, 0.01, 0.005, 0.02, 0.08, 0.03, 0.008, 0.30, 0.001, 0.002]
+        [3.0, 2.0, 4.0, 0.01, 0.005, 0.02, 0.08, 0.03, 0.008, 0.30, 0.001, 0.002]
     )
 
 
 def test_python_config_mirrors_c_path_gate_defaults():
     from config import Config
 
+    assert Config.TRAJ_PLAN_SPEED == pytest.approx(3.0)
+    assert Config.TRAJ_PLAN_ACCEL == pytest.approx(2.0)
     assert Config.CONTROL_PATH_GATE_FULL_ERROR_M == pytest.approx(0.005)
     assert Config.CONTROL_PATH_GATE_STOP_ERROR_M == pytest.approx(0.020)
     assert Config.CONTROL_PATH_GATE_RISE_TIME_S == pytest.approx(0.080)

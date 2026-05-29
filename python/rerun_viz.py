@@ -46,6 +46,9 @@ _POSITION_DISPLAY_UNIT = "mm"
 _POSITION_DISPLAY_SCALE = 1000.0
 _SAFETY_LOG_MARGIN_RAD = 0.02
 _SAFETY_LOG_MARGIN_RAD_S = 0.2
+_SAFETY_TEXT_LOG_INTERVAL_STEPS = 500
+_last_safety_warning_signature: str | None = None
+_last_safety_warning_step: int | None = None
 
 
 _POSE_NAME_MAP = {
@@ -184,6 +187,37 @@ def _format_safety_warnings(
             if vel_margin is not None and vel_margin[index] <= _SAFETY_LOG_MARGIN_RAD_S:
                 warnings.append(f"{joint} vel_margin={vel_margin[index]:.4f}rad/s")
     return "; ".join(warnings) if warnings else None
+
+
+def _safety_warning_signature(safety_warning: str) -> str:
+    parts = []
+    for item in safety_warning.split("; "):
+        label = item.split("=", 1)[0]
+        parts.append(label)
+    return "; ".join(parts)
+
+
+def _should_log_safety_warning(safety_warning: str, step_count: int) -> bool:
+    global _last_safety_warning_signature, _last_safety_warning_step
+
+    signature = _safety_warning_signature(safety_warning)
+    if signature != _last_safety_warning_signature:
+        _last_safety_warning_signature = signature
+        _last_safety_warning_step = int(step_count)
+        return True
+
+    last_step = _last_safety_warning_step
+    if last_step is None or int(step_count) - last_step >= _SAFETY_TEXT_LOG_INTERVAL_STEPS:
+        _last_safety_warning_step = int(step_count)
+        return True
+
+    return False
+
+
+def _reset_safety_warning_throttle() -> None:
+    global _last_safety_warning_signature, _last_safety_warning_step
+    _last_safety_warning_signature = None
+    _last_safety_warning_step = None
 
 def init_rerun(app_name: str = "AM-D02 Simulation"):
     """初始化 Rerun (不发送 Blueprint，等数据写入后再发)"""
@@ -362,11 +396,14 @@ def setup_realtime_styles():
     rr.log("performance/stm32_calc_time", rr.Scalars(0.0))
     rr.log("performance/stm32_calc_hz", rr.Scalars(0.0))
 
+    def link_latency_view():
+        return rrb.TimeSeriesView(
+            name="Control Link Period (ms)", origin="/performance/link_latency",
+        )
+
     link_log_view = rrb.TextLogView(name="Control Link Log", origin="/control_link_log")
 
-    latency_view = rrb.TimeSeriesView(
-        name="Control Link Period (ms)", origin="/performance/link_latency",
-    )
+    latency_view = link_latency_view()
 
     link_cycle_rate_view = rrb.TimeSeriesView(
         name="Control Link Rate (Hz)", origin="/performance/link_cycle_hz",
@@ -387,6 +424,13 @@ def setup_realtime_styles():
     python_time_view = rrb.TimeSeriesView(
         name="Python Control Step Time (ms)", origin="/performance/c_engine_time",
     )
+
+    def control_link_view():
+        return rrb.Vertical(
+            link_log_view,
+            link_latency_view(),
+            name="Control Link",
+        )
 
     def arm_view(arm_label: str, arm_name: str, key: str, title: str, unit: str):
         return rrb.Vertical(
@@ -460,7 +504,7 @@ def setup_realtime_styles():
                 stm32_rate_view,
                 name="Performance",
             ),
-            rrb.Vertical(link_log_view, latency_view, name="Control Link"),
+            control_link_view(),
         ),
         collapse_panels=True,
     )
@@ -560,10 +604,12 @@ def log_realtime_step(
                 rr.log(f"arms/{arm_label}/limit_margin_high/J{i+1}/value", rr.Scalars(float(high_by_arm[arm, i])))
 
     safety_warning = _format_safety_warnings(q_margin_low, q_margin_high, vel_margin)
-    if safety_warning:
+    if safety_warning and _should_log_safety_warning(safety_warning, step_count):
         text = f"[{step_count}] SAFETY margin warning: {safety_warning}"
         rr.log("control_link_log", rr.TextLog(text))
         print(f"[Rerun Safety] {text}")
+    elif not safety_warning:
+        _reset_safety_warning_throttle()
             
     # Text Log for Sent/Received Data (Throttled to 10Hz to prevent lag at 1kHz loop)
     if rx_str and tx_str:

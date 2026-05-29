@@ -1296,6 +1296,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
                         cycle_time=cycle_time_ms,
                         q=q,
                         qd=qd,
+                        step_count=step_count,
                     )
 
                 env.write_state_packet(state_packet)

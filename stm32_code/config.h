@@ -270,8 +270,8 @@
  * TRAJ_PLAN_SPEED/ACCEL 决定“参考点”的定速/加速，不保证实际 TCP 在力矩饱和、
  * 限位、安全锁定或外力扰动下仍严格达到该速度。
  */
-#define TRAJ_PLAN_SPEED 0.5    /* 末端运动速度 (m/s) */
-#define TRAJ_PLAN_ACCEL 0.2    /* 加速度 (m/s^2) */
+#define TRAJ_PLAN_SPEED 3.0  /* 末端运动速度 (m/s) */
+#define TRAJ_PLAN_ACCEL 10.0  /* 加速度 (m/s^2) */
 /* Real/Sim 共用的路径跟随门控。真实 TCP 跟不上参考点时，路径时间会平滑减速
  * 或暂停，避免参考点继续跑远；只约束路径推进，不替代关节速度硬保护。
  */
