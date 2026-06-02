@@ -133,33 +133,6 @@ def test_real_right_routes_to_real_entrypoint():
     assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right"]
 
 
-def test_real_right_legacy_c_backend_arg_routes_to_real_entrypoint():
-    completed = _run_script("real", "right", "c")
-
-    assert completed.returncode == 0, completed.stderr
-    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right"]
-
-
-def test_real_right_pinocchio_backend_is_rejected():
-    completed = _run_script("real", "right", "pinocchio")
-
-    assert completed.returncode != 0
-    assert "Pinocchio real 后端已移除" in completed.stdout
-    assert _fake_python_args(completed) == []
-
-
-def test_real_pinocchio_backend_env_is_rejected():
-    completed = _run_script(
-        "real",
-        "right",
-        env_overrides={"AM_D02_REAL_CONTROL_BACKEND": "pinocchio"},
-    )
-
-    assert completed.returncode != 0
-    assert "AM_D02_REAL_CONTROL_BACKEND 只支持 c" in completed.stdout
-    assert _fake_python_args(completed) == []
-
-
 def test_real_both_routes_to_real_entrypoint():
     completed = _run_script("real", "both")
 

@@ -79,13 +79,13 @@
  * KD_CART_* 调大: 阻尼更强、超调更小，但过大可能放大速度噪声并让动作发涩。
  * XYZ 单位近似 N/m；ROLL/PITCH/YAW 作用在轴角姿态误差上。
  */
-#define KP_CART_X 270.0
-#define KP_CART_Y 270.0
-#define KP_CART_Z 270.0
+#define KP_CART_X 300.0
+#define KP_CART_Y 300.0
+#define KP_CART_Z 300.0
 
-#define KD_CART_X 80.0
-#define KD_CART_Y 80.0
-#define KD_CART_Z 80.0
+#define KD_CART_X 90.0
+#define KD_CART_Y 90.0
+#define KD_CART_Z 90.0
 
 #define KP_CART_ROLL 8.0
 #define KP_CART_PITCH 8.0

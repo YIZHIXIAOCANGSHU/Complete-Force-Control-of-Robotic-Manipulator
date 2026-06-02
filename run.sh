@@ -167,15 +167,6 @@ else
                 shift 2>/dev/null || true
                 ;;
         esac
-        case "${1:-}" in
-            c)
-                shift 2>/dev/null || true
-                ;;
-            pinocchio)
-                PRINT_RED "错误: Pinocchio real 后端已移除。请使用 C/STM32 真机链路: ./run.sh real ${REAL_ARM:-left|right|both}"
-                exit 1
-                ;;
-        esac
         if [ -z "$REAL_ARM" ]; then
             select_real_arm_from_menu
         fi
@@ -261,10 +252,6 @@ if [ "$MODE" == "sim" ]; then
 fi
 
 if [ "$MODE" == "real" ]; then
-    if [ "${AM_D02_REAL_CONTROL_BACKEND:-c}" != "c" ]; then
-        PRINT_RED "错误: Pinocchio real 后端已移除。AM_D02_REAL_CONTROL_BACKEND 只支持 c。"
-        exit 1
-    fi
     case "$REAL_ARM" in
         left|right|both)
             ;;
