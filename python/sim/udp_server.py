@@ -6,6 +6,7 @@ import socket
 import sys
 import time
 import threading
+import queue
 from dataclasses import dataclass, field
 from contextlib import nullcontext
 
@@ -26,13 +27,125 @@ WORKSPACE_PADDING_RATIO = 0.08
 WORKSPACE_MIN_HALF_SIZE = 0.01
 
 
-def _step_env_with_viewer_sync(env, viewer) -> None:
-    """同步 viewer 扰动力后步进仿真，再刷新 viewer 显示。"""
-    if viewer:
-        viewer.sync()
-    env.step()
-    if viewer:
-        viewer.sync()
+def _should_log_sim_rerun_step(step_count: int) -> bool:
+    stride = max(1, int(Config.RERUN_LOG_STRIDE))
+    return stride <= 1 or int(step_count) % stride == 0
+
+
+class SimRerunLogger:
+    """Async Rerun logger for keeping UDP/MuJoCo stepping off the logging path."""
+
+    def __init__(
+        self,
+        queue_size: int | None = None,
+        log_fn=None,
+        *,
+        max_hz: float | None = None,
+        perf_counter=time.perf_counter,
+        sleep_fn=time.sleep,
+    ) -> None:
+        self._queue = queue.Queue(maxsize=max(1, int(queue_size or Config.SIM_RERUN_QUEUE_SIZE)))
+        self._log_fn = rerun_viz.log_realtime_step if log_fn is None else log_fn
+        self._period_s = 0.0
+        effective_max_hz = Config.RERUN_MAX_HZ if max_hz is None else float(max_hz)
+        if effective_max_hz > 0.0:
+            self._period_s = 1.0 / effective_max_hz
+        self._last_log_time: float | None = None
+        self._perf_counter = perf_counter
+        self._sleep_fn = sleep_fn
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._worker, name="sim-rerun-logger", daemon=True)
+        self._thread.start()
+
+    def log_step(self, **payload) -> None:
+        if self._stop_event.is_set():
+            return
+        try:
+            self._queue.put_nowait(payload)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(payload)
+            except queue.Full:
+                pass
+
+    def _worker(self) -> None:
+        while not self._stop_event.is_set() or not self._queue.empty():
+            try:
+                payload = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            while True:
+                try:
+                    payload = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            if self._last_log_time is not None and self._period_s > 0.0:
+                elapsed_s = self._perf_counter() - self._last_log_time
+                if elapsed_s < self._period_s:
+                    self._sleep_fn(self._period_s - elapsed_s)
+            self._log_fn(**payload)
+            self._last_log_time = self._perf_counter()
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+
+class SimViewerSyncWorker:
+    """Refresh the passive MuJoCo viewer outside the UDP/control hot path."""
+
+    def __init__(
+        self,
+        viewer,
+        env_lock: threading.RLock,
+        shutdown_event: threading.Event,
+        *,
+        fps: float | None = None,
+        sleep_fn=time.sleep,
+    ) -> None:
+        self.viewer = viewer
+        self.env_lock = env_lock
+        self.shutdown_event = shutdown_event
+        self.fps = max(1.0, float(Config.SIM_VIEWER_FPS if fps is None else fps))
+        self._sleep_fn = sleep_fn
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._worker, name="sim-viewer-sync", daemon=True)
+        self._thread.start()
+
+    def sync_once(self) -> bool:
+        if hasattr(self.viewer, "is_running") and not self.viewer.is_running():
+            self.shutdown_event.set()
+            return False
+        with self.env_lock:
+            self.viewer.sync()
+        return True
+
+    def _worker(self) -> None:
+        period_s = 1.0 / self.fps
+        while not self._stop_event.is_set() and not self.shutdown_event.is_set():
+            if not self.sync_once():
+                break
+            self._sleep_fn(period_s)
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
 
 
 @dataclass(frozen=True)
@@ -143,14 +256,19 @@ def _create_sim_env():
 class BodyJointGui:
     """Small Tk slider window for commanding the three Body0422 joints."""
 
-    def __init__(self, env) -> None:
+    def __init__(self, env, env_lock=None) -> None:
         self._env = env
+        self._env_lock = env_lock
         self._root = None
         self._running = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._pending_body_qpos = env.get_body_qpos()
+        with self._env_context():
+            self._pending_body_qpos = env.get_body_qpos()
         self._dirty = False
+
+    def _env_context(self):
+        return self._env_lock if self._env_lock is not None else nullcontext()
 
     def start(self) -> None:
         if not Config.ENABLE_BODY_GUI:
@@ -175,8 +293,9 @@ class BodyJointGui:
                 return False
             body_qpos = self._pending_body_qpos.copy()
             self._dirty = False
-        self._env.set_body_qpos(body_qpos)
-        self._env.forward()
+        with self._env_context():
+            self._env.set_body_qpos(body_qpos)
+            self._env.forward()
         return True
 
     def _run(self) -> None:
@@ -194,7 +313,8 @@ class BodyJointGui:
         root.protocol("WM_DELETE_WINDOW", self.close)
 
         names = ("Waist01", "Waist02", "Body0422")
-        initial = self._env.get_body_qpos()
+        with self._env_context():
+            initial = self._env.get_body_qpos()
         limits_deg = np.rad2deg(Config.BODY_JOINT_LIMITS_RAD)
 
         for i, name in enumerate(names):
@@ -1211,39 +1331,48 @@ def run_udp_server(ready_file: str | None = None) -> None:
     print("   允许独立的外部 C 语言控制器通过 Socket 接入  ")
     print("=" * 60)
 
+    rerun_logger = None
     if Config.ENABLE_RERUN:
         rerun_viz.init_rerun()
         rerun_viz.setup_realtime_styles()
         time.sleep(0.5)
+        rerun_logger = SimRerunLogger()
+        rerun_logger.start()
 
     env = _create_sim_env()
+    env_lock = threading.RLock()
+    shutdown_event = threading.Event()
 
-    env.reset(Config.INIT_QPOS)
-    env.forward()
-    box_init_pos = env.get_all_ee_pos().copy()
-    box_init_quat = env.get_all_ee_quat().copy()
+    with env_lock:
+        env.reset(Config.INIT_QPOS)
+        env.forward()
+        box_init_pos = env.get_all_ee_pos().copy()
+        box_init_quat = env.get_all_ee_quat().copy()
     print(
         "[Server] INIT_QPOS 正向运动学 => "
         f"左臂初始目标位置: {box_init_pos[Config.LEFT_ARM]}, "
         f"右臂初始目标位置: {box_init_pos[Config.RIGHT_ARM]}"
     )
 
-    env.reset(Config.HOME_QPOS)
-    env.forward()
-    env.set_all_target_poses_base(box_init_pos, box_init_quat)
-    body_gui = BodyJointGui(env)
+    with env_lock:
+        env.reset(Config.HOME_QPOS)
+        env.forward()
+        env.set_all_target_poses_base(box_init_pos, box_init_quat)
+    body_gui = BodyJointGui(env, env_lock=env_lock)
     body_gui.start()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_addr = ("0.0.0.0", 9876)
     sock.bind(server_addr)
-    sock.settimeout(0.01)
+    sock.settimeout(Config.SIM_UDP_TIMEOUT_S)
     print(f"[UDP Server] 监听端口 {server_addr[1]}...")
 
     viewer = None
+    viewer_worker = None
     if VIEWER_AVAILABLE and Config.ENABLE_VIEWER:
         viewer = launch_passive_viewer(env.model, env.data)
-        viewer.sync()
+        viewer_worker = SimViewerSyncWorker(viewer, env_lock, shutdown_event)
+        viewer_worker.start()
         print("[UDP Server] 可视化窗口已打开。此时等待 C 端客户端发送请求...")
 
     _write_ready_file(ready_file)
@@ -1254,10 +1383,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
     expected_torque_bytes = TORQUE_OUTPUT_PACKET_SIZE * np.dtype("<f8").itemsize
 
     try:
-        while True:
-            if viewer and not viewer.is_running():
-                print("[UDP Server] viewer closed, stopping sim by safety policy.")
-                break
+        while not shutdown_event.is_set():
             body_gui.apply_pending()
 
             try:
@@ -1265,7 +1391,9 @@ def run_udp_server(ready_file: str | None = None) -> None:
 
                 if data == b"INIT":
                     print(f"[UDP Server] 客户端 {addr} 已连接（收到 INIT）。")
-                    env.write_state_packet(state_packet)
+                    with env_lock:
+                        body_gui.apply_pending()
+                        env.write_state_packet(state_packet)
                     sock.sendto(state_packet_view, addr)
                     continue
 
@@ -1274,45 +1402,57 @@ def run_udp_server(ready_file: str | None = None) -> None:
                     continue
 
                 tau = np.frombuffer(data, dtype="<f8", count=Config.NUM_JOINTS)
-                clipped_tau = env.clip_torque(tau)
+                rerun_payload = None
                 t_start = time.perf_counter()
-                env.apply_torque(clipped_tau)
-                _step_env_with_viewer_sync(env, viewer)
-                clipped = env.enforce_joint_limits()
-                cycle_time_ms = (time.perf_counter() - t_start) * 1000.0
+                with env_lock:
+                    body_gui.apply_pending()
+                    clipped_tau = env.clip_torque(tau)
+                    env.apply_torque(clipped_tau)
+                    env.step()
+                    clipped = env.enforce_joint_limits()
+                    if clipped:
+                        env.forward()
+                    cycle_time_ms = (time.perf_counter() - t_start) * 1000.0
 
-                if clipped:
-                    env.forward()
+                    if (
+                        Config.ENABLE_RERUN
+                        and rerun_logger is not None
+                        and _should_log_sim_rerun_step(step_count)
+                    ):
+                        q, qd, pos_current, quat_current, pos_desired, quat_desired = env.get_state_snapshot()
+                        rerun_payload = {
+                            "t": step_count * Config.DT,
+                            "pos_actual": pos_current,
+                            "pos_desired": pos_desired,
+                            "quat_actual": quat_current,
+                            "quat_desired": quat_desired,
+                            "tau_total": clipped_tau.copy(),
+                            "cycle_time": cycle_time_ms,
+                            "q": q,
+                            "qd": qd,
+                            "ee_twist": env.get_all_ee_twist(),
+                            "step_count": step_count,
+                        }
 
-                if Config.ENABLE_RERUN:
-                    q, qd, pos_current, quat_current, pos_desired, quat_desired = env.get_state_snapshot()
-                    rerun_viz.log_realtime_step(
-                        t=step_count * Config.DT,
-                        pos_actual=pos_current,
-                        pos_desired=pos_desired,
-                        quat_actual=quat_current,
-                        quat_desired=quat_desired,
-                        tau_total=clipped_tau,
-                        cycle_time=cycle_time_ms,
-                        q=q,
-                        qd=qd,
-                        step_count=step_count,
-                    )
+                    env.write_state_packet(state_packet)
 
-                env.write_state_packet(state_packet)
+                if rerun_payload is not None:
+                    rerun_logger.log_step(**rerun_payload)
                 sock.sendto(state_packet_view, addr)
                 step_count += 1
 
             except socket.timeout:
-                body_gui.apply_pending()
-                if viewer:
-                    viewer.sync()
                 continue
 
     except KeyboardInterrupt:
+        shutdown_event.set()
         print("\n[UDP Server] 用户中断，正在退出...")
     finally:
         body_gui.close()
+        if viewer_worker:
+            viewer_worker.close()
         if viewer:
             viewer.close()
+        if rerun_logger:
+            rerun_logger.close()
         sock.close()

@@ -28,6 +28,7 @@ typedef struct {
   double tau[NUM_JOINTS];
   double ee_pos[NUM_ARMS][3];
   double ee_quat[NUM_ARMS][4];
+  double ee_twist[NUM_ARMS][6];
   double traj_t;
   int32_t step_count;
 } real_output_t;
@@ -58,6 +59,11 @@ static void run_fk_only(const real_input_t *in, real_output_t *out) {
     control_get_arm_kinematics_with_offset(arm, in->q + offset, &kin);
     memcpy(out->ee_pos[arm], kin.pos, sizeof(double) * 3);
     memcpy(out->ee_quat[arm], kin.quat_wxyz, sizeof(double) * 4);
+    for (int r = 0; r < 6; ++r) {
+      for (int c = 0; c < ARM_JOINTS; ++c) {
+        out->ee_twist[arm][r] += kin.J[r][c] * in->qd[offset + c];
+      }
+    }
   }
 }
 
@@ -98,6 +104,7 @@ int main(void) {
       memcpy(out.tau, stm_out.tau, sizeof(out.tau));
       memcpy(out.ee_pos, stm_out.ee_pos, sizeof(out.ee_pos));
       memcpy(out.ee_quat, stm_out.ee_quat, sizeof(out.ee_quat));
+      memcpy(out.ee_twist, stm_out.ee_twist, sizeof(out.ee_twist));
       out.traj_t = stm_out.traj_t;
       out.step_count = (int32_t)stm_out.step_count;
     } else {

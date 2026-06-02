@@ -186,7 +186,7 @@ select_python
 
 if [ "$MODE" == "real" ]; then
     : "${AM_D02_ENABLE_VIEWER:=1}"
-    : "${AM_D02_ENABLE_RERUN:=0}"
+    : "${AM_D02_ENABLE_RERUN:=1}"
     export AM_D02_ENABLE_VIEWER
     export AM_D02_ENABLE_RERUN
 fi

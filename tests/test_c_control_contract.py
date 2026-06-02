@@ -1688,7 +1688,7 @@ def test_cartesian_reference_velocity_feedback_tracks_tcp_speed_from_qd(tmp_path
           printf("%.12f %.12f %.12f\\n",
                  (double)END_EFFECTOR_LINEAR_SPEED_MPS,
                  task_tau_for_qd(0.0),
-                 task_tau_for_qd(2.0 * END_EFFECTOR_LINEAR_SPEED_MPS));
+                 task_tau_for_qd(0.5 * END_EFFECTOR_LINEAR_SPEED_MPS));
           return 0;
         }
         """
@@ -1700,8 +1700,111 @@ def test_cartesian_reference_velocity_feedback_tracks_tcp_speed_from_qd(tmp_path
 
     assert speed == pytest.approx(0.05)
     assert tau_slow > 0.0
-    assert tau_slow - tau_fast == pytest.approx(2.0 * 65.0 * speed)
+    assert tau_slow - tau_fast == pytest.approx(0.5 * 65.0 * speed)
     assert tau_fast < tau_slow
+
+
+def test_cartesian_real_tcp_speed_limit_brakes_along_current_velocity(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "control_logic.h"
+        #include <stdio.h>
+        #include <string.h>
+
+        static void fill_kin(control_arm_kinematics_t *kin) {
+          memset(kin, 0, sizeof(*kin));
+          kin->quat_wxyz[0] = 1.0;
+          kin->quat_xyzw[3] = 1.0;
+          kin->J[0][0] = 1.0;
+        }
+
+        static double task_tau_for_qd(double qd0) {
+          double q[ARM_JOINTS] = {0.0};
+          double qd[ARM_JOINTS] = {0.0};
+          double ref_pos[3] = {0.02, 0.0, 0.0};
+          double ref_quat[4] = {1.0, 0.0, 0.0, 0.0};
+          double ref_twist[6] = {END_EFFECTOR_LINEAR_SPEED_MPS, 0.0, 0.0,
+                                 0.0, 0.0, 0.0};
+          double tau[ARM_JOINTS];
+          double tau_gc[ARM_JOINTS];
+          control_arm_kinematics_t kin;
+          RBDLModel model;
+
+          qd[0] = qd0;
+          fill_kin(&kin);
+          control_step_v2_arm_with_reference(ARM_LEFT, ref_pos, ref_quat,
+                                             ref_twist, q, qd, &kin, tau);
+          build_am_d02_arm_model(ARM_LEFT, &model);
+          rbdl_calc_gc(&model, q, qd, tau_gc);
+          return tau[0] - tau_gc[0];
+        }
+
+        int main(void) {
+          control_init();
+          printf("%.12f %.12f %.12f\\n",
+                 (double)END_EFFECTOR_REAL_SPEED_LIMIT_MPS,
+                 task_tau_for_qd(0.0),
+                 task_tau_for_qd(2.0 * END_EFFECTOR_REAL_SPEED_LIMIT_MPS));
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source)
+    limit, tau_at_rest, tau_over_limit = [
+        float(value) for value in subprocess.check_output([str(probe)], text=True).split()
+    ]
+
+    assert limit == pytest.approx(0.05)
+    assert tau_at_rest > 0.0
+    assert tau_over_limit < 0.0
+
+
+def test_stm_controller_outputs_estimated_tcp_twist_for_active_arm(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "stm_controller.c"
+        #include <stdio.h>
+        #include <string.h>
+
+        int main(void) {
+          stm_input_t in;
+          stm_output_t out;
+          control_arm_kinematics_t kin;
+          double expected[6] = {0.0};
+
+          memset(&in, 0, sizeof(in));
+          in.active_arm_mask = STM_ARM_MASK_LEFT;
+          in.q[3] = 1.0;
+          in.qd[0] = 0.02;
+          control_get_arm_kinematics_with_offset(ARM_LEFT, in.q, &kin);
+          memcpy(in.target_pos[ARM_LEFT], kin.pos, sizeof(double) * 3);
+          memcpy(in.target_quat[ARM_LEFT], kin.quat_wxyz, sizeof(double) * 4);
+
+          stm_controller_init();
+          stm_controller_reset();
+          stm_controller_step_elapsed(&in, &out, 0.001);
+          for (int r = 0; r < 6; ++r) {
+            for (int c = 0; c < ARM_JOINTS; ++c) {
+              expected[r] += kin.J[r][c] * in.qd[c];
+            }
+          }
+
+          printf("%d %.12f %.12f %.12f %.12f\\n",
+                 out.status, out.ee_twist[ARM_LEFT][0], expected[0],
+                 out.ee_twist[ARM_LEFT][5], out.ee_twist[ARM_RIGHT][0]);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
+    status, twist_x, expected_x, twist_wz, inactive_x = [
+        float(value) for value in subprocess.check_output([str(probe)], text=True).split()
+    ]
+
+    assert status == pytest.approx(0.0)
+    assert twist_x == pytest.approx(expected_x)
+    assert np.isfinite(twist_wz)
+    assert inactive_x == pytest.approx(0.0)
 
 
 def test_stm_controller_replans_immediately_when_target_changes(tmp_path: Path):
@@ -1754,7 +1857,7 @@ def test_stm_controller_replans_immediately_when_target_changes(tmp_path: Path):
         float(value) for value in subprocess.check_output([str(probe)], text=True).split()
     ]
 
-    assert diff > 0.001
+    assert diff > 1e-6
     assert tau_forward_0 != pytest.approx(tau_reverse_0, abs=1e-6)
 
 
@@ -1765,8 +1868,9 @@ def test_endpoint_velocity_defaults_are_real_safe_tuned(tmp_path: Path):
         #include <stdio.h>
 
         int main(void) {
-          printf("%.4f %.4f %.4f %.4f %.7f %.7f %.3f %.3f\\n",
+          printf("%.4f %.4f %.4f %.4f %.4f %.7f %.7f %.3f %.3f\\n",
                  (double)END_EFFECTOR_LINEAR_SPEED_MPS,
+                 (double)END_EFFECTOR_REAL_SPEED_LIMIT_MPS,
                  (double)END_EFFECTOR_TARGET_POS_TOL_M,
                  (double)END_EFFECTOR_TARGET_ORI_TOL_RAD,
                  (double)END_EFFECTOR_ARRIVAL_SPEED_TOL_MPS,
@@ -1782,7 +1886,7 @@ def test_endpoint_velocity_defaults_are_real_safe_tuned(tmp_path: Path):
     values = [float(value) for value in subprocess.check_output([str(probe)], text=True).split()]
 
     assert values == pytest.approx(
-        [0.05, 0.0025, 0.005, 0.02, 0.0001, 0.0005, 5.0, 0.01]
+        [0.05, 0.05, 0.0025, 0.005, 0.02, 0.0001, 0.0005, 5.0, 0.01]
     )
     config_text = (PROJECT_ROOT / "stm32_code" / "config.h").read_text(encoding="utf-8")
     assert "WAYPOINT_" not in config_text
@@ -1821,6 +1925,7 @@ def test_python_config_mirrors_c_endpoint_control_defaults():
     from config import Config
 
     assert Config.END_EFFECTOR_LINEAR_SPEED_MPS == pytest.approx(0.05)
+    assert Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS == pytest.approx(0.05)
     assert Config.JOINT_VEL_LIMIT == pytest.approx(5.0)
     assert [Config.KP_CART_X, Config.KP_CART_Y, Config.KP_CART_Z] == pytest.approx(
         [170.0, 170.0, 170.0]

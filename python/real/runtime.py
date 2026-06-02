@@ -31,6 +31,7 @@ REAL_FEEDBACK_REQUEST_INTERVAL_S = max(0.0, _env_float("AM_D02_REAL_FEEDBACK_REQ
 REAL_IDLE_SLEEP_S = max(0.0, _env_float("AM_D02_REAL_IDLE_SLEEP_S", 0.0005))
 REAL_DIAG_WINDOW_STEPS = max(1, _env_int("AM_D02_REAL_DIAG_WINDOW_STEPS", 40))
 REAL_FEEDBACK_ONLY = _env_bool("AM_D02_REAL_FEEDBACK_ONLY", False)
+REAL_THREAD_JOIN_TIMEOUT_S = max(0.1, _env_float("AM_D02_REAL_THREAD_JOIN_TIMEOUT_S", 2.0))
 LEFT_CAN_INTERFACE = os.getenv("AM_D02_LEFT_CAN_INTERFACE", "can0")
 RIGHT_CAN_INTERFACE = os.getenv("AM_D02_RIGHT_CAN_INTERFACE", "can1")
 
@@ -47,6 +48,7 @@ ARM_INTERFACE = {
 REAL_C_BODY_Q_ZERO = np.zeros(Config.NUM_BODY_JOINTS, dtype=np.float64)
 
 shutdown_event = threading.Event()
+_THREAD_WAIT_CLOCK = time.monotonic
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,18 @@ class ArmCanRuntime:
     interface: str
     transport: object
     motor_ids: tuple[int, ...] = MOTOR_IDS
+
+
+@dataclass(frozen=True)
+class RealFeedbackSnapshot:
+    seq: int
+    timestamp_s: float
+    q: np.ndarray
+    qd: np.ndarray
+    tau_actual: np.ndarray
+    complete_mask: int
+    received_joint_masks: dict[int, int]
+    arm_seq: dict[int, int]
 
 
 class RealSharedState:
@@ -116,8 +130,20 @@ class RealSharedState:
 
 
 class RealRerunLogger:
-    def __init__(self) -> None:
-        self._queue = queue.Queue(maxsize=max(1, _env_int("AM_D02_RERUN_QUEUE_SIZE", 512)))
+    def __init__(
+        self,
+        queue_size: int | None = None,
+        *,
+        max_hz: float | None = None,
+        perf_counter=time.perf_counter,
+        sleep_fn=time.sleep,
+    ) -> None:
+        self._queue = queue.Queue(maxsize=max(1, int(queue_size or _env_int("AM_D02_RERUN_QUEUE_SIZE", 512))))
+        effective_max_hz = Config.RERUN_MAX_HZ if max_hz is None else float(max_hz)
+        self._period_s = 1.0 / effective_max_hz if effective_max_hz > 0.0 else 0.0
+        self._last_log_time: float | None = None
+        self._perf_counter = perf_counter
+        self._sleep_fn = sleep_fn
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._worker, name="real-rerun-logger", daemon=True)
 
@@ -130,7 +156,17 @@ class RealRerunLogger:
                 payload = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+            while True:
+                try:
+                    payload = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            if self._last_log_time is not None and self._period_s > 0.0:
+                elapsed_s = self._perf_counter() - self._last_log_time
+                if elapsed_s < self._period_s:
+                    self._sleep_fn(self._period_s - elapsed_s)
             rerun_viz.log_realtime_step(**payload)
+            self._last_log_time = self._perf_counter()
 
     def log_step(self, **payload) -> None:
         if self._stop_event.is_set():
@@ -150,6 +186,270 @@ class RealRerunLogger:
     def close(self) -> None:
         self._stop_event.set()
         self._thread.join(timeout=1.0)
+
+
+class RealFeedbackHub:
+    def __init__(self, perf_counter=_THREAD_WAIT_CLOCK) -> None:
+        self._condition = threading.Condition()
+        self._q = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
+        self._qd = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
+        self._tau_actual = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
+        self._received_joint_masks = {arm: 0 for arm in range(Config.NUM_ARMS)}
+        self._arm_seq = {arm: 0 for arm in range(Config.NUM_ARMS)}
+        self._complete_mask = 0
+        self._seq = 0
+        self._timestamp_s = 0.0
+        self._error: Exception | None = None
+        self._perf_counter = perf_counter
+
+    def record_feedback_frame(self, arm: int, motor_ids: tuple[int, ...], frame) -> None:
+        motor_id = int(frame.motor_id)
+        if motor_id not in motor_ids:
+            return
+        arm_index = int(arm)
+        joint_local = motor_id - 1
+        joint_global = arm_index * Config.ARM_JOINTS + joint_local
+        full_arm_mask = (1 << Config.ARM_JOINTS) - 1
+        with self._condition:
+            self._q[joint_global] = float(frame.position)
+            self._qd[joint_global] = float(frame.velocity)
+            self._tau_actual[joint_global] = float(frame.torque)
+            arm_mask = int(self._received_joint_masks.get(arm_index, 0)) | (1 << joint_local)
+            self._received_joint_masks[arm_index] = arm_mask
+            if arm_mask == full_arm_mask:
+                self._complete_mask |= 1 << arm_index
+                self._received_joint_masks[arm_index] = 0
+                self._seq += 1
+                self._arm_seq[arm_index] = self._seq
+                self._timestamp_s = self._perf_counter()
+                self._condition.notify_all()
+
+    def set_error(self, exc: Exception) -> None:
+        with self._condition:
+            self._error = exc
+            self._condition.notify_all()
+
+    def latest_received_joint_masks(
+        self,
+        active_arm_mask: int | None = None,
+        last_arm_seq: dict[int, int] | None = None,
+    ) -> dict[int, int]:
+        with self._condition:
+            masks = dict(self._received_joint_masks)
+            if active_arm_mask is not None and last_arm_seq is not None:
+                full_arm_mask = (1 << Config.ARM_JOINTS) - 1
+                for arm in range(Config.NUM_ARMS):
+                    if (int(active_arm_mask) & (1 << arm)) != 0 and self._arm_seq[arm] > int(last_arm_seq.get(arm, 0)):
+                        masks[arm] = full_arm_mask
+            return masks
+
+    def wait_for_next(
+        self,
+        active_arm_mask: int,
+        *,
+        last_seq: int,
+        timeout_s: float,
+        last_arm_seq: dict[int, int] | None = None,
+    ) -> RealFeedbackSnapshot | None:
+        deadline = _THREAD_WAIT_CLOCK() + max(0.0, float(timeout_s))
+        with self._condition:
+            while True:
+                if self._error is not None:
+                    raise self._error
+                if shutdown_event.is_set():
+                    return None
+                active_ready = (self._complete_mask & int(active_arm_mask)) == int(active_arm_mask)
+                if active_ready and last_arm_seq is not None:
+                    active_ready = all(
+                        self._arm_seq[arm] > int(last_arm_seq.get(arm, 0))
+                        for arm in range(Config.NUM_ARMS)
+                        if (int(active_arm_mask) & (1 << arm)) != 0
+                    )
+                if self._seq > int(last_seq) and active_ready:
+                    return RealFeedbackSnapshot(
+                        seq=int(self._seq),
+                        timestamp_s=float(self._timestamp_s),
+                        q=self._q.copy(),
+                        qd=self._qd.copy(),
+                        tau_actual=self._tau_actual.copy(),
+                        complete_mask=int(self._complete_mask),
+                        received_joint_masks=dict(self._received_joint_masks),
+                        arm_seq=dict(self._arm_seq),
+                    )
+                remaining = deadline - _THREAD_WAIT_CLOCK()
+                if remaining <= 0.0:
+                    return None
+                self._condition.wait(timeout=remaining)
+        return None
+
+
+class RealFeedbackWorker:
+    def __init__(
+        self,
+        runtime: ArmCanRuntime,
+        hub: RealFeedbackHub,
+        *,
+        poll_sleep_s: float | None = None,
+        join_timeout_s: float | None = None,
+    ) -> None:
+        self.runtime = runtime
+        self.hub = hub
+        self._poll_sleep_s = REAL_IDLE_SLEEP_S if poll_sleep_s is None else max(0.0, float(poll_sleep_s))
+        self._join_timeout_s = REAL_THREAD_JOIN_TIMEOUT_S if join_timeout_s is None else max(0.0, float(join_timeout_s))
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._worker,
+            name=f"real-feedback-{runtime.interface}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+
+    def join(self) -> None:
+        self._thread.join(timeout=self._join_timeout_s)
+
+    def stop(self) -> None:
+        self.request_stop()
+        self.join()
+
+    def _worker(self) -> None:
+        while not self._stop_event.is_set() and not shutdown_event.is_set():
+            try:
+                if hasattr(self.runtime.transport, "read_available"):
+                    self.runtime.transport.read_available(CAN_READ_CHUNK_SIZE)
+                else:
+                    self.runtime.transport.read(CAN_READ_CHUNK_SIZE)
+                while True:
+                    frame = self.runtime.transport.pop_feedback_frame()
+                    if frame is None:
+                        break
+                    self.hub.record_feedback_frame(self.runtime.arm, self.runtime.motor_ids, frame)
+            except Exception as exc:
+                self.hub.set_error(exc)
+                shutdown_event.set()
+                break
+            if self._poll_sleep_s > 0.0:
+                time.sleep(self._poll_sleep_s)
+
+
+class RealTxWorker:
+    def __init__(
+        self,
+        runtime: ArmCanRuntime,
+        *,
+        join_timeout_s: float | None = None,
+    ) -> None:
+        self.runtime = runtime
+        self._join_timeout_s = REAL_THREAD_JOIN_TIMEOUT_S if join_timeout_s is None else max(0.0, float(join_timeout_s))
+        self._condition = threading.Condition()
+        self._pending_tau: np.ndarray | None = None
+        self._busy = False
+        self._finalize_on_stop = False
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._worker,
+            name=f"real-tx-{runtime.interface}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def submit_torque(self, tau: np.ndarray) -> None:
+        tau_values = np.asarray(tau, dtype=np.float64).reshape(Config.NUM_JOINTS).copy()
+        with self._condition:
+            if self._stop_event.is_set():
+                return
+            self._pending_tau = tau_values
+            self._condition.notify_all()
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else _THREAD_WAIT_CLOCK() + max(0.0, float(timeout))
+        with self._condition:
+            while self._busy or self._pending_tau is not None:
+                if deadline is None:
+                    remaining = None
+                else:
+                    remaining = deadline - _THREAD_WAIT_CLOCK()
+                    if remaining <= 0.0:
+                        return False
+                self._condition.wait(timeout=remaining)
+            return True
+
+    def request_stop(self, *, finalize: bool = False) -> None:
+        with self._condition:
+            self._stop_event.set()
+            self._finalize_on_stop = bool(finalize)
+            self._pending_tau = None
+            self._condition.notify_all()
+
+    def join(self) -> None:
+        self._thread.join(timeout=self._join_timeout_s)
+
+    def stop(self, *, finalize: bool = False) -> None:
+        self.request_stop(finalize=finalize)
+        self.join()
+
+    def send_zero_and_disable(self) -> None:
+        for motor_id in self.runtime.motor_ids:
+            try:
+                self.runtime.transport.send_mit_torque(int(motor_id), 0.0)
+            except Exception as exc:
+                print(f"[CAN Warning] {self.runtime.interface} motor {motor_id} zero failed: {exc}")
+        for motor_id in self.runtime.motor_ids:
+            try:
+                self.runtime.transport.disable_motor(int(motor_id))
+            except Exception as exc:
+                print(f"[CAN Warning] {self.runtime.interface} motor {motor_id} disable failed: {exc}")
+
+    def _stop_requested(self) -> bool:
+        with self._condition:
+            return self._stop_event.is_set()
+
+    def _worker(self) -> None:
+        while True:
+            with self._condition:
+                while self._pending_tau is None and not self._stop_event.is_set():
+                    self._condition.wait(timeout=0.1)
+                if self._pending_tau is None and self._stop_event.is_set():
+                    if not self._finalize_on_stop:
+                        self._condition.notify_all()
+                        return
+                    self._busy = True
+                    self._condition.notify_all()
+                    tau = None
+                else:
+                    tau = self._pending_tau
+                    self._pending_tau = None
+                    self._busy = True
+            if tau is None:
+                try:
+                    self.send_zero_and_disable()
+                finally:
+                    with self._condition:
+                        self._busy = False
+                        self._condition.notify_all()
+                return
+            try:
+                offset = self.runtime.arm * Config.ARM_JOINTS
+                for motor_id in self.runtime.motor_ids:
+                    if self._stop_requested():
+                        break
+                    self.runtime.transport.send_mit_torque(
+                        int(motor_id),
+                        float(tau[offset + int(motor_id) - 1]),
+                    )
+            except Exception as exc:
+                print(f"[CAN Error] {self.runtime.interface} torque send failed: {exc}")
+                shutdown_event.set()
+            finally:
+                with self._condition:
+                    self._busy = False
+                    self._condition.notify_all()
 
 
 def active_arms_for_mode(mode: str) -> tuple[int, ...]:
@@ -218,62 +518,6 @@ def _startup_enable(runtimes: tuple[ArmCanRuntime, ...]) -> None:
             runtime.transport.send_mit_torque(int(motor_id), 0.0)
 
 
-def _send_zero_keepalive(runtimes: tuple[ArmCanRuntime, ...]) -> None:
-    for runtime in runtimes:
-        for motor_id in runtime.motor_ids:
-            runtime.transport.send_mit_torque(int(motor_id), 0.0)
-
-
-def _send_torque_keepalive(runtimes: tuple[ArmCanRuntime, ...], tau: np.ndarray) -> None:
-    tau_values = np.asarray(tau, dtype=np.float64).reshape(Config.NUM_JOINTS)
-    for runtime in runtimes:
-        offset = runtime.arm * Config.ARM_JOINTS
-        for motor_id in runtime.motor_ids:
-            runtime.transport.send_mit_torque(
-                int(motor_id),
-                float(tau_values[offset + int(motor_id) - 1]),
-            )
-
-
-def _collect_feedback(
-    runtimes: tuple[ArmCanRuntime, ...],
-    q: np.ndarray,
-    qd: np.ndarray,
-    tau_actual: np.ndarray,
-    received_joint_masks: dict[int, int],
-) -> int:
-    feedback_mask = 0
-    for runtime in runtimes:
-        if hasattr(runtime.transport, "read_available"):
-            runtime.transport.read_available(CAN_READ_CHUNK_SIZE)
-        else:
-            runtime.transport.read(CAN_READ_CHUNK_SIZE)
-        arm_bit = 1 << runtime.arm
-        arm_mask = int(received_joint_masks.get(runtime.arm, 0))
-        while True:
-            frame = runtime.transport.pop_feedback_frame()
-            if frame is None:
-                break
-            motor_id = int(frame.motor_id)
-            if motor_id not in runtime.motor_ids:
-                continue
-            joint_local = motor_id - 1
-            joint_global = runtime.arm * Config.ARM_JOINTS + joint_local
-            q[joint_global] = float(frame.position)
-            qd[joint_global] = float(frame.velocity)
-            tau_actual[joint_global] = float(frame.torque)
-            arm_mask |= 1 << joint_local
-        received_joint_masks[runtime.arm] = arm_mask
-        if arm_mask == (1 << Config.ARM_JOINTS) - 1:
-            feedback_mask |= arm_bit
-    return feedback_mask
-
-
-def _reset_feedback_masks(runtimes: tuple[ArmCanRuntime, ...], received_joint_masks: dict[int, int]) -> None:
-    for runtime in runtimes:
-        received_joint_masks[runtime.arm] = 0
-
-
 def _format_missing_feedback(runtimes: tuple[ArmCanRuntime, ...], received_joint_masks: dict[int, int]) -> str:
     missing_parts = []
     for runtime in runtimes:
@@ -286,6 +530,43 @@ def _format_missing_feedback(runtimes: tuple[ArmCanRuntime, ...], received_joint
         if missing_ids:
             missing_parts.append(f"{runtime.interface}: motor id {','.join(missing_ids)}")
     return "; ".join(missing_parts) if missing_parts else "none"
+
+
+def _start_feedback_workers(
+    runtimes: tuple[ArmCanRuntime, ...],
+    hub: RealFeedbackHub,
+) -> tuple[RealFeedbackWorker, ...]:
+    workers = tuple(RealFeedbackWorker(runtime, hub) for runtime in runtimes)
+    for worker in workers:
+        worker.start()
+    return workers
+
+
+def _start_tx_workers(runtimes: tuple[ArmCanRuntime, ...]) -> dict[int, RealTxWorker]:
+    workers = {runtime.arm: RealTxWorker(runtime) for runtime in runtimes}
+    for worker in workers.values():
+        worker.start()
+    return workers
+
+
+def _submit_torque_to_tx_workers(tx_workers: dict[int, RealTxWorker], tau: np.ndarray) -> None:
+    tau_values = np.asarray(tau, dtype=np.float64).reshape(Config.NUM_JOINTS)
+    for worker in tx_workers.values():
+        worker.submit_torque(tau_values)
+
+
+def _stop_feedback_workers(workers: tuple[RealFeedbackWorker, ...]) -> None:
+    for worker in workers:
+        worker.request_stop()
+    for worker in workers:
+        worker.join()
+
+
+def _stop_tx_workers(workers: dict[int, RealTxWorker], *, finalize: bool) -> None:
+    for worker in workers.values():
+        worker.request_stop(finalize=finalize)
+    for worker in workers.values():
+        worker.join()
 
 
 def _copy_active_arm_values(dst: np.ndarray, src: np.ndarray, active_arm_mask: int) -> np.ndarray:
@@ -306,6 +587,31 @@ def _copy_active_arm_pose_values(dst: np.ndarray, src: np.ndarray, active_arm_ma
         if (active_arm_mask & (1 << arm)) != 0:
             result[arm] = source[arm]
     return result
+
+
+def _rerun_tcp_twist_with_position_fallback(
+    controller_twist: np.ndarray,
+    ee_pos: np.ndarray,
+    previous_ee_pos: np.ndarray | None,
+    elapsed_s: float,
+    active_arm_mask: int,
+) -> np.ndarray:
+    """Prefer controller J(q)*qd twist, but keep Rerun speed live if velocity feedback is zero."""
+    twist = np.asarray(controller_twist, dtype=np.float64).reshape(Config.NUM_ARMS, 6).copy()
+    current_pos = np.asarray(ee_pos, dtype=np.float64).reshape(Config.NUM_ARMS, 3)
+    if previous_ee_pos is None or elapsed_s <= 1e-9:
+        return twist
+    previous_pos = np.asarray(previous_ee_pos, dtype=np.float64).reshape(Config.NUM_ARMS, 3)
+    for arm in range(Config.NUM_ARMS):
+        if (active_arm_mask & (1 << arm)) == 0:
+            continue
+        linear = twist[arm, :3]
+        delta = current_pos[arm] - previous_pos[arm]
+        if not np.all(np.isfinite(linear)) or (
+            np.linalg.norm(linear) <= 1e-12 and np.linalg.norm(delta) > 1e-12
+        ):
+            twist[arm, :3] = delta / float(elapsed_s)
+    return twist
 
 
 def _should_log_real_rerun_step(step_count: int) -> bool:
@@ -476,62 +782,91 @@ def run_real_can_control_loop(
     feedback_only: bool = False,
 ) -> None:
     active_mask = ACTIVE_ARM_MASK[mode]
-    complete_feedback_mask = active_mask
     last_cycle_end = None
     step_count = 0
-    q = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-    qd = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-    tau_actual = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
     last_sent_tau = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-    received_joint_masks = {runtime.arm: 0 for runtime in runtimes}
     diag_window = deque(maxlen=REAL_DIAG_WINDOW_STEPS)
     zero_tau = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
     zero_pos = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
+    zero_twist = np.zeros((Config.NUM_ARMS, 6), dtype=np.float64)
     identity_quat = np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1))
+    previous_rerun_ee_pos = None
+    hub = RealFeedbackHub()
+    feedback_workers: tuple[RealFeedbackWorker, ...] = ()
+    tx_workers: dict[int, RealTxWorker] = {}
 
-    if startup_enable:
-        _startup_enable(runtimes)
-    feedback_wait_start = time.perf_counter()
-    last_control_time = feedback_wait_start
-    command_in_effect = False
-    last_feedback_request_time = 0.0
+    def submit_keepalive(tau: np.ndarray) -> None:
+        _submit_torque_to_tx_workers(tx_workers, tau)
 
     try:
+        if startup_enable:
+            _startup_enable(runtimes)
+        feedback_wait_start = _THREAD_WAIT_CLOCK()
+        last_control_time = time.perf_counter()
+        command_in_effect = False
+        last_feedback_request_time = 0.0
+        last_feedback_seq = 0
+        last_arm_seq = {arm: 0 for arm in range(Config.NUM_ARMS)}
+        tx_workers = _start_tx_workers(runtimes)
+        feedback_workers = _start_feedback_workers(runtimes, hub)
+
         while not shutdown_event.is_set():
+            scheduler_now = _THREAD_WAIT_CLOCK()
+            wait_elapsed_s = max(0.0, scheduler_now - feedback_wait_start)
+            if wait_elapsed_s > CAN_FEEDBACK_TIMEOUT_S:
+                missing_masks = hub.latest_received_joint_masks(active_mask, last_arm_seq)
+                missing = _format_missing_feedback(runtimes, missing_masks)
+                print(
+                    f"[CAN Error] feedback timeout after {CAN_FEEDBACK_TIMEOUT_S:.3f}s; "
+                    f"missing feedback: {missing}. Disabling active motors."
+                )
+                shutdown_event.set()
+                break
+
+            remaining_timeout_s = max(0.0, CAN_FEEDBACK_TIMEOUT_S - wait_elapsed_s)
+            if REAL_FEEDBACK_REQUEST_INTERVAL_S > 0.0:
+                next_keepalive_s = max(
+                    0.0,
+                    REAL_FEEDBACK_REQUEST_INTERVAL_S - (scheduler_now - last_feedback_request_time),
+                )
+            else:
+                next_keepalive_s = max(REAL_IDLE_SLEEP_S, 0.0001)
+            wait_timeout_s = min(
+                remaining_timeout_s,
+                max(REAL_IDLE_SLEEP_S, 0.0001),
+                max(next_keepalive_s, 0.0001),
+            )
             try:
-                feedback_mask = _collect_feedback(runtimes, q, qd, tau_actual, received_joint_masks)
+                snapshot = hub.wait_for_next(
+                    active_mask,
+                    last_seq=last_feedback_seq,
+                    timeout_s=wait_timeout_s,
+                    last_arm_seq=last_arm_seq,
+                )
             except Exception as exc:
                 print(f"[CAN Error] feedback read failed: {exc}")
                 shutdown_event.set()
                 break
 
-            if feedback_mask != complete_feedback_mask:
-                now = time.perf_counter()
+            if snapshot is None:
+                scheduler_now = _THREAD_WAIT_CLOCK()
                 if (not command_in_effect) or (
-                    now - last_feedback_request_time >= REAL_FEEDBACK_REQUEST_INTERVAL_S
+                    scheduler_now - last_feedback_request_time >= REAL_FEEDBACK_REQUEST_INTERVAL_S
                 ):
-                    _send_torque_keepalive(runtimes, last_sent_tau)
+                    submit_keepalive(last_sent_tau)
                     command_in_effect = True
-                    last_feedback_request_time = now
-                if now - feedback_wait_start > CAN_FEEDBACK_TIMEOUT_S:
-                    missing = _format_missing_feedback(runtimes, received_joint_masks)
-                    print(
-                        f"[CAN Error] feedback timeout after {CAN_FEEDBACK_TIMEOUT_S:.3f}s; "
-                        f"missing feedback: {missing}. Disabling active motors."
-                    )
-                    shutdown_event.set()
-                    break
-                if REAL_IDLE_SLEEP_S > 0.0:
-                    time.sleep(REAL_IDLE_SLEEP_S)
+                    last_feedback_request_time = scheduler_now
                 continue
-            feedback_wait_start = time.perf_counter()
-            shared_state.update_feedback(q, qd, tau_actual, active_mask)
+
+            last_feedback_seq = snapshot.seq
+            last_arm_seq = dict(snapshot.arm_seq)
+            feedback_wait_start = _THREAD_WAIT_CLOCK()
+            shared_state.update_feedback(snapshot.q, snapshot.qd, snapshot.tau_actual, active_mask)
             if require_targets and not shared_state.targets_ready():
-                _send_zero_keepalive(runtimes)
+                submit_keepalive(zero_tau)
+                last_sent_tau[:] = zero_tau
                 command_in_effect = True
-                last_feedback_request_time = time.perf_counter()
-                _reset_feedback_masks(runtimes, received_joint_masks)
-                time.sleep(0.001)
+                last_feedback_request_time = _THREAD_WAIT_CLOCK()
                 continue
 
             current_q, current_qd, current_tau_actual, target_pos, target_quat = shared_state.snapshot_control_inputs()
@@ -540,9 +875,10 @@ def run_real_can_control_loop(
             last_control_time = now
 
             if feedback_only:
-                _send_zero_keepalive(runtimes)
+                submit_keepalive(zero_tau)
+                last_sent_tau[:] = zero_tau
                 command_in_effect = True
-                last_feedback_request_time = time.perf_counter()
+                last_feedback_request_time = _THREAD_WAIT_CLOCK()
                 shared_state.update_control_output(zero_tau, zero_pos, identity_quat)
                 cycle_end = time.perf_counter()
                 cycle_ms = 0.0
@@ -577,6 +913,7 @@ def run_real_can_control_loop(
                         quat_desired=target_quat,
                         tau_raw=zero_tau,
                         tau_total=zero_tau,
+                        ee_twist=zero_twist,
                         cycle_time=elapsed_s * 1000.0,
                         elapsed_s=elapsed_s,
                         q=current_q,
@@ -592,7 +929,6 @@ def run_real_can_control_loop(
                         uart_transfer_kbps=0.0,
                     )
                 step_count += 1
-                _reset_feedback_masks(runtimes, received_joint_masks)
                 continue
 
             result = bridge.compute(
@@ -627,6 +963,17 @@ def run_real_can_control_loop(
                 shutdown_event.set()
                 break
 
+            rerun_ee_twist = _rerun_tcp_twist_with_position_fallback(
+                result.ee_twist,
+                result.ee_pos,
+                previous_rerun_ee_pos,
+                elapsed_s,
+                active_mask,
+            )
+            previous_rerun_ee_pos = np.asarray(result.ee_pos, dtype=np.float64).reshape(
+                Config.NUM_ARMS, 3
+            ).copy()
+
             tau_to_send = tau_raw.copy()
             for arm_index in range(Config.NUM_ARMS):
                 if (active_mask & (1 << arm_index)) == 0:
@@ -636,16 +983,13 @@ def run_real_can_control_loop(
                     )
                     tau_to_send[arm_slice] = 0.0
             shared_state.update_control_output(tau_to_send, result.ee_pos, result.ee_quat)
-            for runtime in runtimes:
-                offset = runtime.arm * Config.ARM_JOINTS
-                for motor_id in runtime.motor_ids:
-                    runtime.transport.send_mit_torque(
-                        int(motor_id),
-                        float(tau_to_send[offset + motor_id - 1]),
-                    )
+            _submit_torque_to_tx_workers(tx_workers, tau_to_send)
             last_sent_tau[:] = tau_to_send
             command_in_effect = True
-            last_feedback_request_time = time.perf_counter()
+            last_feedback_request_time = _THREAD_WAIT_CLOCK()
+            if shutdown_event.is_set():
+                for worker in tx_workers.values():
+                    worker.wait_idle(timeout=REAL_THREAD_JOIN_TIMEOUT_S)
 
             cycle_end = time.perf_counter()
             cycle_ms = 0.0
@@ -681,6 +1025,7 @@ def run_real_can_control_loop(
                     quat_desired=target_quat,
                     tau_raw=tau_raw,
                     tau_total=tau_to_send,
+                    ee_twist=rerun_ee_twist,
                     cycle_time=elapsed_s * 1000.0,
                     elapsed_s=elapsed_s,
                     q=current_q,
@@ -696,9 +1041,12 @@ def run_real_can_control_loop(
                     uart_transfer_kbps=0.0,
                 )
             step_count += 1
-            _reset_feedback_masks(runtimes, received_joint_masks)
     finally:
-        _safe_zero_and_disable(runtimes)
+        _stop_feedback_workers(feedback_workers)
+        if tx_workers:
+            _stop_tx_workers(tx_workers, finalize=True)
+        else:
+            _safe_zero_and_disable(runtimes)
         for runtime in runtimes:
             try:
                 runtime.transport.close()
@@ -737,6 +1085,7 @@ def run_real_control_with_bridge(
         raise ValueError("run_real_control_with_bridge requires bridge or bridge_factory")
     print("=" * 60)
     print(f"[Real Config] idle sleep while waiting feedback: {REAL_IDLE_SLEEP_S * 1000.0:.3f} ms")
+    print(f"[Real Config] rerun visualization: {Config.ENABLE_RERUN}")
     print(f"[Real Config] feedback-only diagnostics: {REAL_FEEDBACK_ONLY}")
     print("[Real Config] CAN loop trigger: complete active-arm feedback (nonblocking read)")
     print(f"      {control_title} ({arm})")
@@ -798,7 +1147,7 @@ def run_real_control_with_bridge(
                 time.sleep(1.0 / max(1.0, float(_env_int("AM_D02_REAL_VIEWER_FPS", 30))))
         except KeyboardInterrupt:
             shutdown_event.set()
-        can_thread.join(timeout=2.0)
+        can_thread.join(timeout=REAL_THREAD_JOIN_TIMEOUT_S)
     finally:
         if viewer is not None:
             viewer.close()

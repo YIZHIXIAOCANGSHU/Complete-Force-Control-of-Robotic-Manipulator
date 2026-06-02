@@ -118,12 +118,12 @@ def test_real_left_routes_to_real_entrypoint():
     assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "left"]
 
 
-def test_real_defaults_to_viewer_enabled_and_rerun_disabled():
+def test_real_defaults_to_viewer_and_rerun_enabled():
     completed = _run_script("real", "left")
 
     assert completed.returncode == 0, completed.stderr
     assert "AM_D02_ENABLE_VIEWER=1" in completed.stdout
-    assert "AM_D02_ENABLE_RERUN=0" in completed.stdout
+    assert "AM_D02_ENABLE_RERUN=1" in completed.stdout
 
 
 def test_real_right_routes_to_real_entrypoint():

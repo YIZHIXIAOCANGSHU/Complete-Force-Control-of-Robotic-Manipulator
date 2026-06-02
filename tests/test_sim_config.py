@@ -228,6 +228,69 @@ def test_config_controls_both_arms():
     assert Config.FIX_UNCONTROLLED_JOINTS is True
 
 
+def test_sim_threading_config_defaults_are_exposed():
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.path.insert(0, "python")
+        from config import Config
+        print(Config.SIM_VIEWER_FPS)
+        print(Config.SIM_RERUN_QUEUE_SIZE)
+        print(Config.SIM_UDP_TIMEOUT_S)
+        print(Config.RERUN_MAX_HZ)
+        """
+    )
+    env = os.environ.copy()
+    for name in (
+        "AM_D02_SIM_VIEWER_FPS",
+        "AM_D02_SIM_RERUN_QUEUE_SIZE",
+        "AM_D02_SIM_UDP_TIMEOUT_S",
+        "AM_D02_RERUN_MAX_HZ",
+    ):
+        env.pop(name, None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.stdout.strip().splitlines() == ["60.0", "512", "0.002", "30.0"]
+
+
+def test_sim_threading_config_can_be_overridden_by_env():
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.path.insert(0, "python")
+        from config import Config
+        print(Config.SIM_VIEWER_FPS)
+        print(Config.SIM_RERUN_QUEUE_SIZE)
+        print(Config.SIM_UDP_TIMEOUT_S)
+        print(Config.RERUN_MAX_HZ)
+        """
+    )
+    env = os.environ.copy()
+    env["AM_D02_SIM_VIEWER_FPS"] = "24"
+    env["AM_D02_SIM_RERUN_QUEUE_SIZE"] = "3"
+    env["AM_D02_SIM_UDP_TIMEOUT_S"] = "0.01"
+    env["AM_D02_RERUN_MAX_HZ"] = "45"
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.stdout.strip().splitlines() == ["24.0", "3", "0.01", "45.0"]
+
+
 def test_fix_uncontrolled_joints_marks_only_non_controlled_joints_fixed():
     from sim_scene import _fix_uncontrolled_joints
 
@@ -274,7 +337,7 @@ def test_initial_target_qpos_keeps_elbow_raised_and_home_qpos_starts_safe():
     np.testing.assert_allclose(Config.LEFT_HOME_QPOS, np.zeros(Config.ARM_JOINTS))
     np.testing.assert_allclose(
         Config.RIGHT_HOME_QPOS,
-        [0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0],
     )
     np.testing.assert_allclose(
         Config.HOME_QPOS,
@@ -369,6 +432,25 @@ def test_mujoco_initial_tcp_frames_are_aligned_between_arms():
         robot_forward_base,
         atol=2e-5,
     )
+
+
+def test_mujoco_env_reports_tcp_twist_from_jacobian_and_qvel():
+    pytest.importorskip("mujoco")
+
+    from sim_env import MujocoSimEnv
+
+    env = MujocoSimEnv()
+    env.reset(Config.HOME_QPOS)
+    qvel = np.linspace(-0.3, 0.4, Config.NUM_JOINTS)
+    env.set_qvel(qvel)
+    env.forward()
+
+    tcp_twist = env.get_all_ee_twist()
+
+    assert tcp_twist.shape == (Config.NUM_ARMS, 6)
+    for arm in range(Config.NUM_ARMS):
+        expected = env.get_jacobian_7dof(arm) @ qvel[env.arm_slice(arm)]
+        np.testing.assert_allclose(tcp_twist[arm], expected, atol=1e-12)
 
 
 def test_target_frame_marker_uses_body_origin_and_zero_pose_axes():

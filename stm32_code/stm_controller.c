@@ -520,6 +520,7 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
                                         target_quat[arm]);
     stm_controller_compute_tcp_velocity(&arm_kinematics[arm],
                                         filtered_qd + offset, v_tcp[arm]);
+    memcpy(out->ee_twist[arm], v_tcp[arm], sizeof(double) * 6);
     if (control_check_safety_arm(arm, in->q + offset, filtered_qd + offset) < 0) {
       stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
                                         active_arm_mask);

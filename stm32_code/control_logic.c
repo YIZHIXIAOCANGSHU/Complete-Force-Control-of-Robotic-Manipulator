@@ -220,6 +220,40 @@ static void control_desired_tcp_linear_velocity(const double pos_error[3],
   v_des[2] = speed * pos_error[2] / distance;
 }
 
+static void control_limit_linear_wrench_by_tcp_speed(const double v_ee[6],
+                                                     double F[6]) {
+  double speed_limit = END_EFFECTOR_REAL_SPEED_LIMIT_MPS;
+  double linear_speed = sqrt(v_ee[0] * v_ee[0] + v_ee[1] * v_ee[1] +
+                             v_ee[2] * v_ee[2]);
+  double dir[3];
+
+  if (!isfinite(speed_limit) || speed_limit <= 0.0 ||
+      !isfinite(linear_speed) || linear_speed <= speed_limit ||
+      linear_speed <= 1e-12) {
+    return;
+  }
+
+  dir[0] = v_ee[0] / linear_speed;
+  dir[1] = v_ee[1] / linear_speed;
+  dir[2] = v_ee[2] / linear_speed;
+
+  double accelerating_force = F[0] * dir[0] + F[1] * dir[1] + F[2] * dir[2];
+  if (isfinite(accelerating_force) && accelerating_force > 0.0) {
+    for (int i = 0; i < 3; ++i) {
+      F[i] -= accelerating_force * dir[i];
+    }
+  }
+
+  double brake_damping =
+      (CARTESIAN_D[0] + CARTESIAN_D[1] + CARTESIAN_D[2]) / 3.0;
+  if (isfinite(brake_damping) && brake_damping > 0.0) {
+    double brake_force = brake_damping * (linear_speed - speed_limit);
+    for (int i = 0; i < 3; ++i) {
+      F[i] -= brake_force * dir[i];
+    }
+  }
+}
+
 /* ================================================================
  *  公开 API
  * ================================================================ */
@@ -342,22 +376,21 @@ void control_step_v2_arm_with_reference(
     }
   }
 
-  /* 3. 笛卡尔空间主任务力矩。平移轴跟踪期望 TCP 线速度；
-   * 姿态轴本轮通常使用零期望角速度阻尼。
+  /* 3. 笛卡尔空间主任务力。平移轴跟踪期望 TCP 线速度；
+   * 姿态轴本轮通常使用零期望角速度阻尼。若估计 TCP 线速度超过真机限速，
+   * 去除继续沿当前速度方向加速的线性力，并追加反向制动。
    */
+  double F[6] = {0};
+  for (int j = 0; j < 6; j++) {
+    double v_ref = ref_twist != NULL ? ref_twist[j] : 0.0;
+    F[j] = CARTESIAN_K[j] * e6[j] + CARTESIAN_D[j] * (v_ref - v_ee[j]);
+  }
+  control_limit_linear_wrench_by_tcp_speed(v_ee, F);
+
   double tau_task[ARM_JOINTS] = {0};
   for (int i = 0; i < ARM_JOINTS; i++) {
     for (int j = 0; j < 6; j++) {
-      double v_ref = ref_twist != NULL ? ref_twist[j] : 0.0;
-      double F_j;
-      if (j < 3) {
-        F_j = CARTESIAN_K[j] * e6[j] +
-              CARTESIAN_D[j] * (v_ref - v_ee[j]);
-      } else {
-        F_j = CARTESIAN_K[j] * e6[j] +
-              CARTESIAN_D[j] * (v_ref - v_ee[j]);
-      }
-      tau_task[i] += kinematics->J[j][i] * F_j;
+      tau_task[i] += kinematics->J[j][i] * F[j];
     }
   }
 

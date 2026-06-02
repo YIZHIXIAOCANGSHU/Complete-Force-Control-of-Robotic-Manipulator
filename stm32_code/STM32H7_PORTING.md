@@ -567,6 +567,7 @@ tau_task = J(q)^T * F
 ```
 
 平移轴的 `ref_twist[0..2]` 来自 S 曲线切向速度；姿态轴本轮使用 `ref_twist[3..5] = 0`，姿态靠 slerp 参考姿态和阻抗误差收敛。
+若 `norm(v_tcp_actual[0..2])` 超过 `END_EFFECTOR_REAL_SPEED_LIMIT_MPS`，控制器会去掉沿当前 TCP 线速度方向继续加速的线性任务力，并按平移阻尼均值追加反向制动力。这是 C 核心内部的真实 TCP 速度保护，不替代驱动器自身速度/力矩安全。
 
 ### 动力学补偿、限幅和输出
 
@@ -578,7 +579,7 @@ tau = tau_task + tau_gc
 tau = saturate(tau, JOINT_TORQUE_LIMIT_*)
 ```
 
-当前控制核心保留绝对力矩限幅，但没有力矩斜率限制；也没有在 C 核心内部做 TCP 速度硬限幅或预判式关节速度限幅。关节速度超过 `JOINT_VEL_LIMIT = 5.0 rad/s` 会触发 safety latch。
+当前控制核心保留绝对力矩限幅和真实 TCP 速度制动保护，但没有力矩斜率限制或预判式关节速度限幅。关节速度超过 `JOINT_VEL_LIMIT = 5.0 rad/s` 会触发 safety latch。
 
 ## 核心配置参数调节
 
@@ -625,6 +626,7 @@ F = K * error + D * (ref_twist - J(q) * qd)
 | 参数 | 当前值 | 含义 | 调节影响 |
 | --- | --- | --- | --- |
 | `END_EFFECTOR_LINEAR_SPEED_MPS` | `0.05` | 五次 S 曲线峰值 TCP 线速度，单位 `m/s` | 调大路径更快，但加速度、力矩和关节速度峰值都会上升 |
+| `END_EFFECTOR_REAL_SPEED_LIMIT_MPS` | `0.05` | 基于 `J(q) * qd_filtered` 的真实 TCP 线速度限幅，单位 `m/s` | 调大允许实际末端更快；调小会更早进入制动 |
 | `END_EFFECTOR_TARGET_POS_TOL_M` | `0.0025` | 位置到点容差，单位 `m` | 调小更精确但更难判定到点；调大更容易结束 |
 | `END_EFFECTOR_TARGET_ORI_TOL_RAD` | `0.005` | 姿态到点容差，单位 `rad` | 调小姿态要求更严，可能停留更久 |
 | `END_EFFECTOR_ARRIVAL_SPEED_TOL_MPS` | `0.02` | 到点时 TCP 切向速度阈值，单位 `m/s` | 调小要求更稳才到点；调大可能还在滑动时判定到点 |

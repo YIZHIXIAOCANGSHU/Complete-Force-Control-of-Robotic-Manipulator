@@ -33,6 +33,7 @@ typedef struct {
   int status;
   double ee_pos[NUM_ARMS][3];
   double ee_quat[NUM_ARMS][4];
+  double ee_twist[NUM_ARMS][6];
   double traj_t;
   int step_count;
 } stm_output_t;

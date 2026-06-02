@@ -29,6 +29,7 @@ class RealControllerOutput:
     tau: np.ndarray
     ee_pos: np.ndarray
     ee_quat: np.ndarray
+    ee_twist: np.ndarray
     traj_t: float
     step_count: int
 
@@ -37,7 +38,7 @@ class RealControllerBridge:
     """Low-overhead stdin/stdout bridge for the C real controller."""
 
     _input_struct = struct.Struct("<HBBd14d14d3d6d8d")
-    _output_struct = struct.Struct("<Hi14d6d8ddi")
+    _output_struct = struct.Struct("<Hi14d6d8d12ddi")
 
     def __init__(self, executable: str | os.PathLike[str] = DEFAULT_CONTROLLER) -> None:
         self.executable = Path(executable)
@@ -111,8 +112,9 @@ class RealControllerBridge:
             tau=np.asarray(parsed[2:16], dtype=np.float64),
             ee_pos=np.asarray(parsed[16:22], dtype=np.float64).reshape(NUM_ARMS, 3),
             ee_quat=np.asarray(parsed[22:30], dtype=np.float64).reshape(NUM_ARMS, 4),
-            traj_t=float(parsed[30]),
-            step_count=int(parsed[31]),
+            ee_twist=np.asarray(parsed[30:42], dtype=np.float64).reshape(NUM_ARMS, 6),
+            traj_t=float(parsed[42]),
+            step_count=int(parsed[43]),
         )
 
     def compute(

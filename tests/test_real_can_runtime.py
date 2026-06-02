@@ -60,6 +60,18 @@ class FakeTransport:
         self.closed = True
 
 
+class BlockingTransport(FakeTransport):
+    def __init__(self, config=None, frames=None) -> None:
+        super().__init__(config=config, frames=frames)
+        self.block_event = runtime.threading.Event()
+        self.entered_event = runtime.threading.Event()
+
+    def send_mit_torque(self, motor_id: int, torque: float) -> bytes:
+        self.entered_event.set()
+        self.block_event.wait(timeout=1.0)
+        return super().send_mit_torque(motor_id, torque)
+
+
 class StopOnZeroTransport(FakeTransport):
     def send_mit_torque(self, motor_id: int, torque: float) -> bytes:
         result = super().send_mit_torque(motor_id, torque)
@@ -116,6 +128,7 @@ class StopAfterOneBridge:
             tau=np.arange(1.0, Config.NUM_JOINTS + 1.0),
             ee_pos=np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float64),
             ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
+            ee_twist=np.array([[0.01, 0.02, 0.03, 0.1, 0.2, 0.3], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=np.float64),
             traj_t=0.123,
         )
 
@@ -142,6 +155,34 @@ class StopAfterTwoBridge:
             tau=np.ones(Config.NUM_JOINTS, dtype=np.float64),
             ee_pos=np.zeros((Config.NUM_ARMS, 3), dtype=np.float64),
             ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
+            ee_twist=np.zeros((Config.NUM_ARMS, 6), dtype=np.float64),
+            traj_t=float(len(self.calls)),
+        )
+
+
+class MovingTcpZeroTwistBridge:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def compute(self, active_arm_mask, elapsed_s, q, qd, body_q, target_pos, target_quat):
+        self.calls.append(
+            {
+                "active_arm_mask": int(active_arm_mask),
+                "elapsed_s": float(elapsed_s),
+                "q": np.asarray(q, dtype=np.float64).copy(),
+                "qd": np.asarray(qd, dtype=np.float64).copy(),
+            }
+        )
+        if len(self.calls) >= 2:
+            runtime.shutdown_event.set()
+        ee_pos = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
+        ee_pos[Config.LEFT_ARM, 0] = 0.01 * (len(self.calls) - 1)
+        return SimpleNamespace(
+            status=0,
+            tau=np.ones(Config.NUM_JOINTS, dtype=np.float64),
+            ee_pos=ee_pos,
+            ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
+            ee_twist=np.zeros((Config.NUM_ARMS, 6), dtype=np.float64),
             traj_t=float(len(self.calls)),
         )
 
@@ -190,6 +231,68 @@ class FakeRerunLogger:
 
     def close(self) -> None:
         self.closed = True
+
+
+def test_real_rerun_logger_coalesces_backlog_to_latest_payload(monkeypatch):
+    logged = []
+    monkeypatch.setattr(runtime.rerun_viz, "log_realtime_step", lambda **payload: logged.append(payload))
+
+    logger = runtime.RealRerunLogger(queue_size=4, max_hz=1000.0)
+    logger.log_step(step_count=1)
+    logger.log_step(step_count=2)
+    logger.log_step(step_count=3)
+    logger._stop_event.set()
+    logger._worker()
+
+    assert [payload["step_count"] for payload in logged] == [3]
+
+
+def test_real_tx_worker_coalesces_pending_torque_to_latest():
+    transport = BlockingTransport()
+    arm_runtime = runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", transport)
+    worker = runtime.RealTxWorker(arm_runtime, join_timeout_s=0.5)
+    first = np.ones(Config.NUM_JOINTS, dtype=np.float64)
+    second = np.full(Config.NUM_JOINTS, 2.0, dtype=np.float64)
+    third = np.full(Config.NUM_JOINTS, 3.0, dtype=np.float64)
+
+    try:
+        worker.start()
+        worker.submit_torque(first)
+        assert transport.entered_event.wait(timeout=1.0)
+        worker.submit_torque(second)
+        worker.submit_torque(third)
+        transport.block_event.set()
+        worker.wait_idle(timeout=1.0)
+    finally:
+        worker.stop()
+
+    nonzero = [cmd for cmd in transport.commands if cmd[0] == "torque" and cmd[2] not in (0.0, None)]
+    assert [cmd[1] for cmd in nonzero[: Config.ARM_JOINTS]] == list(range(1, 8))
+    assert [cmd[2] for cmd in nonzero[: Config.ARM_JOINTS]] == [1.0] * Config.ARM_JOINTS
+    assert [cmd[2] for cmd in nonzero[-Config.ARM_JOINTS :]] == [3.0] * Config.ARM_JOINTS
+    assert all(cmd[2] != 2.0 for cmd in nonzero)
+
+
+def test_real_feedback_worker_publishes_complete_arm_snapshot_across_reads():
+    chunks = [
+        [_feedback_frame(i) for i in range(1, 4)],
+        [_feedback_frame(i) for i in range(4, 8)],
+    ]
+    transport = ChunkedFeedbackTransport(chunks)
+    arm_runtime = runtime.ArmCanRuntime(Config.RIGHT_ARM, "can1", transport)
+    hub = runtime.RealFeedbackHub()
+    worker = runtime.RealFeedbackWorker(arm_runtime, hub, poll_sleep_s=0.0, join_timeout_s=0.5)
+
+    try:
+        worker.start()
+        snapshot = hub.wait_for_next(runtime.ACTIVE_ARM_MASK["right"], last_seq=0, timeout_s=1.0)
+    finally:
+        worker.stop()
+
+    assert snapshot is not None
+    assert snapshot.seq == 1
+    np.testing.assert_allclose(snapshot.q[Config.ARM_JOINTS :], [0.1 * i for i in range(1, 8)])
+    np.testing.assert_allclose(snapshot.qd[Config.ARM_JOINTS :], [0.01 * i for i in range(1, 8)])
 
 
 class FakeEnv:
@@ -376,6 +479,38 @@ def test_real_left_maps_can0_ids_1_to_7_to_global_left_arm_and_sends_ids_1_to_7(
     assert sent_torque_ids == list(range(1, 8))
 
 
+def test_real_both_uses_independent_tx_workers_for_left_and_right_can():
+    left_transport = FakeTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
+    right_transport = FakeTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
+    runtimes = (
+        runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", left_transport),
+        runtime.ArmCanRuntime(Config.RIGHT_ARM, "can1", right_transport),
+    )
+    bridge = StopAfterOneBridge()
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_control_loop(
+            mode="both",
+            bridge=bridge,
+            runtimes=runtimes,
+            env=None,
+            viewer=None,
+            startup_enable=False,
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    assert len(bridge.calls) == 1
+    assert bridge.calls[0]["active_arm_mask"] == runtime.ACTIVE_ARM_MASK["both"]
+    left_torques = [cmd for cmd in left_transport.commands if cmd[0] == "torque" and cmd[2] not in (0.0, None)]
+    right_torques = [cmd for cmd in right_transport.commands if cmd[0] == "torque" and cmd[2] not in (0.0, None)]
+    assert [cmd[1] for cmd in left_torques] == list(range(1, 8))
+    assert [cmd[2] for cmd in left_torques] == [float(i) for i in range(1, 8)]
+    assert [cmd[1] for cmd in right_torques] == list(range(1, 8))
+    assert [cmd[2] for cmd in right_torques] == [float(i) for i in range(8, 15)]
+
+
 def test_real_feedback_can_accumulate_across_multiple_reads_before_control():
     transport = ChunkedFeedbackTransport(
         [
@@ -514,6 +649,58 @@ def test_feedback_timeout_budget_starts_after_startup_enable(monkeypatch):
 
     assert transport.enable_calls == Config.ARM_JOINTS
     assert len(bridge.calls) == 1
+
+
+def test_real_feedback_timeout_reports_missing_motors_from_hub_masks(monkeypatch, capsys):
+    monkeypatch.setattr(runtime, "CAN_FEEDBACK_TIMEOUT_S", 0.003)
+    monkeypatch.setattr(runtime, "REAL_FEEDBACK_REQUEST_INTERVAL_S", 0.0005)
+    left_transport = ChunkedFeedbackTransport([[_feedback_frame(i) for i in range(1, 8)]])
+    right_transport = ChunkedFeedbackTransport([[_feedback_frame(i) for i in range(1, 5)]])
+    runtimes = (
+        runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", left_transport),
+        runtime.ArmCanRuntime(Config.RIGHT_ARM, "can1", right_transport),
+    )
+    bridge = StopAfterOneBridge()
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_control_loop(
+            mode="both",
+            bridge=bridge,
+            runtimes=runtimes,
+            env=None,
+            viewer=None,
+            startup_enable=False,
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    captured = capsys.readouterr().out
+    assert bridge.calls == []
+    assert "feedback timeout" in captured
+    assert "can1: motor id 5,6,7" in captured
+    assert "can0: motor id" not in captured
+
+
+def test_real_external_shutdown_zeroes_and_disables_active_arm():
+    transport = FakeTransport(frames=[])
+    runtimes = (runtime.ArmCanRuntime(Config.RIGHT_ARM, "can1", transport),)
+
+    runtime.shutdown_event.set()
+    try:
+        runtime.run_real_can_control_loop(
+            mode="right",
+            bridge=StopAfterOneBridge(),
+            runtimes=runtimes,
+            shared_state=runtime.RealSharedState(),
+            startup_enable=False,
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    assert ("torque", 1, 0.0) in transport.commands
+    assert ("disable", 7, None) in transport.commands
+    assert transport.closed is True
 
 
 def test_real_safety_status_zeroes_and_disables_active_arm():
@@ -710,6 +897,7 @@ def test_real_control_step_logs_full_rerun_payload(monkeypatch):
             "tau_raw",
             "tau_total",
             "tau_actual",
+            "ee_twist",
             "pos_actual",
             "pos_desired",
             "quat_actual",
@@ -721,6 +909,8 @@ def test_real_control_step_logs_full_rerun_payload(monkeypatch):
     np.testing.assert_allclose(payload["tau_raw"], np.arange(1.0, Config.NUM_JOINTS + 1.0))
     np.testing.assert_allclose(payload["tau_total"][: Config.ARM_JOINTS], np.arange(1.0, Config.ARM_JOINTS + 1.0))
     np.testing.assert_allclose(payload["tau_total"][Config.ARM_JOINTS :], 0.0)
+    np.testing.assert_allclose(payload["ee_twist"][0], [0.01, 0.02, 0.03, 0.1, 0.2, 0.3])
+    np.testing.assert_allclose(payload["ee_twist"][1], 0.0)
     np.testing.assert_allclose(payload["tau_actual"][: Config.ARM_JOINTS], [0.001 * i for i in range(1, 8)])
     assert payload["elapsed_s"] == pytest.approx(0.1)
     assert payload["right_j7_diag"]["joint"] == "right/J7"
@@ -754,6 +944,7 @@ def test_real_feedback_only_mirrors_feedback_without_control_bridge(monkeypatch)
     assert len(logger.payloads) == 1
     np.testing.assert_allclose(logger.payloads[0]["tau_raw"], 0.0)
     np.testing.assert_allclose(logger.payloads[0]["tau_total"], 0.0)
+    np.testing.assert_allclose(logger.payloads[0]["ee_twist"], 0.0)
     assert logger.payloads[0]["right_j7_diag"]["qd"] == pytest.approx(0.07)
 
 
@@ -784,6 +975,36 @@ def test_real_rerun_logging_is_throttled_before_enqueue(monkeypatch):
         runtime.shutdown_event.clear()
 
     assert [payload["step_count"] for payload in logger.payloads] == [0]
+
+
+def test_real_rerun_tcp_speed_falls_back_to_position_delta_when_controller_twist_is_zero(monkeypatch):
+    times = iter([0.0, 0.1, 0.1, 0.2, 0.2])
+    monkeypatch.setattr(runtime.time, "perf_counter", lambda: next(times, 0.2))
+    monkeypatch.setattr(runtime.Config, "RERUN_LOG_STRIDE", 1)
+
+    first_cycle = [_feedback_frame(i) for i in range(1, 8)]
+    second_cycle = [_feedback_frame(i) for i in range(1, 8)]
+    transport = ChunkedFeedbackTransport([first_cycle, second_cycle])
+    runtimes = (runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", transport),)
+    logger = FakeRerunLogger()
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_can_control_loop(
+            mode="left",
+            bridge=MovingTcpZeroTwistBridge(),
+            runtimes=runtimes,
+            shared_state=runtime.RealSharedState(),
+            rerun_logger=logger,
+            startup_enable=False,
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    assert len(logger.payloads) == 2
+    np.testing.assert_allclose(logger.payloads[0]["ee_twist"], 0.0)
+    np.testing.assert_allclose(logger.payloads[1]["ee_twist"][Config.LEFT_ARM, :3], [0.1, 0.0, 0.0])
+    np.testing.assert_allclose(logger.payloads[1]["ee_twist"][Config.RIGHT_ARM], 0.0)
 
 
 def test_real_control_waits_for_mirror_target_initialization_before_compute():

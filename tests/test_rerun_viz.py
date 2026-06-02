@@ -112,11 +112,14 @@ def test_sim_udp_server_passes_step_count_to_rerun_logger():
     source = (Path(__file__).resolve().parents[1] / "python" / "sim" / "udp_server.py").read_text(
         encoding="utf-8"
     )
-    call_start = source.index("rerun_viz.log_realtime_step(")
-    call_end = source.index("env.write_state_packet(state_packet)", call_start)
-    rerun_call = source[call_start:call_end]
+    payload_start = source.index("rerun_payload = {")
+    payload_end = source.index("env.write_state_packet(state_packet)", payload_start)
+    payload_block = source[payload_start:payload_end]
 
-    assert "step_count=step_count" in rerun_call
+    assert "SimRerunLogger()" in source
+    assert "rerun_logger.log_step(**rerun_payload)" in source
+    assert '"step_count": step_count' in payload_block
+    assert '"ee_twist": env.get_all_ee_twist()' in payload_block
 
 
 def test_setup_realtime_styles_blueprint_does_not_reuse_tile_objects(monkeypatch):
@@ -164,6 +167,11 @@ def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
     assert names_by_origin["/arms/right/rotation/Yaw"] == "Right Rotation Yaw (deg)"
     assert names_by_origin["/arms/left/position_error/X"] == "Left Position Error X (mm)"
     assert names_by_origin["/arms/right/position_error/Z"] == "Right Position Error Z (mm)"
+    assert names_by_origin["/arms/left/tcp_speed/linear"] == "Left TCP Linear Speed (m/s)"
+    assert names_by_origin["/arms/right/tcp_speed/linear"] == "Right TCP Linear Speed (m/s)"
+    assert names_by_origin["/arms/left/tcp_velocity/X"] == "Left TCP Velocity X (m/s)"
+    assert names_by_origin["/arms/right/tcp_velocity/Z"] == "Right TCP Velocity Z (m/s)"
+    assert names_by_origin["/limits/tcp_speed"] == "TCP Speed Limit (m/s)"
     assert names_by_origin["/arms/left/rotation_error/Roll"] == "Left Rotation Error Roll (deg)"
     assert names_by_origin["/arms/right/rotation_error/Yaw"] == "Right Rotation Error Yaw (deg)"
     assert names_by_origin["/arms/left/joint_q/J1"] == "Left Joint Q J1 (rad)"
@@ -201,6 +209,7 @@ def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
         "Right Joint Q",
         "Left Joint QD",
         "Right Joint QD",
+        "TCP Speed",
         "Left Torque",
         "Right Torque",
         "Left Torque Gap",
@@ -278,6 +287,34 @@ def test_log_realtime_step_logs_torque_gap_by_arm(monkeypatch):
     assert _logged_scalar(dummy_rr, "performance/elapsed_s") == 0.001
 
 
+def test_log_realtime_step_logs_tcp_speed_and_velocity(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+
+    rerun_viz.log_realtime_step(
+        t=0.1,
+        pos_actual=np.zeros((2, 3), dtype=np.float64),
+        pos_desired=np.zeros((2, 3), dtype=np.float64),
+        quat_actual=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        quat_desired=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        tau_total=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        ee_twist=np.array(
+            [[0.003, 0.004, 0.0, 0.1, 0.2, 0.3], [0.0, 0.0, -0.002, 0.0, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        cycle_time=1.25,
+        step_count=0,
+    )
+
+    assert _logged_scalar(dummy_rr, "arms/left/tcp_velocity/X/value") == pytest.approx(0.003)
+    assert _logged_scalar(dummy_rr, "arms/left/tcp_velocity/Y/value") == pytest.approx(0.004)
+    assert _logged_scalar(dummy_rr, "arms/left/tcp_speed/linear/value") == pytest.approx(0.005)
+    assert _logged_scalar(dummy_rr, "arms/right/tcp_velocity/Z/value") == pytest.approx(-0.002)
+    assert _logged_scalar(dummy_rr, "arms/right/tcp_speed/linear/value") == pytest.approx(0.002)
+    assert _logged_scalar(dummy_rr, "limits/tcp_speed/value") == pytest.approx(0.05)
+
+
 def test_log_realtime_step_logs_joint_safety_margins_and_warning(monkeypatch):
     dummy_rr = DummyRR()
     monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
@@ -285,7 +322,7 @@ def test_log_realtime_step_logs_joint_safety_margins_and_warning(monkeypatch):
 
     q = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
     qd = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
-    qd[0] = 4.05
+    qd[0] = rerun_viz.Config.JOINT_VEL_LIMIT + 0.05
     safe_min, safe_max = rerun_viz._joint_safe_limits_rad()
     q[1] = safe_min[1] - 0.001
     q[rerun_viz.Config.ARM_JOINTS] = safe_max[rerun_viz.Config.ARM_JOINTS] + 0.001

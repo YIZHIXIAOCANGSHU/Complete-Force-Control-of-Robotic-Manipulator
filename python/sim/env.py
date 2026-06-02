@@ -319,6 +319,17 @@ class MujocoSimEnv:
         """获取左右 TCP 四元数，形状为 (2, 4)。"""
         return self.data.xquat[self.ee_body_ids].copy()
 
+    def get_ee_twist(self, arm: int = Config.LEFT_ARM) -> np.ndarray:
+        """获取指定 TCP 的 6D 速度 [vx, vy, vz, wx, wy, wz]。"""
+        return self.get_jacobian_7dof(arm) @ self.get_arm_qvel(arm)
+
+    def get_all_ee_twist(self) -> np.ndarray:
+        """获取左右 TCP 6D 速度，形状为 (2, 6)。"""
+        twist = np.empty((Config.NUM_ARMS, 6), dtype=np.float64)
+        for arm in range(Config.NUM_ARMS):
+            twist[arm] = self.get_ee_twist(arm)
+        return twist
+
     def get_target_frame_origin_base(self) -> np.ndarray:
         """获取 Body0422 动态目标坐标系原点在 base/world 下的位置。"""
         if self.target_frame_body_id >= 0:

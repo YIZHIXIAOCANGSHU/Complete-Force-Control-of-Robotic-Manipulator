@@ -135,18 +135,20 @@ AM_D02_CAN_DATA_BITRATE=5000000
 AM_D02_CAN_FORCE_FD=1
 AM_D02_CAN_CONFIGURE_INTERFACE=0
 AM_D02_CAN_FEEDBACK_TIMEOUT_S=0.10
+AM_D02_REAL_THREAD_JOIN_TIMEOUT_S=2.0
 ```
 
 真机模式启动后会拉起一个 MuJoCo viewer 做镜像对照和目标输入界面：
 
-- CAN 控制线程负责收真实电机反馈、调用 `c_interface/real/real_controller`、下发 MIT torque。
+- CAN 链路内部使用多线程流水线：feedback worker 持续收真实电机反馈，控制线程只消费最新完整 active-arm 快照并调用 `c_interface/real/real_controller`，每个 CAN 接口各有 TX worker 下发 MIT torque。
 - 主线程负责 MuJoCo viewer，把真实 `q[14] / qd[14]` 镜像到模型中，并读取左右目标块拖拽后的目标位姿。
 - MuJoCo 在 real 模式下不跑真实动力学，也不把 `tau` 施加到物理仿真；它只显示真机反馈姿态、当前 TCP 和目标块。
 - 第一轮完整反馈后，viewer 会用真实关节角初始化，并把目标块放到当前 TCP，避免启动瞬间追旧目标。
 
-如果启用 `AM_D02_ENABLE_RERUN=1`，real 模式会记录完整闭环数据：`q[14]`、`qd[14]`、C 输出
+real 模式默认启用 Rerun，会记录完整闭环数据：`q[14]`、`qd[14]`、C 输出
 `tau_total[14]`、CAN 回传 `tau_actual[14]`、`torque_gap`、TCP 实际/目标位姿、位置/姿态误差和
 控制链路周期。单臂模式下只把当前激活臂作为有效控制对象；未激活臂不会参与反馈等待、控制计算或安全恢复。
+如需关闭，可用 `AM_D02_ENABLE_RERUN=0 ./run.sh real right c`。
 
 如果反馈超时、CAN 异常、viewer 关闭、Ctrl+C 或 C 控制器返回 `status < 0`，程序会对当前激活臂发送零力矩并 disable，然后退出。
 
@@ -158,6 +160,7 @@ AM_D02_VENV_DIR=.venv
 AM_D02_ENABLE_VIEWER=1
 AM_D02_ENABLE_RERUN=1
 AM_D02_RERUN_LOG_STRIDE=10
+AM_D02_RERUN_MAX_HZ=30
 AM_D02_FIX_UNCONTROLLED_JOINTS=1
 AM_D02_ENABLE_BODY_GUI=1
 AM_D02_MC_SAMPLES=50000
@@ -166,6 +169,8 @@ AM_D02_MC_PROGRESS_INTERVAL=200
 AM_D02_MC_MAX_VIS_POINTS=3000
 AM_D02_MC_MAX_HULL_POINTS=12000
 ```
+
+`AM_D02_RERUN_MAX_HZ` 是 Rerun 最大发送频率上限；控制频率很高时，日志线程会合并积压旧帧并只发送最新状态，避免 Rerun gRPC 接收端 backpressure。
 
 ## 开发与验证
 

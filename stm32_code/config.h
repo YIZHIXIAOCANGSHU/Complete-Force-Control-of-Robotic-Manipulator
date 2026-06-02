@@ -79,13 +79,13 @@
  * KD_CART_* 调大: 阻尼更强、超调更小，但过大可能放大速度噪声并让动作发涩。
  * XYZ 单位近似 N/m；ROLL/PITCH/YAW 作用在轴角姿态误差上。
  */
-#define KP_CART_X 170.0
-#define KP_CART_Y 170.0
-#define KP_CART_Z 170.0
+#define KP_CART_X 270.0
+#define KP_CART_Y 270.0
+#define KP_CART_Z 270.0
 
-#define KD_CART_X 65.0
-#define KD_CART_Y 65.0
-#define KD_CART_Z 65.0
+#define KD_CART_X 80.0
+#define KD_CART_Y 80.0
+#define KD_CART_Z 80.0
 
 #define KP_CART_ROLL 8.0
 #define KP_CART_PITCH 8.0
@@ -214,6 +214,7 @@
  * v_tcp = J(q) * qd 估计，并在笛卡尔阻尼项中闭环跟踪 ref_twist。
  */
 #define END_EFFECTOR_LINEAR_SPEED_MPS 0.05
+#define END_EFFECTOR_REAL_SPEED_LIMIT_MPS 0.05
 #define END_EFFECTOR_TARGET_POS_TOL_M 0.0025
 #define END_EFFECTOR_TARGET_ORI_TOL_RAD 0.005
 #define END_EFFECTOR_ARRIVAL_SPEED_TOL_MPS 0.02

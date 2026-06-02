@@ -300,6 +300,24 @@ def _setup_arm_realtime_styles() -> None:
                 ),
                 static=True,
             )
+            rr.log(
+                f"arms/{arm_label}/tcp_velocity/{axis}",
+                rr.SeriesLines(
+                    colors=[_AXIS_COLORS[axis]],
+                    names=[f"{arm_name} TCP Velocity {axis}"],
+                    widths=[2.0],
+                ),
+                static=True,
+            )
+        rr.log(
+            f"arms/{arm_label}/tcp_speed/linear",
+            rr.SeriesLines(
+                colors=[[230, 80, 80]],
+                names=[f"{arm_name} TCP Linear Speed"],
+                widths=[2.0],
+            ),
+            static=True,
+        )
         for axis in ("Roll", "Pitch", "Yaw"):
             rr.log(
                 f"arms/{arm_label}/rotation/{axis}",
@@ -375,6 +393,8 @@ def setup_realtime_styles():
             rr.log(f"arms/{arm_label}/position/{axis}/actual", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/position/{axis}/target", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/position_error/{axis}/value", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/tcp_velocity/{axis}/value", rr.Scalars(0.0))
+        rr.log(f"arms/{arm_label}/tcp_speed/linear/value", rr.Scalars(0.0))
         for axis in ("Roll", "Pitch", "Yaw"):
             rr.log(f"arms/{arm_label}/rotation/{axis}/actual", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/rotation/{axis}/target", rr.Scalars(0.0))
@@ -395,6 +415,12 @@ def setup_realtime_styles():
     rr.log("performance/link_transfer_kbps", rr.Scalars(0.0))
     rr.log("performance/stm32_calc_time", rr.Scalars(0.0))
     rr.log("performance/stm32_calc_hz", rr.Scalars(0.0))
+    rr.log(
+        "limits/tcp_speed",
+        rr.SeriesLines(colors=[[120, 120, 120]], names=["TCP Speed Limit"], widths=[1.5]),
+        static=True,
+    )
+    rr.log("limits/tcp_speed/value", rr.Scalars(float(Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS)))
 
     def link_latency_view():
         return rrb.TimeSeriesView(
@@ -470,6 +496,16 @@ def setup_realtime_styles():
             unit,
         )
 
+    def tcp_speed_view():
+        return rrb.Vertical(
+            rrb.TimeSeriesView(name="TCP Speed Limit (m/s)", origin="/limits/tcp_speed"),
+            rrb.TimeSeriesView(name="Left TCP Linear Speed (m/s)", origin="/arms/left/tcp_speed/linear"),
+            rrb.TimeSeriesView(name="Right TCP Linear Speed (m/s)", origin="/arms/right/tcp_speed/linear"),
+            arm_axis_view("left", "Left", "tcp_velocity", "TCP Velocity", ("X", "Y", "Z"), "m/s"),
+            arm_axis_view("right", "Right", "tcp_velocity", "TCP Velocity", ("X", "Y", "Z"), "m/s"),
+            name="TCP Speed",
+        )
+
     blueprint = rrb.Blueprint(
         rrb.Tabs(
             rrb.Spatial3DView(name="3D", origin="/trajectory_3d"),
@@ -485,6 +521,7 @@ def setup_realtime_styles():
             arm_joint_axis_view("right", "Right", "joint_q", "Joint Q", "rad"),
             arm_joint_axis_view("left", "Left", "joint_qd", "Joint QD", "rad/s"),
             arm_joint_axis_view("right", "Right", "joint_qd", "Joint QD", "rad/s"),
+            tcp_speed_view(),
             arm_joint_axis_view("left", "Left", "torque", "Torque", "N*m"),
             arm_joint_axis_view("right", "Right", "torque", "Torque", "N*m"),
             arm_joint_axis_view("left", "Left", "torque_gap", "Torque Gap", "N*m"),
@@ -520,6 +557,7 @@ def log_realtime_step(
     cycle_time: float,
     q: np.ndarray = None,
     qd: np.ndarray = None,
+    ee_twist: np.ndarray = None,
     tau_raw: np.ndarray = None,
     tau_actual: np.ndarray = None,
     elapsed_s: float = None,
@@ -573,6 +611,19 @@ def log_realtime_step(
         for arm, arm_label in enumerate(_ARM_LABELS[: len(qd_by_arm)]):
             for i, value in enumerate(qd_by_arm[arm]):
                 rr.log(f"arms/{arm_label}/joint_qd/J{i+1}/value", rr.Scalars(float(value)))
+
+    if ee_twist is not None:
+        ee_twist_by_arm = _as_arm_array(ee_twist, 6)
+        for arm, arm_label in enumerate(_ARM_LABELS[: len(ee_twist_by_arm)]):
+            linear_velocity = ee_twist_by_arm[arm, :3]
+            linear_speed = float(np.linalg.norm(linear_velocity))
+            for i, axis in enumerate(("X", "Y", "Z")):
+                rr.log(
+                    f"arms/{arm_label}/tcp_velocity/{axis}/value",
+                    rr.Scalars(float(linear_velocity[i])),
+                )
+            rr.log(f"arms/{arm_label}/tcp_speed/linear/value", rr.Scalars(linear_speed))
+        rr.log("limits/tcp_speed/value", rr.Scalars(float(Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS)))
         
     tau_by_arm = _as_arm_array(tau_total, Config.ARM_JOINTS)
     tau_raw_by_arm = None if tau_raw is None else _as_arm_array(tau_raw, Config.ARM_JOINTS)

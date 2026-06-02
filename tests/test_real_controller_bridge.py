@@ -13,14 +13,16 @@ MAGIC = 0xAA55
 MODE_CONTROL = 1
 MODE_FK_ONLY = 2
 INPUT_STRUCT = struct.Struct("<HBBd14d14d3d6d8d")
-OUTPUT_STRUCT = struct.Struct("<Hi14d6d8ddi")
+OUTPUT_STRUCT = struct.Struct("<Hi14d6d8d12ddi")
 
 
-def _build_packet(mode: int, active_arm_mask: int) -> bytes:
+def _build_packet(mode: int, active_arm_mask: int, *, qd_value: float = 0.0) -> bytes:
     q = np.zeros(14, dtype=np.float64)
     q[3] = np.pi / 2.0
     q[10] = np.pi / 2.0
     qd = np.zeros(14, dtype=np.float64)
+    qd[:7] = float(qd_value)
+    qd[7:] = float(qd_value)
     body_q = np.zeros(3, dtype=np.float64)
     target_pos = np.zeros((2, 3), dtype=np.float64)
     target_quat = np.tile([1.0, 0.0, 0.0, 0.0], (2, 1))
@@ -37,11 +39,11 @@ def _build_packet(mode: int, active_arm_mask: int) -> bytes:
     )
 
 
-def _exchange(mode: int, active_arm_mask: int):
+def _exchange(mode: int, active_arm_mask: int, *, qd_value: float = 0.0):
     subprocess.run(["make", "-C", "c_interface", "real_controller"], cwd=PROJECT_ROOT, check=True)
     completed = subprocess.run(
         [str(REAL_CONTROLLER)],
-        input=_build_packet(mode, active_arm_mask),
+        input=_build_packet(mode, active_arm_mask, qd_value=qd_value),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=PROJECT_ROOT,
@@ -52,11 +54,12 @@ def _exchange(mode: int, active_arm_mask: int):
     assert parsed[0] == MAGIC
     tau = np.asarray(parsed[2:16], dtype=np.float64)
     ee_pos = np.asarray(parsed[16:22], dtype=np.float64).reshape(2, 3)
-    return parsed[1], tau, ee_pos
+    ee_twist = np.asarray(parsed[30:42], dtype=np.float64).reshape(2, 6)
+    return parsed[1], tau, ee_pos, ee_twist
 
 
 def test_real_controller_left_mask_zeroes_right_arm_output():
-    status, tau, _ = _exchange(MODE_CONTROL, 1 << 0)
+    status, tau, _, _ = _exchange(MODE_CONTROL, 1 << 0)
 
     assert status == 0
     assert np.any(np.abs(tau[:7]) > 1e-9)
@@ -64,7 +67,7 @@ def test_real_controller_left_mask_zeroes_right_arm_output():
 
 
 def test_real_controller_right_mask_zeroes_left_arm_output():
-    status, tau, _ = _exchange(MODE_CONTROL, 1 << 1)
+    status, tau, _, _ = _exchange(MODE_CONTROL, 1 << 1)
 
     assert status == 0
     np.testing.assert_allclose(tau[:7], 0.0)
@@ -72,10 +75,23 @@ def test_real_controller_right_mask_zeroes_left_arm_output():
 
 
 def test_real_controller_fk_only_returns_pose_and_zero_torque():
-    status, tau, ee_pos = _exchange(MODE_FK_ONLY, (1 << 0) | (1 << 1))
+    status, tau, ee_pos, ee_twist = _exchange(MODE_FK_ONLY, (1 << 0) | (1 << 1))
 
     assert status == 0
     np.testing.assert_allclose(tau, 0.0)
     assert np.all(np.isfinite(ee_pos))
+    assert ee_twist.shape == (2, 6)
+    assert np.all(np.isfinite(ee_twist))
+    np.testing.assert_allclose(ee_twist, 0.0)
     assert np.linalg.norm(ee_pos[0]) > 0.01
     assert np.linalg.norm(ee_pos[1]) > 0.01
+
+
+def test_real_controller_fk_only_returns_active_arm_twist_and_zeroes_inactive_arm():
+    status, tau, _ee_pos, ee_twist = _exchange(MODE_FK_ONLY, 1 << 0, qd_value=0.25)
+
+    assert status == 0
+    np.testing.assert_allclose(tau, 0.0)
+    assert np.all(np.isfinite(ee_twist))
+    assert np.linalg.norm(ee_twist[0]) > 1e-9
+    np.testing.assert_allclose(ee_twist[1], 0.0)
