@@ -39,15 +39,25 @@ typedef struct {
 /**
  * @brief 单侧手臂控制逻辑，由 stm_controller_step_elapsed() 按 active_arm_mask 调用。
  *
- * 将当前机械臂末端与目标末端的差异投射到关节空间，同时在零空间(Null-space)维护首选姿态，
- * 最终输出经过重力与科氏力补偿的控制力矩 tau_out。
+ * 将当前机械臂末端与参考末端的差异投射到关节空间，并用 J*qd 估计 TCP 实际速度
+ * 以闭环跟踪参考 twist，最终输出经过重力与科氏力补偿的控制力矩 tau_out。
  *
- * @param target_pos 目标笛卡尔空间位置 [x, y, z] (Body0422 动态目标坐标)
- * @param target_quat 目标姿态四元数 [w, x, y, z]
+ * @param ref_pos 参考笛卡尔空间位置 [x, y, z] (Body0422 动态目标坐标)
+ * @param ref_quat 参考姿态四元数 [w, x, y, z]
+ * @param ref_twist 参考 TCP twist [vx, vy, vz, wx, wy, wz]
  * @param current_q 当前各关节角度 [q1..q7]
  * @param current_qd 当前各关节角速度 [qd1..qd7]
  * @param tau_out 传出计算得到的关节期望力矩 [tau1..tau7]
  */
+void control_step_v2_arm_with_reference(
+    int side, const double ref_pos[3], const double ref_quat[4],
+    const double ref_twist[6],
+    const double current_q[ARM_JOINTS],
+    const double current_qd[ARM_JOINTS],
+    const control_arm_kinematics_t *kinematics,
+    double tau_out[ARM_JOINTS]);
+
+/* 兼容旧调用：直接把最终目标当作参考点，并按目标方向生成默认线速度。 */
 void control_step_v2_arm_with_state(
     int side, const double target_pos[3], const double target_quat[4],
     const double current_q[ARM_JOINTS],

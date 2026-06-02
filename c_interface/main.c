@@ -9,6 +9,7 @@
  */
 
 #include "main_stm.h"
+#include "h7_clock_sim.h"
 #include "sim_interface.h"
 #include <stdio.h>
 #include <string.h>
@@ -36,9 +37,11 @@ int main(void) {
   
   stm_input_t stm_in;
   stm_output_t stm_out;
+  h7_clock_sim_t clock;
   int last_status = STM_STATUS_OK;
 
   memset(&stm_out, 0, sizeof(stm_out));
+  h7_clock_sim_init(&clock);
 
   printf("[INFO] Starting control loop...\n\n");
 
@@ -57,10 +60,10 @@ int main(void) {
     memcpy(stm_in.target_pos, target_pos, sizeof(target_pos));
     memcpy(stm_in.target_quat, target_quat, sizeof(target_quat));
 
-    /* -- 3c. 仿真按 MuJoCo 固定步长推进，路径时间必须使用同一个仿真 dt。
-     * 如果用 host 墙钟时间，viewer/Rerun/UDP 抖动会直接改变仿真中的参考速度。
+    /* -- 3c. 使用 host/H7 本地墙钟 elapsed 推进控制器内部时间。
+     * C 端内部用该时间推进 S 曲线参考点，同时用于 traj_t 和安全恢复计时。
      */
-    double elapsed_s = CONTROL_DT;
+    double elapsed_s = h7_clock_sim_elapsed_s(&clock);
     stm_step_elapsed(&stm_in, &stm_out, elapsed_s);
 
     /* -- 3d. 安全状态提示。仿真不退出，继续发送控制器给出的 0 力矩。 -- */
@@ -70,7 +73,7 @@ int main(void) {
       } else if (stm_out.status == STM_STATUS_WAITING_ZERO) {
         printf("[SAFETY] Waiting for all arm joint velocities to stay near zero.\n");
       } else if (stm_out.status == STM_STATUS_OK && last_status < 0) {
-        printf("[SAFETY] Recovery complete. Control resumed with a replanned path.\n");
+        printf("[SAFETY] Recovery complete. Control resumed.\n");
       }
       last_status = stm_out.status;
     }

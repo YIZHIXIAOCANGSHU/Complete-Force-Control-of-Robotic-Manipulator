@@ -16,11 +16,11 @@
 void stm_init(void);
 
 /**
- * @brief 执行一步控制循环，路径规划使用 host/H7 本地 elapsed time。
+ * @brief 执行一步控制循环，并使用 host/H7 本地 elapsed time 做累计计时。
  *
  * @param in        传感器输入与目标
  * @param out       力矩输出与状态
- * @param elapsed_s 距离上一轮 sim 控制计算的 H7 本地时间，单位秒
+ * @param elapsed_s 距离上一轮控制计算的 H7 本地时间，单位秒
  */
 void stm_step_elapsed(const stm_input_t* in, stm_output_t* out,
                       double elapsed_s);

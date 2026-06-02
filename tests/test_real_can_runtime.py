@@ -105,6 +105,9 @@ class StopAfterOneBridge:
                 "active_arm_mask": int(active_arm_mask),
                 "q": np.asarray(q, dtype=np.float64).copy(),
                 "qd": np.asarray(qd, dtype=np.float64).copy(),
+                "body_q": np.asarray(body_q, dtype=np.float64).copy(),
+                "target_pos": np.asarray(target_pos, dtype=np.float64).copy(),
+                "target_quat": np.asarray(target_quat, dtype=np.float64).copy(),
             }
         )
         runtime.shutdown_event.set()
@@ -114,23 +117,6 @@ class StopAfterOneBridge:
             ee_pos=np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float64),
             ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
             traj_t=0.123,
-        )
-
-
-class HighTorqueBridge:
-    def __init__(self, tau_value: float = 100.0) -> None:
-        self.tau_value = float(tau_value)
-        self.calls = []
-
-    def compute(self, active_arm_mask, elapsed_s, q, qd, body_q, target_pos, target_quat):
-        self.calls.append({"elapsed_s": float(elapsed_s), "active_arm_mask": int(active_arm_mask)})
-        runtime.shutdown_event.set()
-        return SimpleNamespace(
-            status=0,
-            tau=np.full(Config.NUM_JOINTS, self.tau_value, dtype=np.float64),
-            ee_pos=np.zeros((Config.NUM_ARMS, 3), dtype=np.float64),
-            ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
-            traj_t=0.0,
         )
 
 
@@ -144,6 +130,9 @@ class StopAfterTwoBridge:
                 "active_arm_mask": int(active_arm_mask),
                 "q": np.asarray(q, dtype=np.float64).copy(),
                 "qd": np.asarray(qd, dtype=np.float64).copy(),
+                "body_q": np.asarray(body_q, dtype=np.float64).copy(),
+                "target_pos": np.asarray(target_pos, dtype=np.float64).copy(),
+                "target_quat": np.asarray(target_quat, dtype=np.float64).copy(),
             }
         )
         if len(self.calls) >= 2:
@@ -612,7 +601,7 @@ def test_mirror_real_feedback_updates_only_active_arm_and_initializes_targets():
     np.testing.assert_allclose(target_quat, env.ee_quat)
 
 
-def test_mirror_real_feedback_initializes_active_arm_target_to_sim_initial_tcp_position_only():
+def test_mirror_real_feedback_initializes_active_arm_target_to_sim_initial_tcp_pose():
     env = FakeEnv()
     shared = runtime.RealSharedState()
     q = np.arange(1.0, Config.NUM_JOINTS + 1.0)
@@ -629,14 +618,14 @@ def test_mirror_real_feedback_initializes_active_arm_target_to_sim_initial_tcp_p
         shared,
         runtime.ACTIVE_ARM_MASK["right"],
         initial_target_pos,
+        initial_target_quat,
     )
 
     target_pos, target_quat = shared.snapshot_targets()
     np.testing.assert_allclose(target_pos[Config.LEFT_ARM], env.ee_pos[Config.LEFT_ARM])
     np.testing.assert_allclose(target_pos[Config.RIGHT_ARM], initial_target_pos[Config.RIGHT_ARM])
     np.testing.assert_allclose(target_quat[Config.LEFT_ARM], env.ee_quat[Config.LEFT_ARM])
-    np.testing.assert_allclose(target_quat[Config.RIGHT_ARM], env.ee_quat[Config.RIGHT_ARM])
-    assert not np.allclose(target_quat[Config.RIGHT_ARM], initial_target_quat[Config.RIGHT_ARM])
+    np.testing.assert_allclose(target_quat[Config.RIGHT_ARM], initial_target_quat[Config.RIGHT_ARM])
 
 
 def test_mirror_real_feedback_logs_real_start_target_summary(capsys):
@@ -655,19 +644,24 @@ def test_mirror_real_feedback_logs_real_start_target_summary(capsys):
         shared,
         runtime.ACTIVE_ARM_MASK["right"],
         initial_target_pos,
+        np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
     )
 
     captured = capsys.readouterr().out
     assert "[Real Target] right" in captured
     assert "target_pos=INIT_QPOS_TCP" in captured
-    assert "target_quat=current_real_tcp" in captured
+    assert "target_quat=INIT_QPOS_TCP" in captured
     assert "distance=" in captured
 
 
-def test_mirror_real_feedback_initializes_both_targets_to_sim_initial_tcp_position_only():
+def test_mirror_real_feedback_initializes_both_targets_to_sim_initial_tcp_pose():
     env = FakeEnv()
     shared = runtime.RealSharedState()
     initial_target_pos = np.array([[1.1, 1.2, 1.3], [2.1, 2.2, 2.3]], dtype=np.float64)
+    initial_target_quat = np.array(
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
     q = np.linspace(0.1, 1.4, Config.NUM_JOINTS)
     qd = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
     shared.update_feedback(q, qd, np.zeros(Config.NUM_JOINTS), runtime.ACTIVE_ARM_MASK["both"])
@@ -677,17 +671,17 @@ def test_mirror_real_feedback_initializes_both_targets_to_sim_initial_tcp_positi
         shared,
         runtime.ACTIVE_ARM_MASK["both"],
         initial_target_pos,
+        initial_target_quat,
     )
 
     target_pos, target_quat = shared.snapshot_targets()
     np.testing.assert_allclose(target_pos, initial_target_pos)
-    np.testing.assert_allclose(target_quat, env.ee_quat)
+    np.testing.assert_allclose(target_quat, initial_target_quat)
 
 
 def test_real_control_step_logs_full_rerun_payload(monkeypatch):
     times = iter([0.0, 0.1, 0.1, 0.1])
     monkeypatch.setattr(runtime.time, "perf_counter", lambda: next(times, 0.1))
-    monkeypatch.setattr(runtime, "REAL_TORQUE_SLEW_NM_PER_S", 30.0)
 
     transport = FakeTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
     runtimes = (runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", transport),)
@@ -725,46 +719,11 @@ def test_real_control_step_logs_full_rerun_payload(monkeypatch):
         ]
     ).issubset(payload)
     np.testing.assert_allclose(payload["tau_raw"], np.arange(1.0, Config.NUM_JOINTS + 1.0))
-    np.testing.assert_allclose(payload["tau_total"][: Config.ARM_JOINTS], [1.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0])
+    np.testing.assert_allclose(payload["tau_total"][: Config.ARM_JOINTS], np.arange(1.0, Config.ARM_JOINTS + 1.0))
     np.testing.assert_allclose(payload["tau_total"][Config.ARM_JOINTS :], 0.0)
     np.testing.assert_allclose(payload["tau_actual"][: Config.ARM_JOINTS], [0.001 * i for i in range(1, 8)])
     assert payload["elapsed_s"] == pytest.approx(0.1)
     assert payload["right_j7_diag"]["joint"] == "right/J7"
-
-
-def test_real_torque_slew_limiter_limits_step_commands(monkeypatch):
-    times = iter([0.0, 0.1, 0.1, 0.1])
-    monkeypatch.setattr(runtime.time, "perf_counter", lambda: next(times, 0.1))
-    monkeypatch.setattr(runtime, "REAL_TORQUE_SLEW_NM_PER_S", 30.0)
-
-    transport = FakeTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
-    runtimes = (runtime.ArmCanRuntime(Config.RIGHT_ARM, "can1", transport),)
-    logger = FakeRerunLogger()
-
-    runtime.shutdown_event.clear()
-    try:
-        runtime.run_real_can_control_loop(
-            mode="right",
-            bridge=HighTorqueBridge(100.0),
-            runtimes=runtimes,
-            shared_state=runtime.RealSharedState(),
-            rerun_logger=logger,
-            startup_enable=False,
-        )
-    finally:
-        runtime.shutdown_event.clear()
-
-    sent_nonzero = [
-        cmd[2]
-        for cmd in transport.commands
-        if cmd[0] == "torque" and cmd[2] not in (0.0, None)
-    ]
-    assert sent_nonzero == pytest.approx([3.0] * Config.ARM_JOINTS)
-    assert len(logger.payloads) == 1
-    np.testing.assert_allclose(logger.payloads[0]["tau_raw"][Config.ARM_JOINTS :], 100.0)
-    np.testing.assert_allclose(logger.payloads[0]["tau_total"][Config.ARM_JOINTS :], 3.0)
-    assert logger.payloads[0]["right_j7_diag"]["tau_cmd_raw"] == pytest.approx(100.0)
-    assert logger.payloads[0]["right_j7_diag"]["tau_cmd_sent"] == pytest.approx(3.0)
 
 
 def test_real_feedback_only_mirrors_feedback_without_control_bridge(monkeypatch):
@@ -798,6 +757,35 @@ def test_real_feedback_only_mirrors_feedback_without_control_bridge(monkeypatch)
     assert logger.payloads[0]["right_j7_diag"]["qd"] == pytest.approx(0.07)
 
 
+def test_real_rerun_logging_is_throttled_before_enqueue(monkeypatch):
+    times = iter([0.0, 0.1, 0.1, 0.2, 0.2])
+    monkeypatch.setattr(runtime.time, "perf_counter", lambda: next(times, 0.2))
+    monkeypatch.setattr(runtime.Config, "RERUN_LOG_STRIDE", 2)
+
+    first_cycle = [_feedback_frame(i) for i in range(1, 8)]
+    second_cycle = [_feedback_frame(i) for i in range(1, 8)]
+    for frame in second_cycle:
+        frame.position += 1.0
+    transport = ChunkedFeedbackTransport([first_cycle, second_cycle])
+    runtimes = (runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", transport),)
+    logger = FakeRerunLogger()
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_can_control_loop(
+            mode="left",
+            bridge=StopAfterTwoBridge(),
+            runtimes=runtimes,
+            shared_state=runtime.RealSharedState(),
+            rerun_logger=logger,
+            startup_enable=False,
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    assert [payload["step_count"] for payload in logger.payloads] == [0]
+
+
 def test_real_control_waits_for_mirror_target_initialization_before_compute():
     transport = StopOnZeroTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
     runtimes = (runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", transport),)
@@ -818,6 +806,41 @@ def test_real_control_waits_for_mirror_target_initialization_before_compute():
 
     assert bridge.calls == []
     assert ("torque", 1, 0.0) in transport.commands
+
+
+def test_real_control_passes_fixed_zero_body_q_and_shared_targets_to_c_bridge():
+    transport = FakeTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
+    runtimes = (runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", transport),)
+    bridge = StopAfterOneBridge()
+    shared = runtime.RealSharedState()
+    target_pos = np.array(
+        [[0.12, -0.04, 0.30], [0.21, 0.08, 0.35]],
+        dtype=np.float64,
+    )
+    target_quat = np.array(
+        [[0.5, -0.5, 0.5, -0.5], [0.5, 0.5, -0.5, 0.5]],
+        dtype=np.float64,
+    )
+    shared.set_targets(target_pos, target_quat)
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_can_control_loop(
+            mode="left",
+            bridge=bridge,
+            runtimes=runtimes,
+            shared_state=shared,
+            startup_enable=False,
+            require_targets=True,
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    assert len(bridge.calls) == 1
+    call = bridge.calls[0]
+    np.testing.assert_allclose(call["body_q"], runtime.REAL_C_BODY_Q_ZERO)
+    np.testing.assert_allclose(call["target_pos"], target_pos)
+    np.testing.assert_allclose(call["target_quat"], target_quat)
 
 
 def test_viewer_closed_sets_shutdown_before_mirror_loop_runs():

@@ -28,14 +28,9 @@
 /* ================================================================
  *  基础运行参数
  * ================================================================ */
-/* CONTROL_DT 只作为名义控制周期和调参参考；实际路径推进时间由
- * stm_controller_step_elapsed(..., elapsed_s) 的 elapsed_s 传入。
+/* 控制核心没有固定周期；S 曲线路径时间、traj_t 和安全恢复计时全部由
+ * stm_controller_step_elapsed(..., elapsed_s) 的平台层实测 elapsed_s 推进。
  */
-#define CONTROL_DT 0.001  /* 名义控制周期 (s)，默认按 1 kHz 设计 */
-/* elapsed_s 的单步上限保护。调大后暂停/卡顿恢复时路径会跳得更远；
- * 调小后大延迟会被压平，但路径实际推进会更保守。
- */
-#define CONTROL_MAX_ELAPSED_S 0.02 /* 单步路径规划最大推进时间 (s) */
 /* 安全锁定恢复只看激活臂 qd 是否接近 0，不要求 q 回零。阈值调大恢复更快
  * 但可能在轻微运动中恢复；调小更严格但恢复更慢。
  */
@@ -84,44 +79,21 @@
  * KD_CART_* 调大: 阻尼更强、超调更小，但过大可能放大速度噪声并让动作发涩。
  * XYZ 单位近似 N/m；ROLL/PITCH/YAW 作用在轴角姿态误差上。
  */
-#define KP_CART_X 260.0
-#define KP_CART_Y 260.0
-#define KP_CART_Z 260.0
+#define KP_CART_X 170.0
+#define KP_CART_Y 170.0
+#define KP_CART_Z 170.0
 
-#define KD_CART_X 70.0
-#define KD_CART_Y 70.0
-#define KD_CART_Z 70.0
+#define KD_CART_X 65.0
+#define KD_CART_Y 65.0
+#define KD_CART_Z 65.0
 
-#define KP_CART_ROLL 12.0
-#define KP_CART_PITCH 12.0
-#define KP_CART_YAW 12.0
+#define KP_CART_ROLL 8.0
+#define KP_CART_PITCH 8.0
+#define KP_CART_YAW 8.0
 
 #define KD_CART_ROLL 4.0
 #define KD_CART_PITCH 4.0
 #define KD_CART_YAW 4.0
-
-/* ================================================================
- *  关节空间 PD 增益
- * ================================================================ */
-/* 当前关节 PD 主要用于零空间首选姿态，不是独立的关节位置闭环。
- * KP_JOINT_* 调大: 关节更积极靠近 Q_PREF_*；KD_JOINT_* 调大: 零空间动作更稳。
- * 若末端跟踪优先级不足，优先检查 W_CARTESIAN/W_JOINT 和 NULLSPACE_TORQUE_LIMIT。
- */
-#define KP_JOINT_1 115.0
-#define KP_JOINT_2 100.0
-#define KP_JOINT_3 30.0
-#define KP_JOINT_4 40.0
-#define KP_JOINT_5 20.0
-#define KP_JOINT_6 20.0
-#define KP_JOINT_7 20.0
-
-#define KD_JOINT_1 5
-#define KD_JOINT_2 5
-#define KD_JOINT_3 2
-#define KD_JOINT_4 2
-#define KD_JOINT_5 1
-#define KD_JOINT_6 1
-#define KD_JOINT_7 1
 
 /* ================================================================
  *  力矩限制
@@ -138,39 +110,10 @@
 #define JOINT_TORQUE_LIMIT_7 9.0
 
 /* ================================================================
- *  偏好姿态与双空间权重 (stm_controller_step_elapsed 控制内核)
- * ================================================================ */
-/* Q_PREF_* 是零空间希望靠近的 7 轴姿态，单位 rad。
- * POSTURE_ALPHA 越大，零空间参考越偏向 Q_PREF_*；越小，越偏向由 TCP 误差反推的小步。
- */
-#define Q_PREF_1 0.0
-#define Q_PREF_2 0.0
-#define Q_PREF_3 0.0
-#define Q_PREF_4 DEG2RAD(60.0)
-#define Q_PREF_5 0.0
-#define Q_PREF_6 0.0
-#define Q_PREF_7 0.0
-
-#define POSTURE_ALPHA 0.35
-/* 总力矩融合: tau = W_CARTESIAN * 笛卡尔任务 + W_JOINT * 零空间 + 动力学补偿。
- * W_CARTESIAN 调大增强末端跟踪；W_JOINT 调大增强回偏好姿态能力。
- */
-#define W_CARTESIAN 0.75
-#define W_JOINT 0.25
-/* deadband 内禁用零空间，避免末端接近目标时关节还在“抢控制权”。
- * full_scale 表示误差大到多少时零空间完全恢复；TORQUE_LIMIT 是零空间单轴限幅。
- */
-#define NULLSPACE_POS_DEADBAND 0.001 /* m，目标附近禁用零空间偏置 */
-#define NULLSPACE_ORI_DEADBAND 0.002 /* rad，目标附近禁用零空间偏置 */
-#define NULLSPACE_POS_FULL_SCALE 0.02 /* m，远离目标后恢复轻度零空间 */
-#define NULLSPACE_ORI_FULL_SCALE 0.05 /* rad，远离目标后恢复轻度零空间 */
-#define NULLSPACE_TORQUE_LIMIT 0.08  /* N.m，温和零空间补偿限幅 */
-
-/* ================================================================
  *  运动学与逆解参数
  * ================================================================ */
 /* 保留兼容参数：当前 stm_controller 主闭环不直接调用旧数值 IK，
- * 末端运动主要由 LinearPathPlanner + 笛卡尔 PD + 零空间完成。
+ * 末端运动由最终 TCP 目标 + 基于 qd 反馈的 TCP 速度闭环完成。
  * 调这些 IK_* 不会直接改变当前主控制链路的末端跟踪表现。
  */
 #define IK_MAX_ITERATIONS 50
@@ -235,11 +178,11 @@
 #define RIGHT_JOINT_POS_MIN_7 (-1.1075)
 #define RIGHT_JOINT_POS_MAX_7 (1.068)
 
-/* 速度限位 (rad/s)。当前左右臂每轴都统一为 4.0 rad/s；
+/* 速度限位 (rad/s)。当前左右臂每轴都统一为 5.0 rad/s；
  * URDF 中 velocity="0" 视为未有效指定，不能直接作为速度上限。
  * 超过该阈值会进入安全锁定并输出当前激活臂全 0 力矩。
  */
-#define JOINT_VEL_LIMIT 4.0
+#define JOINT_VEL_LIMIT 5.0
 #define JOINT_VEL_LIMIT_1 JOINT_VEL_LIMIT
 #define JOINT_VEL_LIMIT_2 JOINT_VEL_LIMIT
 #define JOINT_VEL_LIMIT_3 JOINT_VEL_LIMIT
@@ -264,26 +207,17 @@
 #define KALMAN_R_VEL 0.1   /* 测量噪声: 信任传感器程度 (较大值增加滤波强度) */
 
 /* ================================================================
- *  路径规划参数（末端笛卡尔直线路径）
+ *  末端速度闭环参数
  * ================================================================ */
-/* LinearPathPlanner 生成末端参考点，速度由 elapsed_s 推进。
- * TRAJ_PLAN_SPEED/ACCEL 决定“参考点”的定速/加速，不保证实际 TCP 在力矩饱和、
- * 限位、安全锁定或外力扰动下仍严格达到该速度。
+/* C 端内部按最终目标生成五次 S 曲线 TCP 参考点。elapsed_s 由平台层传入；
+ * END_EFFECTOR_LINEAR_SPEED_MPS 表示 S 曲线峰值线速度。实际 TCP 速度由
+ * v_tcp = J(q) * qd 估计，并在笛卡尔阻尼项中闭环跟踪 ref_twist。
  */
-#define TRAJ_PLAN_SPEED 3.0  /* 末端运动速度 (m/s) */
-#define TRAJ_PLAN_ACCEL 10.0  /* 加速度 (m/s^2) */
-/* Real/Sim 共用的路径跟随门控。真实 TCP 跟不上参考点时，路径时间会平滑减速
- * 或暂停，避免参考点继续跑远；只约束路径推进，不替代关节速度硬保护。
- */
-#define CONTROL_PATH_GATE_FULL_ERROR_M 0.005
-#define CONTROL_PATH_GATE_STOP_ERROR_M 0.020
-#define CONTROL_PATH_GATE_RISE_TIME_S 0.080
-#define CONTROL_PATH_GATE_FALL_TIME_S 0.030
-#define CONTROL_PATH_LOOKAHEAD_M 0.008
-#define CONTROL_PATH_LOOKAHEAD_RAMP_S 0.30
-#define CONTROL_TARGET_REPLAN_POS_EPS_M 0.001
-#define CONTROL_TARGET_REPLAN_ORI_EPS_RAD 0.002
-/* 当前主控制链路不直接使用 TRAJ_REACH_THRESH；保留给路径到达判定辅助函数。 */
-#define TRAJ_REACH_THRESH 0.005 /* 到达目标的位置阈值 (m) */
+#define END_EFFECTOR_LINEAR_SPEED_MPS 0.05
+#define END_EFFECTOR_TARGET_POS_TOL_M 0.0025
+#define END_EFFECTOR_TARGET_ORI_TOL_RAD 0.005
+#define END_EFFECTOR_ARRIVAL_SPEED_TOL_MPS 0.02
+#define TRAJ_TARGET_CHANGE_POS_EPS_M 0.0001
+#define TRAJ_TARGET_CHANGE_ORI_EPS_RAD 0.0005
 
 #endif /* CONFIG_LIB_H */

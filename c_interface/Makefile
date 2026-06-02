@@ -4,7 +4,6 @@ STM32_SRCS = $(STM32_DIR)/control_logic.c \
              $(STM32_DIR)/kinematics_lib.c \
              $(STM32_DIR)/math_lib.c \
              $(STM32_DIR)/model_lib.c \
-             $(STM32_DIR)/trajectory_lib.c \
              $(STM32_DIR)/stm_controller.c
 
 H7_CLOCK_SRCS = h7_clock_sim/h7_clock_sim.c

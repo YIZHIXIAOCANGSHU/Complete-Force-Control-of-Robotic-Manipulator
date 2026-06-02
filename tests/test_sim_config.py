@@ -712,15 +712,15 @@ def test_mujoco_env_computes_openarm_follower_friction_torque():
     env = MujocoSimEnv()
     qvel = np.linspace(-1.2, 1.4, Config.NUM_JOINTS)
     expected = (
-        Config.FOLLOWER_FRICTION_FO_14
         + Config.FOLLOWER_FRICTION_FV_14 * qvel
-        + Config.FOLLOWER_FRICTION_FC_14 * np.tanh(0.1 * Config.FOLLOWER_FRICTION_K_14 * qvel)
+        + (Config.FOLLOWER_FRICTION_FO_14 + Config.FOLLOWER_FRICTION_FC_14)
+        * np.tanh(0.1 * Config.FOLLOWER_FRICTION_K_14 * qvel)
     )
 
     np.testing.assert_allclose(env.get_follower_friction_torque(qvel), expected)
     np.testing.assert_allclose(
         env.get_follower_friction_torque(np.zeros(Config.NUM_JOINTS)),
-        Config.FOLLOWER_FRICTION_FO_14,
+        np.zeros(Config.NUM_JOINTS),
     )
 
 
@@ -760,6 +760,7 @@ def test_mujoco_env_friction_changes_arm_acceleration_without_compensation():
 
     env = MujocoSimEnv()
     env.reset(Config.INIT_QPOS)
+    env.set_qvel(np.linspace(-0.5, 0.5, Config.NUM_JOINTS))
     env.forward()
 
     env.apply_torque(env.get_qfrc_bias())

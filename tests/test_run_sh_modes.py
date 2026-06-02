@@ -19,6 +19,8 @@ def _make_env_with_fake_tools() -> tuple[dict[str, str], tempfile.TemporaryDirec
     fake_python.write_text(
         "#!/bin/sh\n"
         "if [ \"$1\" = \"-\" ]; then exit 0; fi\n"
+        "printf 'AM_D02_ENABLE_VIEWER=%s\\n' \"$AM_D02_ENABLE_VIEWER\"\n"
+        "printf 'AM_D02_ENABLE_RERUN=%s\\n' \"$AM_D02_ENABLE_RERUN\"\n"
         "printf 'PYTHON_ARGS\\n'\n"
         "for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n",
         encoding="utf-8",
@@ -116,6 +118,14 @@ def test_real_left_routes_to_real_entrypoint():
     assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "left"]
 
 
+def test_real_defaults_to_viewer_enabled_and_rerun_disabled():
+    completed = _run_script("real", "left")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "AM_D02_ENABLE_VIEWER=1" in completed.stdout
+    assert "AM_D02_ENABLE_RERUN=0" in completed.stdout
+
+
 def test_real_right_routes_to_real_entrypoint():
     completed = _run_script("real", "right")
 
@@ -123,11 +133,31 @@ def test_real_right_routes_to_real_entrypoint():
     assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right"]
 
 
-def test_real_right_pinocchio_routes_to_pinocchio_entrypoint():
-    completed = _run_script("real", "right", "pinocchio")
+def test_real_right_legacy_c_backend_arg_routes_to_real_entrypoint():
+    completed = _run_script("real", "right", "c")
 
     assert completed.returncode == 0, completed.stderr
-    assert _fake_python_args(completed) == ["python/real_pinocchio/main.py", "--arm", "right"]
+    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right"]
+
+
+def test_real_right_pinocchio_backend_is_rejected():
+    completed = _run_script("real", "right", "pinocchio")
+
+    assert completed.returncode != 0
+    assert "Pinocchio real 后端已移除" in completed.stdout
+    assert _fake_python_args(completed) == []
+
+
+def test_real_pinocchio_backend_env_is_rejected():
+    completed = _run_script(
+        "real",
+        "right",
+        env_overrides={"AM_D02_REAL_CONTROL_BACKEND": "pinocchio"},
+    )
+
+    assert completed.returncode != 0
+    assert "AM_D02_REAL_CONTROL_BACKEND 只支持 c" in completed.stdout
+    assert _fake_python_args(completed) == []
 
 
 def test_real_both_routes_to_real_entrypoint():
@@ -145,19 +175,11 @@ def test_real_split_alias_routes_to_real_entrypoint():
 
 
 def test_interactive_menu_can_select_real_right():
-    completed = _run_script(input_text="2\n2\n1\n")
+    completed = _run_script(input_text="2\n2\n")
 
     assert completed.returncode == 0, completed.stderr
     assert "Real 真机模式" in completed.stdout
     assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right"]
-
-
-def test_interactive_menu_can_select_real_right_pinocchio():
-    completed = _run_script(input_text="2\n2\n2\n")
-
-    assert completed.returncode == 0, completed.stderr
-    assert "Real 控制方式" in completed.stdout
-    assert _fake_python_args(completed) == ["python/real_pinocchio/main.py", "--arm", "right"]
 
 
 def test_interactive_menu_can_select_mc():
@@ -173,7 +195,6 @@ def test_python_modes_are_split_into_sim_and_real_directories():
     assert (PROJECT_ROOT / "python" / "sim" / "udp_server.py").is_file()
     assert (PROJECT_ROOT / "python" / "real" / "main.py").is_file()
     assert (PROJECT_ROOT / "python" / "real" / "runtime.py").is_file()
-    assert (PROJECT_ROOT / "python" / "real_pinocchio" / "main.py").is_file()
     assert (PROJECT_ROOT / "c_interface" / "real" / "real_controller.c").is_file()
 
 
@@ -184,21 +205,6 @@ def test_real_entrypoint_bootstraps_python_package_path(monkeypatch):
     spec = importlib.util.spec_from_file_location(
         "real_entrypoint_under_test",
         PROJECT_ROOT / "python" / "real" / "main.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-
-    assert python_root in sys.path
-
-
-def test_real_pinocchio_entrypoint_bootstraps_python_package_path(monkeypatch):
-    python_root = str(PROJECT_ROOT / "python")
-    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != python_root])
-
-    spec = importlib.util.spec_from_file_location(
-        "real_pinocchio_entrypoint_under_test",
-        PROJECT_ROOT / "python" / "real_pinocchio" / "main.py",
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

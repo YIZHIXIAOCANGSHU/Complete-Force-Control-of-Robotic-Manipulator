@@ -1,6 +1,5 @@
 #include "h7_clock_sim.h"
 
-#include <math.h>
 #include <time.h>
 
 static uint64_t h7_clock_sim_default_now_us(void *user_ctx) {
@@ -14,7 +13,6 @@ void h7_clock_sim_init(h7_clock_sim_t *clock) {
   if (clock == 0) {
     return;
   }
-  clock->max_elapsed_us = 20000ULL;
   clock->last_sample_us = 0ULL;
   clock->initialized = 0;
   clock->now_us = h7_clock_sim_default_now_us;
@@ -28,16 +26,6 @@ void h7_clock_sim_set_now_fn(h7_clock_sim_t *clock, h7_clock_now_us_fn now_us,
   }
   clock->now_us = now_us != 0 ? now_us : h7_clock_sim_default_now_us;
   clock->user_ctx = user_ctx;
-}
-
-void h7_clock_sim_set_max_elapsed(h7_clock_sim_t *clock, double max_elapsed_s) {
-  if (clock == 0 || max_elapsed_s <= 0.0 || !isfinite(max_elapsed_s)) {
-    return;
-  }
-  clock->max_elapsed_us = (uint64_t)llround(max_elapsed_s * 1000000.0);
-  if (clock->max_elapsed_us < 1ULL) {
-    clock->max_elapsed_us = 1ULL;
-  }
 }
 
 uint64_t h7_clock_sim_elapsed_us(h7_clock_sim_t *clock) {
@@ -63,10 +51,6 @@ uint64_t h7_clock_sim_elapsed_us(h7_clock_sim_t *clock) {
 
   elapsed_us = now_us - clock->last_sample_us;
   clock->last_sample_us = now_us;
-
-  if (clock->max_elapsed_us > 0ULL && elapsed_us > clock->max_elapsed_us) {
-    elapsed_us = clock->max_elapsed_us;
-  }
 
   return elapsed_us;
 }

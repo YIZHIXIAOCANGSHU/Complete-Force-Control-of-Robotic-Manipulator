@@ -572,11 +572,11 @@ class MujocoSimEnv:
         if qvel.shape != (Config.NUM_JOINTS,):
             raise ValueError(f"qvel must have shape ({Config.NUM_JOINTS},)")
 
+        smooth_sign = np.tanh(0.1 * Config.FOLLOWER_FRICTION_K_14 * qvel)
         return (
-            Config.FOLLOWER_FRICTION_FO_14
-            + Config.FOLLOWER_FRICTION_FV_14 * qvel
-            + Config.FOLLOWER_FRICTION_FC_14
-            * np.tanh(0.1 * Config.FOLLOWER_FRICTION_K_14 * qvel)
+            Config.FOLLOWER_FRICTION_FV_14 * qvel
+            + (Config.FOLLOWER_FRICTION_FO_14 + Config.FOLLOWER_FRICTION_FC_14)
+            * smooth_sign
         )
 
     def get_applied_friction_torque(self) -> np.ndarray:

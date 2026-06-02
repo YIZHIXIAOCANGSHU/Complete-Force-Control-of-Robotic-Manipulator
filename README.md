@@ -55,7 +55,7 @@
 - `python/real/`：SocketCAN USB2FDCAN 真机控制入口、CAN transport 和 C 控制桥。
 - `python/` 根目录：保留少量兼容 wrapper 和共享配置/可视化工具。
 - `c_interface/`：宿主机 C 控制入口；`c_main` 服务 sim，`real/real_controller` 服务 real。
-- `stm32_code/`：左右两个独立 7 轴控制器上下文、运动学、动力学和轨迹逻辑。
+- `stm32_code/`：左右两个独立 7 轴控制器上下文、运动学、动力学和末端速度闭环。
 - `tests/`：启动脚本、Monte Carlo、viewer 和 Rerun 相关测试。
 
 ## 当前模型约定
@@ -99,11 +99,10 @@ q[14] + qd[14]
 其中 `left_target_pos` / `right_target_pos` 使用 Body0422 动态目标坐标系：
 坐标原点跟随当前 `Body0422_Link`，坐标轴方向使用 `Body0422_Link` 相对零位的旋转。
 MuJoCo 里的目标方块会按该相对位姿随 Body0422 一起平移和旋转；四元数也使用同一个动态目标坐标系。
-C 端不接收 MuJoCo 仿真步长；host wrapper 使用独立的 H7 1MHz 微秒时基测量两次
-UDP 控制循环之间的 elapsed time。sim UDP 保持一收一发：每收到一帧 MuJoCo 状态，
-C 端计算一次力矩并立即发送一次 `tau[14]`。左右末端参考由 C 端 `LinearPathPlanner`
-按 `TRAJ_PLAN_SPEED` / `TRAJ_PLAN_ACCEL` 做梯形速度直线路径规划，并由 H7 elapsed time
-推进；Python/MuJoCo 的物理步长不参与路径速度计算。
+C 端内部从当前 TCP 到最终目标生成五次 S 曲线参考点；host wrapper 传入的 elapsed time
+用于推进该曲线时间，同时累计 `traj_t` 和安全恢复计时。sim UDP 保持一收一发：每收到一帧
+MuJoCo 状态，C 端计算一次力矩并立即发送一次 `tau[14]`。TCP 平移速度由电机回传 `qd`
+经 Jacobian 映射得到的实际末端速度闭环控制，默认 S 曲线峰值线速度为 `0.05 m/s`。
 C 侧不再保留默认左臂 7 轴闭环入口；公开控制链路统一使用
 `stm_controller_step_elapsed()`，并可通过 `stm_input_t.active_arm_mask`
 选择左臂、右臂或双臂。本仓库的 UDP 仿真默认填 `STM_ARM_MASK_BOTH`。

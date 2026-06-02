@@ -129,12 +129,32 @@ void quat_normalize(double q[4]) {
 
 void rotmat_to_quat(const double R[9], double q[4]) {
   double trace = R[0] + R[4] + R[8];
-  double w = 0.5 * sqrt(fmax(1e-12, 1.0 + trace));
-  double inv4w = 1.0 / (4.0 * w + 1e-15);
-  q[0] = (R[7] - R[5]) * inv4w;
-  q[1] = (R[2] - R[6]) * inv4w;
-  q[2] = (R[3] - R[1]) * inv4w;
-  q[3] = w;
+  if (trace > 0.0) {
+    double s = sqrt(trace + 1.0) * 2.0;
+    q[3] = 0.25 * s;
+    q[0] = (R[7] - R[5]) / s;
+    q[1] = (R[2] - R[6]) / s;
+    q[2] = (R[3] - R[1]) / s;
+  } else if (R[0] > R[4] && R[0] > R[8]) {
+    double s = sqrt(1.0 + R[0] - R[4] - R[8]) * 2.0;
+    q[3] = (R[7] - R[5]) / s;
+    q[0] = 0.25 * s;
+    q[1] = (R[1] + R[3]) / s;
+    q[2] = (R[2] + R[6]) / s;
+  } else if (R[4] > R[8]) {
+    double s = sqrt(1.0 + R[4] - R[0] - R[8]) * 2.0;
+    q[3] = (R[2] - R[6]) / s;
+    q[0] = (R[1] + R[3]) / s;
+    q[1] = 0.25 * s;
+    q[2] = (R[5] + R[7]) / s;
+  } else {
+    double s = sqrt(1.0 + R[8] - R[0] - R[4]) * 2.0;
+    q[3] = (R[3] - R[1]) / s;
+    q[0] = (R[2] + R[6]) / s;
+    q[1] = (R[5] + R[7]) / s;
+    q[2] = 0.25 * s;
+  }
+  quat_normalize(q);
 }
 
 void quat_slerp(const double q1[4], const double q2[4], double t,

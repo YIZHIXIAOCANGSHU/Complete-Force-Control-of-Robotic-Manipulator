@@ -74,6 +74,44 @@ def test_pinocchio_bridge_left_mask_zeroes_right_arm():
     assert out.ee_quat.shape == (Config.NUM_ARMS, 4)
 
 
+def test_pinocchio_bridge_passes_final_target_without_time_interpolation():
+    left = FakeArmBackend(1.0)
+    bridge = PinocchioRealControllerBridge(
+        left_backend=left,
+        right_backend=FakeArmBackend(2.0),
+    )
+    q, qd, body_q, target_pos, target_quat = _inputs()
+    target_pos[Config.LEFT_ARM] = [0.25, -0.10, 0.40]
+    target_quat[Config.LEFT_ARM] = [0.5, -0.5, 0.5, -0.5]
+
+    out = bridge.compute(1 << Config.LEFT_ARM, 0.02, q, qd, body_q, target_pos, target_quat)
+
+    assert out.step_count == 1
+    assert out.traj_t == 0.02
+    assert len(left.calls) == 1
+    np.testing.assert_allclose(left.calls[0]["target_pos"], target_pos[Config.LEFT_ARM])
+    np.testing.assert_allclose(left.calls[0]["target_quat"], target_quat[Config.LEFT_ARM])
+
+
+def test_pinocchio_bridge_elapsed_only_updates_traj_t_and_step_count():
+    left = FakeArmBackend(1.0)
+    bridge = PinocchioRealControllerBridge(
+        left_backend=left,
+        right_backend=FakeArmBackend(2.0),
+    )
+    q, qd, body_q, target_pos, target_quat = _inputs()
+    target_pos[Config.LEFT_ARM] = [0.30, 0.20, 0.10]
+
+    first = bridge.compute(1 << Config.LEFT_ARM, 0.0, q, qd, body_q, target_pos, target_quat)
+    second = bridge.compute(1 << Config.LEFT_ARM, 0.015, q, qd, body_q, target_pos, target_quat)
+
+    assert first.step_count == 1
+    assert first.traj_t == 0.0
+    assert second.step_count == 2
+    assert second.traj_t == 0.015
+    np.testing.assert_allclose(left.calls[0]["target_pos"], left.calls[1]["target_pos"])
+
+
 def test_pinocchio_bridge_right_mask_zeroes_left_arm():
     left = FakeArmBackend(1.0)
     right = FakeArmBackend(2.0)

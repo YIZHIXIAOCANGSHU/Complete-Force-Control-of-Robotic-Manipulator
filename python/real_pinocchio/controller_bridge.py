@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import os
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,25 +68,6 @@ def _quat_error_axis_angle(target: np.ndarray, current: np.ndarray) -> np.ndarra
     return (angle / s) * qe[1:]
 
 
-def _quat_slerp_wxyz(start: np.ndarray, end: np.ndarray, ratio: float) -> np.ndarray:
-    q1 = _normalize_quat_wxyz(start)
-    q2 = _normalize_quat_wxyz(end)
-    t = min(1.0, max(0.0, float(ratio)))
-    dot = float(np.dot(q1, q2))
-    if dot < 0.0:
-        q2 = -q2
-        dot = -dot
-    if dot > 0.9995:
-        return _normalize_quat_wxyz(q1 + t * (q2 - q1))
-    theta_0 = math.acos(max(-1.0, min(1.0, dot)))
-    theta = theta_0 * t
-    sin_theta = math.sin(theta)
-    sin_theta_0 = math.sin(theta_0)
-    s0 = math.cos(theta) - dot * sin_theta / sin_theta_0
-    s1 = sin_theta / sin_theta_0
-    return _normalize_quat_wxyz((s0 * q1) + (s1 * q2))
-
-
 def _rotmat_to_quat_wxyz(pin_module: Any, rotation: np.ndarray) -> np.ndarray:
     quat = pin_module.Quaternion(rotation)
     return _normalize_quat_wxyz(np.array([quat.w, quat.x, quat.y, quat.z], dtype=np.float64))
@@ -121,103 +101,18 @@ def _fallback_target_frame_rotation(body_q: np.ndarray | None) -> np.ndarray:
     return r_current @ r_zero.T
 
 
-def _normalize_angle(angle: np.ndarray) -> np.ndarray:
-    return (np.asarray(angle, dtype=np.float64) + math.pi) % (2.0 * math.pi) - math.pi
-
-
-def _ramp_from_deadband(value: float, deadband: float, full_scale: float) -> float:
-    v = float(value)
-    if v <= deadband:
-        return 0.0
-    if v >= full_scale:
-        return 1.0
-    span = max(1e-12, full_scale - deadband)
-    return (v - deadband) / span
-
-
-class LinearPathReference:
-    def __init__(self) -> None:
-        self.valid = False
-        self.start_pos = np.zeros(3, dtype=np.float64)
-        self.end_pos = np.zeros(3, dtype=np.float64)
-        self.start_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        self.end_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        self.path_start_t = 0.0
-        self.distance = 0.0
-        self.direction = np.zeros(3, dtype=np.float64)
-        self.v_max = 0.0
-        self.accel = float(Config.TRAJ_PLAN_ACCEL)
-        self.t_accel = 0.0
-        self.t_cruise = 0.0
-        self.d_accel = 0.0
-        self.total_time = 0.02
-
-    def target_changed(self, target_pos: np.ndarray, target_quat: np.ndarray) -> bool:
-        if not self.valid:
-            return True
-        if np.any(np.abs(np.asarray(target_pos, dtype=np.float64).reshape(3) - self.end_pos) > 1e-9):
-            return True
-        dot = float(np.dot(_normalize_quat_wxyz(target_quat), self.end_quat))
-        return abs(abs(dot) - 1.0) > 1e-9
-
-    def initialize(
-        self,
-        current_pos: np.ndarray,
-        current_quat: np.ndarray,
-        target_pos: np.ndarray,
-        target_quat: np.ndarray,
-        traj_t: float,
-    ) -> None:
-        self.start_pos[:] = np.asarray(current_pos, dtype=np.float64).reshape(3)
-        self.end_pos[:] = np.asarray(target_pos, dtype=np.float64).reshape(3)
-        self.start_quat[:] = _normalize_quat_wxyz(current_quat)
-        self.end_quat[:] = _normalize_quat_wxyz(target_quat)
-        self.path_start_t = float(traj_t)
-        delta = self.end_pos - self.start_pos
-        self.distance = float(np.linalg.norm(delta))
-        self.accel = max(1e-9, float(Config.TRAJ_PLAN_ACCEL))
-        speed = max(0.0, float(Config.TRAJ_PLAN_SPEED))
-        if self.distance < 1e-6:
-            self.direction[:] = 0.0
-            self.v_max = 0.0
-            self.t_accel = 0.0
-            self.t_cruise = 0.0
-            self.d_accel = 0.0
-            self.total_time = 0.02
-        else:
-            self.direction[:] = delta / self.distance
-            d_accel_ideal = 0.5 * speed * speed / self.accel
-            if 2.0 * d_accel_ideal > self.distance:
-                self.v_max = math.sqrt(self.accel * self.distance)
-                self.t_accel = self.v_max / self.accel
-                self.d_accel = self.distance / 2.0
-                self.t_cruise = 0.0
-            else:
-                self.v_max = speed
-                self.t_accel = speed / self.accel
-                self.d_accel = d_accel_ideal
-                self.t_cruise = (self.distance - 2.0 * d_accel_ideal) / max(speed, 1e-9)
-            self.total_time = 2.0 * self.t_accel + self.t_cruise
-        self.valid = True
-
-    def evaluate(self, traj_t: float) -> tuple[np.ndarray, np.ndarray]:
-        t = max(0.0, float(traj_t) - self.path_start_t)
-        if self.distance < 1e-6:
-            ratio = min(1.0, t / max(self.total_time, 1e-9))
-            return self.end_pos.copy(), _quat_slerp_wxyz(self.start_quat, self.end_quat, ratio)
-        if t >= self.total_time:
-            return self.end_pos.copy(), self.end_quat.copy()
-        if t < self.t_accel:
-            s = 0.5 * self.accel * t * t
-        elif t < self.t_accel + self.t_cruise:
-            dt = t - self.t_accel
-            s = self.d_accel + self.v_max * dt
-        else:
-            dt = t - self.t_accel - self.t_cruise
-            s = self.d_accel + self.v_max * self.t_cruise + self.v_max * dt - 0.5 * self.accel * dt * dt
-        s = min(self.distance, max(0.0, s))
-        ratio = min(1.0, s / max(self.distance, 1e-9))
-        return self.start_pos + s * self.direction, _quat_slerp_wxyz(self.start_quat, self.end_quat, ratio)
+def _desired_tcp_linear_velocity(pos_err: np.ndarray) -> np.ndarray:
+    error = np.asarray(pos_err, dtype=np.float64).reshape(3)
+    distance = float(np.linalg.norm(error))
+    speed = float(Config.END_EFFECTOR_LINEAR_SPEED_MPS)
+    if (
+        not math.isfinite(distance)
+        or distance <= float(Config.END_EFFECTOR_TARGET_POS_TOL_M)
+        or not math.isfinite(speed)
+        or speed <= 0.0
+    ):
+        return np.zeros(3, dtype=np.float64)
+    return speed * error / distance
 
 
 class ZeroArmTauBackend:
@@ -402,7 +297,6 @@ class PinocchioArmTauBackend:
     def compute(self, q, qd, target_pos, target_quat, body_q=None) -> dict[str, np.ndarray | int]:
         q_arm = np.asarray(q, dtype=np.float64).reshape(ARM_JOINTS)
         qd_arm = np.asarray(qd, dtype=np.float64).reshape(ARM_JOINTS)
-        start = time.perf_counter()
         status = self._safety_status(q_arm, qd_arm)
         ee_pos, ee_quat = self.compute_fk(q_arm, body_q)
         if status < 0:
@@ -420,49 +314,21 @@ class PinocchioArmTauBackend:
         pos_err = target_pos - ee_pos
         ori_err = _quat_error_axis_angle(target_quat, ee_quat)
         ee_vel = jac @ qd_arm
+        tcp_vel_des = _desired_tcp_linear_velocity(pos_err)
         wrench = np.zeros(6, dtype=np.float64)
         wrench[:3] = np.array([Config.KP_CART_X, Config.KP_CART_Y, Config.KP_CART_Z]) * pos_err
-        wrench[:3] -= np.array([Config.KD_CART_X, Config.KD_CART_Y, Config.KD_CART_Z]) * ee_vel[:3]
+        wrench[:3] += np.array([Config.KD_CART_X, Config.KD_CART_Y, Config.KD_CART_Z]) * (
+            tcp_vel_des - ee_vel[:3]
+        )
         wrench[3:] = np.array([Config.KP_CART_ROLL, Config.KP_CART_PITCH, Config.KP_CART_YAW]) * ori_err
         wrench[3:] -= np.array([Config.KD_CART_ROLL, Config.KD_CART_PITCH, Config.KD_CART_YAW]) * ee_vel[3:]
         tau_task = jac.T @ wrench
-        jj_t = jac @ jac.T
-        inv = np.linalg.pinv(jj_t + (0.05 * 0.05) * np.eye(6, dtype=np.float64))
-        j_pinv = jac.T @ inv
-        dq_ik = j_pinv @ np.concatenate([pos_err, ori_err])
-        q_ref = (1.0 - float(Config.POSTURE_ALPHA)) * (q_arm + dq_ik)
-        q_ref += float(Config.POSTURE_ALPHA) * np.asarray(Config.Q_PREFERRED, dtype=np.float64)
-        tau_null = np.asarray(Config.KP_JOINT, dtype=np.float64) * _normalize_angle(q_ref - q_arm)
-        tau_null -= np.asarray(Config.KD_JOINT, dtype=np.float64) * qd_arm
-        null_projector = np.eye(ARM_JOINTS, dtype=np.float64) - j_pinv @ jac
-        tau_null_projected = null_projector.T @ tau_null
-        null_scale = _ramp_from_deadband(
-            float(np.linalg.norm(pos_err)),
-            float(Config.NULLSPACE_POS_DEADBAND),
-            float(Config.NULLSPACE_POS_FULL_SCALE),
-        )
-        ori_null_scale = _ramp_from_deadband(
-            float(np.linalg.norm(ori_err)),
-            float(Config.NULLSPACE_ORI_DEADBAND),
-            float(Config.NULLSPACE_ORI_FULL_SCALE),
-        )
-        null_scale = max(null_scale, ori_null_scale)
-        tau_null_projected = np.clip(
-            null_scale * tau_null_projected,
-            -float(Config.NULLSPACE_TORQUE_LIMIT),
-            float(Config.NULLSPACE_TORQUE_LIMIT),
-        )
-        tau = (
-            float(Config.W_CARTESIAN) * tau_task
-            + float(Config.W_JOINT) * tau_null_projected
-            + tau_bias
-        )
+        tau = tau_task + tau_bias
         tau = np.clip(tau, -self._torque_limits, self._torque_limits)
         if not np.isfinite(tau).all():
             status = -1
             tau = np.zeros(ARM_JOINTS, dtype=np.float64)
         self._step_count += 1
-        _ = time.perf_counter() - start
         return {"status": status, "tau": tau, "ee_pos": ee_pos, "ee_quat": ee_quat}
 
     def close(self) -> None:
@@ -498,7 +364,6 @@ class PinocchioRealControllerBridge:
         }
         self._step_count = 0
         self._traj_t = 0.0
-        self._paths = {arm: LinearPathReference() for arm in range(NUM_ARMS)}
 
     def compute(
         self,
@@ -531,21 +396,11 @@ class PinocchioRealControllerBridge:
                 status = -1
                 tau[:] = 0.0
                 break
-            fk_pos, fk_quat = self._backends[arm].compute_fk(q_arm, body_arr)
-            if self._paths[arm].target_changed(target_pos_arr[arm], target_quat_arr[arm]):
-                self._paths[arm].initialize(
-                    fk_pos,
-                    fk_quat,
-                    target_pos_arr[arm],
-                    target_quat_arr[arm],
-                    self._traj_t,
-                )
-            ref_pos, ref_quat = self._paths[arm].evaluate(self._traj_t + step_s)
             result = self._backends[arm].compute(
                 q_arm,
                 qd_arm,
-                ref_pos,
-                ref_quat,
+                target_pos_arr[arm],
+                target_quat_arr[arm],
                 body_arr,
             )
             ee_pos[arm] = np.asarray(result["ee_pos"], dtype=np.float64).reshape(3)

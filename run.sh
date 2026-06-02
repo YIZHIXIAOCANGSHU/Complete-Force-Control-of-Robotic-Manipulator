@@ -68,17 +68,6 @@ show_real_menu() {
     echo "----------------------------------------------------------"
 }
 
-show_real_backend_menu() {
-    echo "=========================================================="
-    echo "        AM-DPBSURDF0422 Real 控制方式"
-    echo "=========================================================="
-    echo "请选择 Real 控制后端："
-    echo "  1) c         - 当前 C/STM32 控制核心"
-    echo "  2) pinocchio - Python Pinocchio 纯 tau 控制"
-    echo "  q) 退出"
-    echo "----------------------------------------------------------"
-}
-
 select_real_arm_from_menu() {
     local choice
     while true; do
@@ -108,31 +97,6 @@ select_real_arm_from_menu() {
     done
 }
 
-select_real_backend_from_menu() {
-    local choice
-    while true; do
-        show_real_backend_menu
-        read -r -p "输入数字选择 Real 控制方式: " choice
-        case "$choice" in
-            1)
-                REAL_BACKEND="c"
-                break
-                ;;
-            2)
-                REAL_BACKEND="pinocchio"
-                break
-                ;;
-            q|Q)
-                echo "已退出。"
-                exit 0
-                ;;
-            *)
-                PRINT_RED "无效选择: $choice"
-                ;;
-        esac
-    done
-}
-
 select_mode_from_menu() {
     local choice
     while true; do
@@ -146,7 +110,6 @@ select_mode_from_menu() {
             2)
                 MODE="real"
                 select_real_arm_from_menu
-                select_real_backend_from_menu
                 break
                 ;;
             3)
@@ -192,7 +155,6 @@ resolve_numeric_mode() {
 
 MODE=${1:-}
 REAL_ARM=${AM_D02_REAL_ARM:-}
-REAL_BACKEND=${AM_D02_REAL_CONTROL_BACKEND:-c}
 if [ -z "$MODE" ] || [[ "$MODE" == -* ]]; then
     select_mode_from_menu
 else
@@ -206,9 +168,12 @@ else
                 ;;
         esac
         case "${1:-}" in
-            c|pinocchio)
-                REAL_BACKEND="$1"
+            c)
                 shift 2>/dev/null || true
+                ;;
+            pinocchio)
+                PRINT_RED "错误: Pinocchio real 后端已移除。请使用 C/STM32 真机链路: ./run.sh real ${REAL_ARM:-left|right|both}"
+                exit 1
                 ;;
         esac
         if [ -z "$REAL_ARM" ]; then
@@ -218,6 +183,13 @@ else
 fi
 APP_ARGS=("$@")
 select_python
+
+if [ "$MODE" == "real" ]; then
+    : "${AM_D02_ENABLE_VIEWER:=1}"
+    : "${AM_D02_ENABLE_RERUN:=0}"
+    export AM_D02_ENABLE_VIEWER
+    export AM_D02_ENABLE_RERUN
+fi
 
 echo "=========================================================="
 if [ "$MODE" == "sim" ]; then
@@ -289,6 +261,10 @@ if [ "$MODE" == "sim" ]; then
 fi
 
 if [ "$MODE" == "real" ]; then
+    if [ "${AM_D02_REAL_CONTROL_BACKEND:-c}" != "c" ]; then
+        PRINT_RED "错误: Pinocchio real 后端已移除。AM_D02_REAL_CONTROL_BACKEND 只支持 c。"
+        exit 1
+    fi
     case "$REAL_ARM" in
         left|right|both)
             ;;
@@ -297,26 +273,13 @@ if [ "$MODE" == "real" ]; then
             exit 1
             ;;
     esac
-    case "$REAL_BACKEND" in
-        c|pinocchio)
-            ;;
-        *)
-            PRINT_RED "错误: 未知 Real 控制方式 '$REAL_BACKEND'。请使用 c 或 pinocchio。"
-            exit 1
-            ;;
-    esac
-
     : "${AM_D02_LEFT_CAN_INTERFACE:=can0}"
     : "${AM_D02_RIGHT_CAN_INTERFACE:=can1}"
     export AM_D02_LEFT_CAN_INTERFACE
     export AM_D02_RIGHT_CAN_INTERFACE
 
-    if [ "$REAL_BACKEND" == "c" ]; then
-        PRINT_BLUE "[1/3] 正在编译真机 C 控制桥..."
-        make -C c_interface real_controller
-    else
-        PRINT_BLUE "[1/3] Pinocchio real 后端不需要编译 C 控制桥，跳过。"
-    fi
+    PRINT_BLUE "[1/3] 正在编译真机 C 控制桥..."
+    make -C c_interface real_controller
 
     if [ "$REAL_ARM" == "left" ] || [ "$REAL_ARM" == "both" ]; then
         PRINT_BLUE "[2/3] 检查左臂 SocketCAN 接口 ${AM_D02_LEFT_CAN_INTERFACE}..."
@@ -331,13 +294,9 @@ if [ "$MODE" == "real" ]; then
         fi
     fi
 
-    PRINT_GREEN "[3/3] 启动 Real ${REAL_ARM} ${REAL_BACKEND} 控制回路..."
+    PRINT_GREEN "[3/3] 启动 Real ${REAL_ARM} C/STM32 控制回路..."
     echo "----------------------------------------------------------"
-    if [ "$REAL_BACKEND" == "pinocchio" ]; then
-        "$PYTHON_BIN" python/real_pinocchio/main.py --arm "$REAL_ARM" "${APP_ARGS[@]}"
-    else
-        "$PYTHON_BIN" python/real/main.py --arm "$REAL_ARM" "${APP_ARGS[@]}"
-    fi
+    "$PYTHON_BIN" python/real/main.py --arm "$REAL_ARM" "${APP_ARGS[@]}"
     exit $?
 fi
 

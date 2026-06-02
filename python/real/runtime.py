@@ -28,7 +28,7 @@ CAN_FEEDBACK_TIMEOUT_S = max(0.001, _env_float("AM_D02_CAN_FEEDBACK_TIMEOUT_S", 
 CAN_READ_TIMEOUT_S = max(0.0, _env_float("AM_D02_CAN_READ_TIMEOUT_S", 0.002))
 CAN_READ_CHUNK_SIZE = max(19, _env_int("AM_D02_CAN_READ_CHUNK_SIZE", 256))
 REAL_FEEDBACK_REQUEST_INTERVAL_S = max(0.0, _env_float("AM_D02_REAL_FEEDBACK_REQUEST_INTERVAL_S", 0.001))
-REAL_TORQUE_SLEW_NM_PER_S = max(0.0, _env_float("AM_D02_REAL_TORQUE_SLEW_NM_PER_S", 30.0))
+REAL_IDLE_SLEEP_S = max(0.0, _env_float("AM_D02_REAL_IDLE_SLEEP_S", 0.0005))
 REAL_DIAG_WINDOW_STEPS = max(1, _env_int("AM_D02_REAL_DIAG_WINDOW_STEPS", 40))
 REAL_FEEDBACK_ONLY = _env_bool("AM_D02_REAL_FEEDBACK_ONLY", False)
 LEFT_CAN_INTERFACE = os.getenv("AM_D02_LEFT_CAN_INTERFACE", "can0")
@@ -44,6 +44,7 @@ ARM_INTERFACE = {
     Config.LEFT_ARM: LEFT_CAN_INTERFACE,
     Config.RIGHT_ARM: RIGHT_CAN_INTERFACE,
 }
+REAL_C_BODY_Q_ZERO = np.zeros(Config.NUM_BODY_JOINTS, dtype=np.float64)
 
 shutdown_event = threading.Event()
 
@@ -307,11 +308,22 @@ def _copy_active_arm_pose_values(dst: np.ndarray, src: np.ndarray, active_arm_ma
     return result
 
 
+def _should_log_real_rerun_step(step_count: int) -> bool:
+    stride = max(1, int(Config.RERUN_LOG_STRIDE))
+    return stride <= 1 or int(step_count) % stride == 0
+
+
+def _real_c_body_q_zero() -> np.ndarray:
+    # The current SocketCAN real C path has no live torso feedback.
+    return REAL_C_BODY_Q_ZERO.copy()
+
+
 def mirror_real_state_to_env(
     env,
     shared_state: RealSharedState,
     active_arm_mask: int,
     initial_target_pos_base: np.ndarray | None = None,
+    initial_target_quat_base: np.ndarray | None = None,
 ) -> None:
     q, qd, feedback_valid, targets_initialized = shared_state.snapshot_mirror()
     if not feedback_valid:
@@ -324,6 +336,8 @@ def mirror_real_state_to_env(
         target_quat = env.get_all_ee_quat()
         if initial_target_pos_base is not None:
             target_pos = _copy_active_arm_pose_values(target_pos, initial_target_pos_base, active_arm_mask)
+        if initial_target_quat_base is not None:
+            target_quat = _copy_active_arm_pose_values(target_quat, initial_target_quat_base, active_arm_mask)
         env.set_all_target_poses_base(target_pos, target_quat)
         for arm, arm_name in enumerate(Config.ARM_NAMES):
             if (active_arm_mask & (1 << arm)) == 0:
@@ -335,7 +349,7 @@ def mirror_real_state_to_env(
                 f"[Real Target] {arm_name}: current_tcp={np.array2string(current_tcp, precision=4)} "
                 f"target_tcp={np.array2string(target_tcp, precision=4)} "
                 f"distance={distance:.4f}m target_pos=INIT_QPOS_TCP "
-                "target_quat=current_real_tcp"
+                "target_quat=INIT_QPOS_TCP"
             )
     target_pos, target_quat = env.get_all_target_poses()
     shared_state.set_targets(target_pos, target_quat)
@@ -450,25 +464,6 @@ def _format_right_j7_diag_window(diag_window) -> str:
     return "\n".join(lines)
 
 
-def _apply_torque_slew_limit(
-    desired_tau: np.ndarray,
-    previous_tau: np.ndarray,
-    active_arm_mask: int,
-    elapsed_s: float,
-) -> np.ndarray:
-    desired = np.asarray(desired_tau, dtype=np.float64).reshape(Config.NUM_JOINTS)
-    previous = np.asarray(previous_tau, dtype=np.float64).reshape(Config.NUM_JOINTS)
-    limited = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-    max_delta = float(REAL_TORQUE_SLEW_NM_PER_S) * max(0.0, float(elapsed_s))
-    for arm in range(Config.NUM_ARMS):
-        if (active_arm_mask & (1 << arm)) == 0:
-            continue
-        arm_slice = slice(arm * Config.ARM_JOINTS, (arm + 1) * Config.ARM_JOINTS)
-        delta = np.clip(desired[arm_slice] - previous[arm_slice], -max_delta, max_delta)
-        limited[arm_slice] = previous[arm_slice] + delta
-    return limited
-
-
 def run_real_can_control_loop(
     *,
     mode: str,
@@ -488,7 +483,6 @@ def run_real_can_control_loop(
     qd = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
     tau_actual = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
     last_sent_tau = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-    body_q = np.zeros(Config.NUM_BODY_JOINTS, dtype=np.float64)
     received_joint_masks = {runtime.arm: 0 for runtime in runtimes}
     diag_window = deque(maxlen=REAL_DIAG_WINDOW_STEPS)
     zero_tau = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
@@ -527,6 +521,8 @@ def run_real_can_control_loop(
                     )
                     shutdown_event.set()
                     break
+                if REAL_IDLE_SLEEP_S > 0.0:
+                    time.sleep(REAL_IDLE_SLEEP_S)
                 continue
             feedback_wait_start = time.perf_counter()
             shared_state.update_feedback(q, qd, tau_actual, active_mask)
@@ -568,7 +564,11 @@ def run_real_can_control_loop(
                     step_count,
                 )
                 diag_window.append(right_j7_diag)
-                if rerun_logger is not None and Config.ENABLE_RERUN:
+                if (
+                    rerun_logger is not None
+                    and Config.ENABLE_RERUN
+                    and _should_log_real_rerun_step(step_count)
+                ):
                     rerun_logger.log_step(
                         t=step_count * max(elapsed_s, 0.0),
                         pos_actual=zero_pos,
@@ -600,7 +600,7 @@ def run_real_can_control_loop(
                 elapsed_s,
                 current_q,
                 current_qd,
-                body_q,
+                _real_c_body_q_zero(),
                 target_pos,
                 target_quat,
             )
@@ -627,7 +627,14 @@ def run_real_can_control_loop(
                 shutdown_event.set()
                 break
 
-            tau_to_send = _apply_torque_slew_limit(tau_raw, last_sent_tau, active_mask, elapsed_s)
+            tau_to_send = tau_raw.copy()
+            for arm_index in range(Config.NUM_ARMS):
+                if (active_mask & (1 << arm_index)) == 0:
+                    arm_slice = slice(
+                        arm_index * Config.ARM_JOINTS,
+                        (arm_index + 1) * Config.ARM_JOINTS,
+                    )
+                    tau_to_send[arm_slice] = 0.0
             shared_state.update_control_output(tau_to_send, result.ee_pos, result.ee_quat)
             for runtime in runtimes:
                 offset = runtime.arm * Config.ARM_JOINTS
@@ -661,7 +668,11 @@ def run_real_can_control_loop(
             )
             diag_window.append(right_j7_diag)
 
-            if rerun_logger is not None and Config.ENABLE_RERUN:
+            if (
+                rerun_logger is not None
+                and Config.ENABLE_RERUN
+                and _should_log_real_rerun_step(step_count)
+            ):
                 rerun_logger.log_step(
                     t=result.traj_t,
                     pos_actual=result.ee_pos,
@@ -725,7 +736,7 @@ def run_real_control_with_bridge(
     if bridge is None and bridge_factory is None:
         raise ValueError("run_real_control_with_bridge requires bridge or bridge_factory")
     print("=" * 60)
-    print(f"[Real Config] torque slew limit: {REAL_TORQUE_SLEW_NM_PER_S:.3f} N*m/s")
+    print(f"[Real Config] idle sleep while waiting feedback: {REAL_IDLE_SLEEP_S * 1000.0:.3f} ms")
     print(f"[Real Config] feedback-only diagnostics: {REAL_FEEDBACK_ONLY}")
     print("[Real Config] CAN loop trigger: complete active-arm feedback (nonblocking read)")
     print(f"      {control_title} ({arm})")
@@ -741,6 +752,7 @@ def run_real_control_with_bridge(
     init_env.reset(Config.INIT_QPOS)
     init_env.forward()
     initial_target_pos_base = init_env.get_all_ee_pos()
+    initial_target_quat_base = init_env.get_all_ee_quat()
     viewer = None
     try:
         if Config.ENABLE_RERUN:
@@ -779,6 +791,7 @@ def run_real_control_with_bridge(
                     shared_state,
                     ACTIVE_ARM_MASK[arm],
                     initial_target_pos_base,
+                    initial_target_quat_base,
                 )
                 if viewer is not None:
                     viewer.sync()

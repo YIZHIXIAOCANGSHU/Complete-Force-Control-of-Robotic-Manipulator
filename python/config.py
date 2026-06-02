@@ -144,7 +144,7 @@ class Config:
     JOINT_LIMITS_DEG = np.vstack([LEFT_JOINT_LIMITS_DEG, RIGHT_JOINT_LIMITS_DEG])
     JOINT_LIMITS_RAD = np.deg2rad(JOINT_LIMITS_DEG)
     CONTROL_JOINT_LIMIT_INSET_RATIO = 0.01
-    JOINT_VEL_LIMIT = 4.0
+    JOINT_VEL_LIMIT = 5.0
 
     # MuJoCo 不额外添加 dof damping/armature；仿真被动项只使用下面的 follower friction 模型。
     ARM_JOINT_DAMPING = np.zeros(ARM_JOINTS, dtype=np.float64)
@@ -153,7 +153,7 @@ class Config:
     JOINT_ARMATURE = np.tile(ARM_JOINT_ARMATURE, NUM_ARMS)
 
     # OpenArm Follower 七轴 tanh 摩擦模型，作为独立仿真物理摩擦注入，不写入 URDF。
-    # tau_f = Fo + Fv * dq + Fc * tanh(0.1 * k * dq)
+    # tau_f = Fv * dq + (Fo + Fc) * tanh(0.1 * k * dq)，保证 dq=0 时不产生自发力矩。
     ENABLE_FOLLOWER_FRICTION = _env_bool("AM_D02_ENABLE_FOLLOWER_FRICTION", True)
     FOLLOWER_FRICTION_FC = np.array([0.306, 0.306, 0.400, 0.166, 0.050, 0.093, 0.172], dtype=np.float64)
     FOLLOWER_FRICTION_K = np.array([28.417, 28.417, 29.065, 130.038, 151.771, 242.287, 7.888], dtype=np.float64)
@@ -164,40 +164,24 @@ class Config:
     FOLLOWER_FRICTION_FV_14 = np.tile(FOLLOWER_FRICTION_FV, NUM_ARMS)
     FOLLOWER_FRICTION_FO_14 = np.tile(FOLLOWER_FRICTION_FO, NUM_ARMS)
 
-    # === 控制器镜像参数 (kept in sync with stm32_code/config.h) ===
-    KP_CART_X = 260.0
-    KP_CART_Y = 260.0
-    KP_CART_Z = 260.0
-    KD_CART_X = 70.0
-    KD_CART_Y = 70.0
-    KD_CART_Z = 70.0
-    KP_CART_ROLL = 12.0
-    KP_CART_PITCH = 12.0
-    KP_CART_YAW = 12.0
+    # === 控制器参数 ===
+    # 笛卡尔 PD 与 stm32_code/config.h 保持一致；末端参考由五次 S 曲线生成，
+    # END_EFFECTOR_LINEAR_SPEED_MPS 表示峰值线速度。
+    KP_CART_X = 170.0
+    KP_CART_Y = 170.0
+    KP_CART_Z = 170.0
+    KD_CART_X = 65.0
+    KD_CART_Y = 65.0
+    KD_CART_Z = 65.0
+    KP_CART_ROLL = 8.0
+    KP_CART_PITCH = 8.0
+    KP_CART_YAW = 8.0
     KD_CART_ROLL = 4.0
     KD_CART_PITCH = 4.0
     KD_CART_YAW = 4.0
-    KP_JOINT = np.array([115.0, 100.0, 30.0, 40.0, 20.0, 20.0, 20.0], dtype=np.float64)
-    KD_JOINT = np.array([5.0, 5.0, 2.0, 2.0, 1.0, 1.0, 1.0], dtype=np.float64)
-    Q_PREFERRED = np.array([0.0, 0.0, 0.0, np.pi / 3.0, 0.0, 0.0, 0.0], dtype=np.float64)
-    POSTURE_ALPHA = 0.35
-    W_CARTESIAN = 0.75
-    W_JOINT = 0.25
-    NULLSPACE_POS_DEADBAND = 0.001
-    NULLSPACE_ORI_DEADBAND = 0.002
-    NULLSPACE_POS_FULL_SCALE = 0.02
-    NULLSPACE_ORI_FULL_SCALE = 0.05
-    NULLSPACE_TORQUE_LIMIT = 0.08
-    TRAJ_PLAN_SPEED = 3.0
-    TRAJ_PLAN_ACCEL = 2.0
-    CONTROL_PATH_GATE_FULL_ERROR_M = 0.005
-    CONTROL_PATH_GATE_STOP_ERROR_M = 0.020
-    CONTROL_PATH_GATE_RISE_TIME_S = 0.080
-    CONTROL_PATH_GATE_FALL_TIME_S = 0.030
-    CONTROL_PATH_LOOKAHEAD_M = 0.008
-    CONTROL_PATH_LOOKAHEAD_RAMP_S = 0.30
-    CONTROL_TARGET_REPLAN_POS_EPS_M = 0.001
-    CONTROL_TARGET_REPLAN_ORI_EPS_RAD = 0.002
+    END_EFFECTOR_LINEAR_SPEED_MPS = 0.05
+    END_EFFECTOR_TARGET_POS_TOL_M = 0.0025
+    END_EFFECTOR_TARGET_ORI_TOL_RAD = 0.005
 
     # === 仿真参数 ===
     DT = 0.001  # 仿真步长 (秒)，对应 100 Hz
@@ -209,7 +193,7 @@ class Config:
     INIT_QPOS = np.tile(ARM_INIT_QPOS, NUM_ARMS)
     # 仿真启动姿态：右臂 J4 避开内收后的安全下限，避免开局 safety latch。
     LEFT_HOME_QPOS = np.zeros(ARM_JOINTS, dtype=np.float64)
-    RIGHT_HOME_QPOS = np.array([0.0, 0.0, 0.0, 0.03, 0.0, 0.0, 0.0], dtype=np.float64)
+    RIGHT_HOME_QPOS = np.array([0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0], dtype=np.float64)
     ARM_HOME_QPOS = LEFT_HOME_QPOS
     HOME_QPOS = np.concatenate([LEFT_HOME_QPOS, RIGHT_HOME_QPOS])
 

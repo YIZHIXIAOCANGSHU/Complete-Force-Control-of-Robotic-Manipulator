@@ -1,9 +1,24 @@
 #include "stm_controller.h"
 
 #include "control_logic.h"
-#include "trajectory_lib.h"
 #include <math.h>
 #include <string.h>
+
+typedef struct {
+  int initialized;
+  int arrived;
+  double start_pos[3];
+  double start_quat[4];
+  double target_pos[3];
+  double target_quat[4];
+  double ref_pos[3];
+  double ref_quat[4];
+  double direction[3];
+  double path_length;
+  double progress;
+  double path_time_s;
+  double duration_s;
+} CartesianPathState;
 
 typedef struct {
   double traj_t;
@@ -13,16 +28,10 @@ typedef struct {
   int last_safety_reason;
   uint8_t safety_arm_mask;
   int target_valid[NUM_ARMS];
-  int ref_valid[NUM_ARMS];
   double zero_hold_s;
   double target_pos[NUM_ARMS][3];
   double target_quat[NUM_ARMS][4];
-  double ref_pos[NUM_ARMS][3];
-  double ref_quat[NUM_ARMS][4];
-  LinearPathPlanner path_planner[NUM_ARMS];
-  double path_progress_t[NUM_ARMS];
-  double path_gate[NUM_ARMS];
-  double path_lookahead_m[NUM_ARMS];
+  CartesianPathState path[NUM_ARMS];
 } StmControllerState;
 
 static StmControllerState g_controller = {0};
@@ -43,27 +52,19 @@ static int stm_controller_is_finite_vec(const double *values, int count) {
   return 1;
 }
 
-static void stm_controller_clear_path_state(void) {
+static void stm_controller_clear_target_state(void) {
   memset(g_controller.target_valid, 0, sizeof(g_controller.target_valid));
-  memset(g_controller.ref_valid, 0, sizeof(g_controller.ref_valid));
   memset(g_controller.target_pos, 0, sizeof(g_controller.target_pos));
   memset(g_controller.target_quat, 0, sizeof(g_controller.target_quat));
-  memset(g_controller.ref_pos, 0, sizeof(g_controller.ref_pos));
-  memset(g_controller.ref_quat, 0, sizeof(g_controller.ref_quat));
-  memset(g_controller.path_planner, 0, sizeof(g_controller.path_planner));
-  memset(g_controller.path_progress_t, 0, sizeof(g_controller.path_progress_t));
-  memset(g_controller.path_gate, 0, sizeof(g_controller.path_gate));
-  memset(g_controller.path_lookahead_m, 0, sizeof(g_controller.path_lookahead_m));
 }
 
-static double stm_controller_clamp(double value, double low, double high) {
-  if (value < low) {
-    return low;
-  }
-  if (value > high) {
-    return high;
-  }
-  return value;
+static void stm_controller_clear_path_state(void) {
+  memset(g_controller.path, 0, sizeof(g_controller.path));
+}
+
+static uint8_t stm_controller_normalize_arm_mask(uint8_t active_arm_mask) {
+  uint8_t mask = active_arm_mask & STM_ARM_MASK_BOTH;
+  return mask == 0u ? STM_ARM_MASK_BOTH : mask;
 }
 
 static double stm_controller_vec3_distance(const double a[3],
@@ -74,55 +75,218 @@ static double stm_controller_vec3_distance(const double a[3],
   return sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-static double stm_controller_path_distance_at_time(const LinearPathPlanner *lp,
-                                                   double t) {
-  if (lp == NULL || lp->L < 1e-6 || t <= 0.0 || !isfinite(t)) {
-    return 0.0;
-  }
-  if (t >= lp->total_time) {
-    return lp->L;
-  }
-  if (t < lp->t_a) {
-    return 0.5 * lp->a * t * t;
-  }
-  if (t < lp->t_a + lp->t_c) {
-    return lp->d_a + lp->v_max * (t - lp->t_a);
-  }
-
-  double dt = t - lp->t_a - lp->t_c;
-  double s = lp->d_a + lp->v_max * lp->t_c + lp->v_max * dt -
-             0.5 * lp->a * dt * dt;
-  return stm_controller_clamp(s, 0.0, lp->L);
+static void stm_controller_quat_wxyz_to_xyzw(const double q_wxyz[4],
+                                             double q_xyzw[4]) {
+  q_xyzw[0] = q_wxyz[1];
+  q_xyzw[1] = q_wxyz[2];
+  q_xyzw[2] = q_wxyz[3];
+  q_xyzw[3] = q_wxyz[0];
 }
 
-static double stm_controller_path_time_at_distance(const LinearPathPlanner *lp,
-                                                   double s) {
-  if (lp == NULL || lp->L < 1e-6 || s <= 0.0 || !isfinite(s)) {
-    return 0.0;
-  }
-  if (s >= lp->L) {
-    return lp->total_time;
-  }
-  if (lp->a <= 0.0 || !isfinite(lp->a)) {
-    return 0.0;
-  }
-  if (s <= lp->d_a) {
-    return sqrt(2.0 * s / lp->a);
-  }
-  if (lp->t_c > 0.0 && s <= lp->d_a + lp->v_max * lp->t_c) {
-    return lp->t_a + (s - lp->d_a) / lp->v_max;
-  }
-
-  double remaining = lp->L - s;
-  if (remaining <= 0.0) {
-    return lp->total_time;
-  }
-  return lp->total_time - sqrt(2.0 * remaining / lp->a);
+static void stm_controller_quat_xyzw_to_wxyz(const double q_xyzw[4],
+                                             double q_wxyz[4]) {
+  q_wxyz[0] = q_xyzw[3];
+  q_wxyz[1] = q_xyzw[0];
+  q_wxyz[2] = q_xyzw[1];
+  q_wxyz[3] = q_xyzw[2];
 }
 
-static uint8_t stm_controller_normalize_arm_mask(uint8_t active_arm_mask) {
-  uint8_t mask = active_arm_mask & STM_ARM_MASK_BOTH;
-  return mask == 0u ? STM_ARM_MASK_BOTH : mask;
+static double stm_controller_quat_error_norm_wxyz(const double target_wxyz[4],
+                                                  const double current_wxyz[4]) {
+  double target_xyzw[4];
+  double current_xyzw[4];
+  double current_inv[4];
+  double q_err[4];
+  stm_controller_quat_wxyz_to_xyzw(target_wxyz, target_xyzw);
+  stm_controller_quat_wxyz_to_xyzw(current_wxyz, current_xyzw);
+  quat_conjugate(current_xyzw, current_inv);
+  quat_mul(target_xyzw, current_inv, q_err);
+  quat_normalize(q_err);
+  if (q_err[3] < 0.0) {
+    q_err[0] = -q_err[0];
+    q_err[1] = -q_err[1];
+    q_err[2] = -q_err[2];
+    q_err[3] = -q_err[3];
+  }
+  if (q_err[3] > 1.0) {
+    q_err[3] = 1.0;
+  }
+  if (q_err[3] < -1.0) {
+    q_err[3] = -1.0;
+  }
+  return 2.0 * acos(q_err[3]);
+}
+
+static void stm_controller_compute_tcp_velocity(
+    const control_arm_kinematics_t *kinematics,
+    const double qd[ARM_JOINTS],
+    double v_tcp[6]) {
+  memset(v_tcp, 0, sizeof(double) * 6);
+  if (kinematics == NULL || qd == NULL) {
+    return;
+  }
+  for (int r = 0; r < 6; ++r) {
+    for (int c = 0; c < ARM_JOINTS; ++c) {
+      v_tcp[r] += kinematics->J[r][c] * qd[c];
+    }
+  }
+}
+
+static double stm_controller_path_tangent_speed(const double v_tcp[6],
+                                                const double direction[3]) {
+  return v_tcp[0] * direction[0] + v_tcp[1] * direction[1] +
+         v_tcp[2] * direction[2];
+}
+
+static double stm_controller_clamp01(double value) {
+  if (value < 0.0) {
+    return 0.0;
+  }
+  if (value > 1.0) {
+    return 1.0;
+  }
+  return value;
+}
+
+static double stm_controller_quintic_s(double u) {
+  return u * u * u * (10.0 + u * (-15.0 + 6.0 * u));
+}
+
+static double stm_controller_quintic_ds_du(double u) {
+  double one_minus_u = 1.0 - u;
+  return 30.0 * u * u * one_minus_u * one_minus_u;
+}
+
+static int stm_controller_target_changed(const CartesianPathState *path,
+                                         const double target_pos[3],
+                                         const double target_quat[4]) {
+  if (!path->initialized) {
+    return 1;
+  }
+  if (stm_controller_vec3_distance(path->target_pos, target_pos) >
+      TRAJ_TARGET_CHANGE_POS_EPS_M) {
+    return 1;
+  }
+  if (stm_controller_quat_error_norm_wxyz(target_quat, path->target_quat) >
+      TRAJ_TARGET_CHANGE_ORI_EPS_RAD) {
+    return 1;
+  }
+  return 0;
+}
+
+static void stm_controller_plan_path_from_current(
+    CartesianPathState *path,
+    const control_arm_kinematics_t *kinematics,
+    const double target_pos[3],
+    const double target_quat[4]) {
+  double delta[3];
+
+  memset(path, 0, sizeof(*path));
+  path->initialized = 1;
+  memcpy(path->start_pos, kinematics->pos, sizeof(path->start_pos));
+  memcpy(path->start_quat, kinematics->quat_wxyz, sizeof(path->start_quat));
+  memcpy(path->target_pos, target_pos, sizeof(path->target_pos));
+  memcpy(path->target_quat, target_quat, sizeof(path->target_quat));
+
+  delta[0] = target_pos[0] - path->start_pos[0];
+  delta[1] = target_pos[1] - path->start_pos[1];
+  delta[2] = target_pos[2] - path->start_pos[2];
+  path->path_length = sqrt(delta[0] * delta[0] + delta[1] * delta[1] +
+                           delta[2] * delta[2]);
+
+  if (isfinite(path->path_length) && path->path_length > 1e-12) {
+    path->direction[0] = delta[0] / path->path_length;
+    path->direction[1] = delta[1] / path->path_length;
+    path->direction[2] = delta[2] / path->path_length;
+  }
+
+  if (path->path_length > END_EFFECTOR_TARGET_POS_TOL_M) {
+    double v_peak = END_EFFECTOR_LINEAR_SPEED_MPS;
+    if (isfinite(v_peak) && v_peak > 1e-9) {
+      path->duration_s = 1.875 * path->path_length / v_peak;
+    }
+  }
+
+  memcpy(path->ref_pos, path->start_pos, sizeof(path->ref_pos));
+  memcpy(path->ref_quat, path->start_quat, sizeof(path->ref_quat));
+}
+
+static void stm_controller_update_path_reference(CartesianPathState *path,
+                                                 double elapsed_s,
+                                                 double ref_twist[6]) {
+  double ratio = 1.0;
+  memset(ref_twist, 0, sizeof(double) * 6);
+
+  if (!path->initialized) {
+    return;
+  }
+
+  if (path->path_length > END_EFFECTOR_TARGET_POS_TOL_M) {
+    double u;
+    double s;
+    double ds_dt = 0.0;
+    if (path->duration_s <= 0.0 || !isfinite(path->duration_s)) {
+      path->duration_s = 0.0;
+      path->path_time_s = 0.0;
+      path->progress = path->path_length;
+      u = 1.0;
+    } else {
+      if (isfinite(elapsed_s) && elapsed_s > 0.0) {
+        path->path_time_s += elapsed_s;
+      }
+      if (path->path_time_s > path->duration_s) {
+        path->path_time_s = path->duration_s;
+      }
+      u = stm_controller_clamp01(path->path_time_s / path->duration_s);
+      ds_dt = stm_controller_quintic_ds_du(u) / path->duration_s;
+    }
+    s = stm_controller_quintic_s(u);
+    ratio = stm_controller_clamp01(s);
+    path->progress = path->path_length * ratio;
+    for (int i = 0; i < 3; ++i) {
+      path->ref_pos[i] = path->start_pos[i] + path->direction[i] * path->progress;
+    }
+    if (u < 1.0) {
+      double speed = path->path_length * ds_dt;
+      for (int i = 0; i < 3; ++i) {
+        ref_twist[i] = speed * path->direction[i];
+      }
+    }
+  } else {
+    path->progress = path->path_length;
+    memcpy(path->ref_pos, path->target_pos, sizeof(path->ref_pos));
+  }
+
+  double start_xyzw[4], target_xyzw[4], ref_xyzw[4];
+  stm_controller_quat_wxyz_to_xyzw(path->start_quat, start_xyzw);
+  stm_controller_quat_wxyz_to_xyzw(path->target_quat, target_xyzw);
+  quat_slerp(start_xyzw, target_xyzw, ratio, ref_xyzw);
+  quat_normalize(ref_xyzw);
+  stm_controller_quat_xyzw_to_wxyz(ref_xyzw, path->ref_quat);
+}
+
+static int stm_controller_path_arrived(
+    CartesianPathState *path,
+    const control_arm_kinematics_t *kinematics,
+    const double v_tcp[6]) {
+  double pos_err =
+      stm_controller_vec3_distance(kinematics->pos, path->target_pos);
+  double ori_err =
+      stm_controller_quat_error_norm_wxyz(path->target_quat,
+                                          kinematics->quat_wxyz);
+  double speed_abs = fabs(stm_controller_path_tangent_speed(v_tcp,
+                                                            path->direction));
+
+  if (pos_err <= END_EFFECTOR_TARGET_POS_TOL_M &&
+      ori_err <= END_EFFECTOR_TARGET_ORI_TOL_RAD &&
+      speed_abs <= END_EFFECTOR_ARRIVAL_SPEED_TOL_MPS) {
+    path->arrived = 1;
+    path->progress = path->path_length;
+    memcpy(path->ref_pos, path->target_pos, sizeof(path->ref_pos));
+    memcpy(path->ref_quat, path->target_quat, sizeof(path->ref_quat));
+    return 1;
+  }
+  return 0;
 }
 
 static void stm_controller_enter_safety_latch(int reason, uint8_t active_arm_mask) {
@@ -130,6 +294,7 @@ static void stm_controller_enter_safety_latch(int reason, uint8_t active_arm_mas
   g_controller.zero_hold_s = 0.0;
   g_controller.last_safety_reason = reason;
   g_controller.safety_arm_mask = stm_controller_normalize_arm_mask(active_arm_mask);
+  stm_controller_clear_path_state();
 }
 
 static int stm_controller_joints_still(const double qd[NUM_JOINTS],
@@ -165,6 +330,7 @@ static int stm_controller_update_safety_recovery(const double qd[NUM_JOINTS],
       g_controller.zero_hold_s = 0.0;
       g_controller.last_safety_reason = STM_STATUS_OK;
       g_controller.safety_arm_mask = STM_ARM_MASK_BOTH;
+      stm_controller_clear_target_state();
       stm_controller_clear_path_state();
     }
   } else {
@@ -172,29 +338,6 @@ static int stm_controller_update_safety_recovery(const double qd[NUM_JOINTS],
   }
 
   return 1;
-}
-
-static int stm_controller_pose_changed(int arm, const double target_pos[3],
-                                       const double target_quat[4]) {
-  if (!g_controller.target_valid[arm]) {
-    return 1;
-  }
-
-  for (int i = 0; i < 3; ++i) {
-    if (fabs(target_pos[i] - g_controller.target_pos[arm][i]) >
-        CONTROL_TARGET_REPLAN_POS_EPS_M) {
-      return 1;
-    }
-  }
-
-  double dot = 0.0;
-  for (int i = 0; i < 4; ++i) {
-    dot += target_quat[i] * g_controller.target_quat[arm][i];
-  }
-  double dot_abs = fabs(dot);
-  dot_abs = stm_controller_clamp(dot_abs, 0.0, 1.0);
-  double angle = 2.0 * acos(dot_abs);
-  return angle > CONTROL_TARGET_REPLAN_ORI_EPS_RAD;
 }
 
 static void stm_controller_sanitize_target_pose(const stm_input_t *in,
@@ -231,119 +374,10 @@ static void stm_controller_sanitize_target_pose(const stm_input_t *in,
   } else {
     memcpy(target_quat, fallback_quat, sizeof(double) * 4);
   }
-}
 
-static double stm_controller_tracking_gate(double error_m, double elapsed_s,
-                                           double previous_gate) {
-  double gate_cmd;
-  double gate_delta;
-  double full_error = CONTROL_PATH_GATE_FULL_ERROR_M;
-  double stop_error = CONTROL_PATH_GATE_STOP_ERROR_M;
-
-  if (!isfinite(error_m)) {
-    gate_cmd = 0.0;
-  } else if (error_m <= full_error) {
-    gate_cmd = 1.0;
-  } else if (error_m >= stop_error || stop_error <= full_error) {
-    gate_cmd = 0.0;
-  } else {
-    double x = (stop_error - error_m) / (stop_error - full_error);
-    x = stm_controller_clamp(x, 0.0, 1.0);
-    gate_cmd = x * x * (3.0 - 2.0 * x);
-  }
-
-  if (elapsed_s <= 0.0 || !isfinite(elapsed_s)) {
-    return stm_controller_clamp(previous_gate, 0.0, 1.0);
-  }
-
-  gate_delta = gate_cmd - previous_gate;
-  if (gate_delta >= 0.0) {
-    double max_rise = elapsed_s / CONTROL_PATH_GATE_RISE_TIME_S;
-    gate_delta = stm_controller_clamp(gate_delta, 0.0, max_rise);
-  } else {
-    double max_fall = elapsed_s / CONTROL_PATH_GATE_FALL_TIME_S;
-    gate_delta = stm_controller_clamp(gate_delta, -max_fall, 0.0);
-  }
-
-  return stm_controller_clamp(previous_gate + gate_delta, 0.0, 1.0);
-}
-
-static void stm_controller_update_reference_arm(int arm,
-                                                const double current_pos[3],
-                                                const double current_quat[4],
-                                                const double target_pos[3],
-                                                const double target_quat[4],
-                                                double step_s, double ref_pos[3],
-                                                double ref_quat[4]) {
-  int replan = stm_controller_pose_changed(arm, target_pos, target_quat);
-  double tracking_error;
-  double lookahead_step;
-  double base_distance;
-  double eval_distance;
-  double eval_t;
-
-  if (!g_controller.ref_valid[arm]) {
-    memcpy(g_controller.ref_pos[arm], current_pos, sizeof(double) * 3);
-    memcpy(g_controller.ref_quat[arm], current_quat, sizeof(double) * 4);
-    g_controller.ref_valid[arm] = 1;
-    g_controller.path_gate[arm] = 1.0;
-    g_controller.path_progress_t[arm] = 0.0;
-    g_controller.path_lookahead_m[arm] = 0.0;
-  }
-
-  if (replan) {
-    tracking_error =
-        stm_controller_vec3_distance(current_pos, g_controller.ref_pos[arm]);
-    if (tracking_error >= CONTROL_PATH_GATE_STOP_ERROR_M) {
-      memcpy(g_controller.ref_pos[arm], current_pos, sizeof(double) * 3);
-      memcpy(g_controller.ref_quat[arm], current_quat, sizeof(double) * 4);
-      g_controller.path_gate[arm] = 0.0;
-      g_controller.path_lookahead_m[arm] = 0.0;
-    }
-    linear_path_init(&g_controller.path_planner[arm], g_controller.ref_pos[arm],
-                     g_controller.ref_quat[arm], target_pos, target_quat,
-                     TRAJ_PLAN_SPEED, TRAJ_PLAN_ACCEL);
-    g_controller.path_progress_t[arm] = 0.0;
-    memcpy(g_controller.target_pos[arm], target_pos, sizeof(double) * 3);
-    memcpy(g_controller.target_quat[arm], target_quat, sizeof(double) * 4);
-    g_controller.target_valid[arm] = 1;
-  }
-
-  tracking_error =
-      stm_controller_vec3_distance(current_pos, g_controller.ref_pos[arm]);
-  g_controller.path_gate[arm] =
-      stm_controller_tracking_gate(tracking_error, step_s, g_controller.path_gate[arm]);
-  g_controller.path_progress_t[arm] += step_s * g_controller.path_gate[arm];
-  if (g_controller.path_progress_t[arm] < 0.0 ||
-      !isfinite(g_controller.path_progress_t[arm])) {
-    g_controller.path_progress_t[arm] = 0.0;
-  }
-
-  if (step_s > 0.0 && isfinite(step_s) &&
-      CONTROL_PATH_LOOKAHEAD_RAMP_S > 0.0) {
-    lookahead_step =
-        CONTROL_PATH_LOOKAHEAD_M * step_s / CONTROL_PATH_LOOKAHEAD_RAMP_S;
-    g_controller.path_lookahead_m[arm] += lookahead_step;
-    if (g_controller.path_lookahead_m[arm] > CONTROL_PATH_LOOKAHEAD_M) {
-      g_controller.path_lookahead_m[arm] = CONTROL_PATH_LOOKAHEAD_M;
-    }
-  }
-
-  base_distance = stm_controller_path_distance_at_time(
-      &g_controller.path_planner[arm], g_controller.path_progress_t[arm]);
-  eval_distance = base_distance + g_controller.path_lookahead_m[arm];
-  if (eval_distance > g_controller.path_planner[arm].L) {
-    eval_distance = g_controller.path_planner[arm].L;
-  }
-  eval_t = stm_controller_path_time_at_distance(&g_controller.path_planner[arm],
-                                                eval_distance);
-  linear_path_evaluate(&g_controller.path_planner[arm],
-                       eval_t,
-                       g_controller.ref_pos[arm],
-                       g_controller.ref_quat[arm]);
-
-  memcpy(ref_pos, g_controller.ref_pos[arm], sizeof(double) * 3);
-  memcpy(ref_quat, g_controller.ref_quat[arm], sizeof(double) * 4);
+  memcpy(g_controller.target_pos[arm], target_pos, sizeof(double) * 3);
+  memcpy(g_controller.target_quat[arm], target_quat, sizeof(double) * 4);
+  g_controller.target_valid[arm] = 1;
 }
 
 static void stm_controller_prepare_output(stm_output_t *out) {
@@ -407,6 +441,7 @@ void stm_controller_reset(void) {
   g_controller.zero_hold_s = 0.0;
   g_controller.last_safety_reason = STM_STATUS_OK;
   g_controller.safety_arm_mask = STM_ARM_MASK_BOTH;
+  stm_controller_clear_target_state();
   stm_controller_clear_path_state();
 }
 
@@ -425,8 +460,8 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
   double filtered_qd[NUM_JOINTS];
   double target_pos[NUM_ARMS][3];
   double target_quat[NUM_ARMS][4];
-  double ref_pos[NUM_ARMS][3];
-  double ref_quat[NUM_ARMS][4];
+  double ref_twist[NUM_ARMS][6];
+  double v_tcp[NUM_ARMS][6];
   control_arm_kinematics_t arm_kinematics[NUM_ARMS];
   uint8_t active_arm_mask;
 
@@ -440,8 +475,6 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
 
   if (elapsed_s < 0.0 || !isfinite(elapsed_s)) {
     elapsed_s = 0.0;
-  } else if (elapsed_s > CONTROL_MAX_ELAPSED_S) {
-    elapsed_s = CONTROL_MAX_ELAPSED_S;
   }
 
   stm_controller_prepare_output(out);
@@ -455,6 +488,12 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
 
   if (stm_controller_is_finite_vec(in->body_q, NUM_BODY_JOINTS)) {
     control_update_body_gravity(in->body_q);
+  }
+
+  for (int arm = 0; arm < NUM_ARMS; ++arm) {
+    if ((active_arm_mask & (1u << arm)) == 0u) {
+      memset(&g_controller.path[arm], 0, sizeof(g_controller.path[arm]));
+    }
   }
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
@@ -479,6 +518,8 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
     stm_controller_sanitize_target_pose(in, arm, out->ee_pos[arm],
                                         out->ee_quat[arm], target_pos[arm],
                                         target_quat[arm]);
+    stm_controller_compute_tcp_velocity(&arm_kinematics[arm],
+                                        filtered_qd + offset, v_tcp[arm]);
     if (control_check_safety_arm(arm, in->q + offset, filtered_qd + offset) < 0) {
       stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
                                         active_arm_mask);
@@ -492,19 +533,23 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
     if ((active_arm_mask & (1u << arm)) == 0u) {
       continue;
     }
-    stm_controller_update_reference_arm(arm, out->ee_pos[arm], out->ee_quat[arm],
-                                        target_pos[arm], target_quat[arm], elapsed_s,
-                                        ref_pos[arm], ref_quat[arm]);
-  }
-
-  for (int arm = 0; arm < NUM_ARMS; ++arm) {
-    if ((active_arm_mask & (1u << arm)) == 0u) {
-      continue;
-    }
     int offset = arm * ARM_JOINTS;
-    control_step_v2_arm_with_state(arm, ref_pos[arm], ref_quat[arm],
-                                   in->q + offset, filtered_qd + offset,
-                                   &arm_kinematics[arm], out->tau + offset);
+    CartesianPathState *path = &g_controller.path[arm];
+    if (stm_controller_target_changed(path, target_pos[arm],
+                                      target_quat[arm])) {
+      stm_controller_plan_path_from_current(path, &arm_kinematics[arm],
+                                            target_pos[arm],
+                                            target_quat[arm]);
+    }
+    stm_controller_update_path_reference(path, elapsed_s, ref_twist[arm]);
+    if (stm_controller_path_arrived(path, &arm_kinematics[arm], v_tcp[arm])) {
+      memset(ref_twist[arm], 0, sizeof(ref_twist[arm]));
+    }
+    control_step_v2_arm_with_reference(arm, path->ref_pos, path->ref_quat,
+                                       ref_twist[arm], in->q + offset,
+                                       filtered_qd + offset,
+                                       &arm_kinematics[arm],
+                                       out->tau + offset);
   }
 
   if (stm_controller_check_joint_safety(in->q, filtered_qd, out->tau,

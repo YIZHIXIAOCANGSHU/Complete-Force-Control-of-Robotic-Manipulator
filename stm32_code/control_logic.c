@@ -33,15 +33,6 @@ static const double CARTESIAN_K[6] = {KP_CART_X,    KP_CART_Y,     KP_CART_Z,
                                       KP_CART_ROLL, KP_CART_PITCH, KP_CART_YAW};
 static const double CARTESIAN_D[6] = {KD_CART_X,    KD_CART_Y,     KD_CART_Z,
                                       KD_CART_ROLL, KD_CART_PITCH, KD_CART_YAW};
-static const double JOINT_KP[ARM_JOINTS] = {
-    KP_JOINT_1, KP_JOINT_2, KP_JOINT_3, KP_JOINT_4,
-    KP_JOINT_5, KP_JOINT_6, KP_JOINT_7};
-static const double JOINT_KD[ARM_JOINTS] = {
-    KD_JOINT_1, KD_JOINT_2, KD_JOINT_3, KD_JOINT_4,
-    KD_JOINT_5, KD_JOINT_6, KD_JOINT_7};
-static const double Q_PREFERRED[ARM_JOINTS] = {
-    Q_PREF_1, Q_PREF_2, Q_PREF_3, Q_PREF_4,
-    Q_PREF_5, Q_PREF_6, Q_PREF_7};
 
 static const double JOINT_MIN_LEFT[ARM_JOINTS] = {
     JOINT_POS_MIN_1, JOINT_POS_MIN_2, JOINT_POS_MIN_3, JOINT_POS_MIN_4,
@@ -77,23 +68,6 @@ static int normalize_side(int side) {
 
 static ControlArmContext *control_get_context(int side) {
   return &g_arm_contexts[normalize_side(side)];
-}
-
-static double clamp_scalar(double value, double limit) {
-  if (value > limit)
-    return limit;
-  if (value < -limit)
-    return -limit;
-  return value;
-}
-
-static double ramp_from_deadband(double value, double deadband,
-                                 double full_scale) {
-  if (value <= deadband)
-    return 0.0;
-  if (value >= full_scale)
-    return 1.0;
-  return (value - deadband) / (full_scale - deadband);
 }
 
 static void quat_error_to_axis_angle(const double target_quat_wxyz[4],
@@ -225,6 +199,27 @@ static void apply_tcp_frame_orientation(int side, double quat_xyzw[4]) {
   quat_normalize(quat_xyzw);
 }
 
+static void control_desired_tcp_linear_velocity(const double pos_error[3],
+                                                double v_des[3]) {
+  double distance = sqrt(pos_error[0] * pos_error[0] +
+                         pos_error[1] * pos_error[1] +
+                         pos_error[2] * pos_error[2]);
+  double speed = END_EFFECTOR_LINEAR_SPEED_MPS;
+
+  v_des[0] = 0.0;
+  v_des[1] = 0.0;
+  v_des[2] = 0.0;
+
+  if (!isfinite(distance) || distance <= END_EFFECTOR_TARGET_POS_TOL_M ||
+      !isfinite(speed) || speed <= 0.0) {
+    return;
+  }
+
+  v_des[0] = speed * pos_error[0] / distance;
+  v_des[1] = speed * pos_error[1] / distance;
+  v_des[2] = speed * pos_error[2] / distance;
+}
+
 /* ================================================================
  *  公开 API
  * ================================================================ */
@@ -304,30 +299,11 @@ void control_get_arm_kinematics_with_offset(
 }
 
 /* ================================================================
- *  核心控制逻辑: 双空间阻抗控制
- * ================================================================
- * 函数使用示例 包含默认的值
- *
- *
- * 函数输入的内容
- * target_pos: 目标末端位置 (Body0422 动态目标坐标系) 格式为[x,y,z]
- * target_quat: 目标末端姿态，使用随 Body0422 相对零位旋转的动态目标坐标系，格式为[w,x,y,z]
- * current_q: 当前关节角度 格式为[q1,q2,q3,q4,q5,q6,q7]
- * current_qd: 当前关节速度
- * 格式为[qd1,qd2,qd3,qd4,qd5,qd6,qd7] cartesian_K: 笛卡尔空间位置/姿态比例增益
- * 格式为[kx,ky,kz,kroll,kpitch,kyaw] cartesian_D: 笛卡尔空间位置/姿态微分增益
- * 格式为[dx,dy,dz,droll,dpitch,dyaw] joint_kp: 关节空间位置比例增益
- * 格式为[kp1,kp2,kp3,kp4,kp5,kp6,kp7] joint_kd: 关节空间位置微分增益
- * 格式为[kd1,kd2,kd3,kd4,kd5,kd6,kd7] q_preferred: 首选关节姿态
- * 格式为[q1,q2,q3,q4,q5,q6,q7] posture_alpha: 首选姿态权重 格式为[alpha]
- * w_cart: 笛卡尔空间权重 格式为[w_cart]
- * w_joint: 关节空间权重 格式为[w_joint]
- *
- *输出
- * tau_out: 输出关节力矩 格式为[tau1,tau2,tau3,tau4,tau5,tau6,tau7]
+ *  核心控制逻辑: 笛卡尔阻抗 + g+c
  * ================================================================ */
-void control_step_v2_arm_with_state(
-    int side, const double target_pos[3], const double target_quat[4],
+void control_step_v2_arm_with_reference(
+    int side, const double ref_pos[3], const double ref_quat[4],
+    const double ref_twist[6],
     const double current_q[ARM_JOINTS],
     const double current_qd[ARM_JOINTS],
     const control_arm_kinematics_t *kinematics,
@@ -339,9 +315,9 @@ void control_step_v2_arm_with_state(
     control_arm_kinematics_t local_kinematics;
     control_get_arm_kinematics_with_offset(arm_side, current_q,
                                            &local_kinematics);
-    control_step_v2_arm_with_state(arm_side, target_pos, target_quat,
-                                   current_q, current_qd, &local_kinematics,
-                                   tau_out);
+    control_step_v2_arm_with_reference(arm_side, ref_pos, ref_quat, ref_twist,
+                                       current_q, current_qd,
+                                       &local_kinematics, tau_out);
     return;
   }
 
@@ -352,12 +328,12 @@ void control_step_v2_arm_with_state(
   double e6[6], v_ee[6] = {0};
 
   // 位置误差
-  e6[0] = target_pos[0] - kinematics->pos[0];
-  e6[1] = target_pos[1] - kinematics->pos[1];
-  e6[2] = target_pos[2] - kinematics->pos[2];
+  e6[0] = ref_pos[0] - kinematics->pos[0];
+  e6[1] = ref_pos[1] - kinematics->pos[1];
+  e6[2] = ref_pos[2] - kinematics->pos[2];
 
   // 姿态误差使用轴角小量，与 Python 侧误差约定对齐。
-  quat_error_to_axis_angle(target_quat, kinematics->quat_xyzw, &e6[3]);
+  quat_error_to_axis_angle(ref_quat, kinematics->quat_xyzw, &e6[3]);
 
   /* 2. 计算末端速度: v_ee = J * current_qd */
   for (int i = 0; i < 6; i++) {
@@ -366,109 +342,32 @@ void control_step_v2_arm_with_state(
     }
   }
 
-  /* 3. 笛卡尔空间主任务力矩: tau_task = J^T * (K * e6 - D * v_ee) */
+  /* 3. 笛卡尔空间主任务力矩。平移轴跟踪期望 TCP 线速度；
+   * 姿态轴本轮通常使用零期望角速度阻尼。
+   */
   double tau_task[ARM_JOINTS] = {0};
   for (int i = 0; i < ARM_JOINTS; i++) {
     for (int j = 0; j < 6; j++) {
-      double F_j = CARTESIAN_K[j] * e6[j] - CARTESIAN_D[j] * v_ee[j];
+      double v_ref = ref_twist != NULL ? ref_twist[j] : 0.0;
+      double F_j;
+      if (j < 3) {
+        F_j = CARTESIAN_K[j] * e6[j] +
+              CARTESIAN_D[j] * (v_ref - v_ee[j]);
+      } else {
+        F_j = CARTESIAN_K[j] * e6[j] +
+              CARTESIAN_D[j] * (v_ref - v_ee[j]);
+      }
       tau_task[i] += kinematics->J[j][i] * F_j;
     }
   }
 
-  /* 4. DLS 阻尼最小二乘法求 Jacobian 伪逆 */
-  double A[36] = {
-      0}; // A = J * J^T (6x6 矩阵, 列主序 / 行主序在此对称矩阵中无关紧要)
-  for (int r = 0; r < 6; r++) {
-    for (int c = 0; c < 6; c++) {
-      for (int k = 0; k < ARM_JOINTS; k++) {
-        A[r * 6 + c] += kinematics->J[r][k] * kinematics->J[c][k];
-      }
-    }
-  }
-  double dls_lambda = 0.05; // 阻尼因子
-  for (int i = 0; i < 6; i++) {
-    A[i * 6 + i] += dls_lambda * dls_lambda;
-  }
-
-  double invA[36] = {0};
-  if (!mat6_inverse(A, invA)) {
-    // 若奇异(理论上因lambda存在不会发生)，使用零矩阵降级
-    memset(invA, 0, sizeof(invA));
-  }
-
-  // J_pinv (7x6 矩阵) = J^T * invA
-  double J_pinv[ARM_JOINTS][6] = {0};
-  for (int r = 0; r < ARM_JOINTS; r++) {   // r 是 7 个关节
-    for (int c = 0; c < 6; c++) { // c 是 6 个空间维度
-      for (int k = 0; k < 6; k++) {
-        J_pinv[r][c] += kinematics->J[k][r] * invA[k * 6 + c];
-      }
-    }
-  }
-
-  /* 5. 底层运动学姿态小步长偏好规划 (dq = J_pinv * e6) */
-  double dq_ik[ARM_JOINTS] = {0};
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    for (int j = 0; j < 6; j++) {
-      dq_ik[i] += J_pinv[i][j] * e6[j];
-    }
-  }
-
-  double q_f[ARM_JOINTS], q_ref[ARM_JOINTS];
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    q_f[i] = current_q[i] + dq_ik[i];
-    q_ref[i] = (1.0 - POSTURE_ALPHA) * q_f[i] + POSTURE_ALPHA * Q_PREFERRED[i];
-  }
-
-  /* 6. 关节空间力矩（仅作为零空间辅助力） */
-  double tau_null_control[ARM_JOINTS] = {0};
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    double eq = normalize_angle(q_ref[i] - current_q[i]);
-    tau_null_control[i] = JOINT_KP[i] * eq - JOINT_KD[i] * current_qd[i];
-  }
-
-  /* 7. 零空间投影 N = I - J_pinv * J */
-  double N[ARM_JOINTS][ARM_JOINTS] = {0};
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    N[i][i] = 1.0;
-    for (int j = 0; j < ARM_JOINTS; j++) {
-      for (int k = 0; k < 6; k++) {
-        N[i][j] -= J_pinv[i][k] * kinematics->J[k][j];
-      }
-    }
-  }
-
-  // tau_null_projected = N^T * tau_null_control
-  double tau_null_projected[ARM_JOINTS] = {0};
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    for (int j = 0; j < ARM_JOINTS; j++) {
-      tau_null_projected[i] += N[j][i] * tau_null_control[j]; // N[j][i] is N.T
-    }
-  }
-
-  double pos_err_norm = sqrt(e6[0] * e6[0] + e6[1] * e6[1] + e6[2] * e6[2]);
-  double ori_err_norm = sqrt(e6[3] * e6[3] + e6[4] * e6[4] + e6[5] * e6[5]);
-  double null_scale =
-      ramp_from_deadband(pos_err_norm, NULLSPACE_POS_DEADBAND,
-                         NULLSPACE_POS_FULL_SCALE);
-  double ori_null_scale =
-      ramp_from_deadband(ori_err_norm, NULLSPACE_ORI_DEADBAND,
-                         NULLSPACE_ORI_FULL_SCALE);
-  if (ori_null_scale > null_scale)
-    null_scale = ori_null_scale;
-  for (int i = 0; i < ARM_JOINTS; i++) {
-    tau_null_projected[i] =
-        clamp_scalar(null_scale * tau_null_projected[i], NULLSPACE_TORQUE_LIMIT);
-  }
-
-  /* 8. 动力学补偿: 包含科氏力(Coriolis)和重力(Gravity) */
+  /* 4. 动力学补偿: 包含科氏力(Coriolis)和重力(Gravity) */
   double tau_gc[ARM_JOINTS];
   rbdl_calc_gc(&ctx->rbdl_model, current_q, current_qd, tau_gc);
 
-  /* 9. 融合总力矩并限制输出 */
+  /* 5. 融合总力矩并限制输出 */
   for (int i = 0; i < ARM_JOINTS; i++) {
-    tau_out[i] =
-        W_CARTESIAN * tau_task[i] + W_JOINT * tau_null_projected[i] + tau_gc[i];
+    tau_out[i] = tau_task[i] + tau_gc[i];
 
     /* 施加关节力矩饱和限位 */
     if (tau_out[i] > TORQUE_LIMIT[i])
@@ -476,6 +375,36 @@ void control_step_v2_arm_with_state(
     if (tau_out[i] < -TORQUE_LIMIT[i])
       tau_out[i] = -TORQUE_LIMIT[i];
   }
+}
+
+void control_step_v2_arm_with_state(
+    int side, const double target_pos[3], const double target_quat[4],
+    const double current_q[ARM_JOINTS],
+    const double current_qd[ARM_JOINTS],
+    const control_arm_kinematics_t *kinematics,
+    double tau_out[ARM_JOINTS]) {
+  double ref_twist[6] = {0.0};
+  double pos_error[3] = {0.0};
+
+  if (kinematics == NULL) {
+    control_arm_kinematics_t local_kinematics;
+    control_get_arm_kinematics_with_offset(side, current_q,
+                                           &local_kinematics);
+    control_step_v2_arm_with_state(side, target_pos, target_quat, current_q,
+                                   current_qd, &local_kinematics, tau_out);
+    return;
+  }
+
+  if (kinematics != NULL) {
+    pos_error[0] = target_pos[0] - kinematics->pos[0];
+    pos_error[1] = target_pos[1] - kinematics->pos[1];
+    pos_error[2] = target_pos[2] - kinematics->pos[2];
+    control_desired_tcp_linear_velocity(pos_error, ref_twist);
+  }
+
+  control_step_v2_arm_with_reference(side, target_pos, target_quat, ref_twist,
+                                     current_q, current_qd, kinematics,
+                                     tau_out);
 }
 
 void control_step_v2_dual_with_state(

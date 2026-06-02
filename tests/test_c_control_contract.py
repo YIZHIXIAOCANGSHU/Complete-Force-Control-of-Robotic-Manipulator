@@ -17,7 +17,6 @@ STM32_SOURCES = [
     "math_lib.c",
     "model_lib.c",
     "stm_controller.c",
-    "trajectory_lib.c",
 ]
 
 
@@ -88,6 +87,8 @@ def test_c_fk_matches_mujoco_tcp_pose_in_body0422_frame(tmp_path: Path):
 
     arm_samples = np.array(
         [
+            Config.LEFT_HOME_QPOS,
+            Config.RIGHT_HOME_QPOS,
             Config.ARM_INIT_QPOS,
             Config.ARM_INIT_QPOS,
             [0.2, -0.4, 0.3, 0.8, -0.2, 0.25, -0.1],
@@ -104,6 +105,8 @@ def test_c_fk_matches_mujoco_tcp_pose_in_body0422_frame(tmp_path: Path):
         int main(void) {
           double body_q[3] = {0.2, -0.3, 0.4};
           double q[][7] = {
+            {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0},
+            {0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0},
             {0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0},
             {0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0},
             {0.2, -0.4, 0.3, 0.8, -0.2, 0.25, -0.1},
@@ -111,7 +114,7 @@ def test_c_fk_matches_mujoco_tcp_pose_in_body0422_frame(tmp_path: Path):
           };
           control_init();
           control_update_body_gravity(body_q);
-          for (int i = 0; i < 4; ++i) {
+          for (int i = 0; i < 6; ++i) {
             for (int arm = 0; arm < 2; ++arm) {
               control_arm_kinematics_t kin;
               control_get_arm_kinematics_with_offset(arm, q[i], &kin);
@@ -397,40 +400,6 @@ def test_dual_control_precomputed_fk_jacobian_matches_per_arm_dispatch(tmp_path:
     assert max_diff < 1e-10
 
 
-def test_trajectory_lib_remains_available_for_endpoint_path_planning(tmp_path: Path):
-    source = textwrap.dedent(
-        """
-        #include "trajectory_lib.h"
-        #include <stdio.h>
-
-        int main(void) {
-          LinearPathPlanner planner;
-          double start_pos[3] = {0.0, 0.0, 0.0};
-          double end_pos[3] = {1.0, 0.0, 0.0};
-          double start_quat[4] = {1.0, 0.0, 0.0, 0.0};
-          double end_quat[4] = {1.0, 0.0, 0.0, 0.0};
-          double pos[3];
-          double quat[4];
-
-          linear_path_init(&planner, start_pos, start_quat, end_pos, end_quat, 0.5, 1.0);
-          linear_path_evaluate(&planner, 0.1, pos, quat);
-          printf("%.12f %.12f %.12f %.12f\\n", pos[0], pos[1], pos[2], planner.total_time);
-          return 0;
-        }
-        """
-    )
-    probe = _compile_c_probe(tmp_path, source)
-    values = [
-        float(value)
-        for value in subprocess.check_output([str(probe)], text=True).split()
-    ]
-
-    assert 0.0 < values[0] < 1.0
-    assert values[1] == pytest.approx(0.0)
-    assert values[2] == pytest.approx(0.0)
-    assert values[3] > 0.0
-
-
 def test_c_body_gravity_uses_three_body_joint_angles(tmp_path: Path):
     source = textwrap.dedent(
         """
@@ -631,7 +600,7 @@ def test_stm_controller_step_elapsed_uses_supplied_h7_elapsed_time(tmp_path: Pat
     assert values[4] == pytest.approx(3)
 
 
-def test_stm_controller_elapsed_time_is_sanitized_and_clamped(tmp_path: Path):
+def test_stm_controller_elapsed_time_is_sanitized_without_max_clamp(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "control_logic.h"
@@ -681,10 +650,10 @@ def test_stm_controller_elapsed_time_is_sanitized_and_clamped(tmp_path: Path):
 
     assert values[0] == pytest.approx(0.0)
     assert values[1] == pytest.approx(0.0)
-    assert values[2] == pytest.approx(0.02)
+    assert values[2] == pytest.approx(1.0)
 
 
-def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_replans(tmp_path: Path):
+def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_recovers(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "stm_controller.c"
@@ -719,13 +688,8 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_replans(t
         static void step_and_print(const char *label, stm_input_t *in,
                                    stm_output_t *out, double elapsed_s) {
           stm_controller_step_elapsed(in, out, elapsed_s);
-          printf("%s %d %.12f %d %d %d %.12f %.12f %.12f %.6f\\n", label, out->status,
+          printf("%s %d %.12f %d %.6f\\n", label, out->status,
                  tau_abs_sum(out), g_controller.safety_latched,
-                 g_controller.target_valid[ARM_LEFT],
-                 g_controller.ref_valid[ARM_LEFT],
-                 g_controller.path_progress_t[ARM_LEFT],
-                 g_controller.path_gate[ARM_LEFT],
-                 g_controller.path_lookahead_m[ARM_LEFT],
                  out->traj_t);
         }
 
@@ -771,27 +735,16 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_replans(t
             status,
             tau_sum,
             latched,
-            target_valid,
-            ref_valid,
-            path_progress_t,
-            path_gate,
-            path_lookahead_m,
             traj_t,
         ) = line.split()
         rows[label] = {
             "status": int(status),
             "tau_sum": float(tau_sum),
             "latched": int(latched),
-            "target_valid": int(target_valid),
-            "ref_valid": int(ref_valid),
-            "path_progress_t": float(path_progress_t),
-            "path_gate": float(path_gate),
-            "path_lookahead_m": float(path_lookahead_m),
             "traj_t": float(traj_t),
         }
 
     assert rows["initial_ok"]["status"] == 0
-    assert rows["initial_ok"]["target_valid"] == 1
 
     assert rows["pos_limit"]["status"] == -1
     assert rows["pos_limit"]["tau_sum"] == pytest.approx(0.0)
@@ -812,20 +765,10 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_replans(t
 
     assert rows["hold_10"]["status"] == -2
     assert rows["hold_10"]["latched"] == 0
-    assert rows["hold_10"]["target_valid"] == 0
-    assert rows["hold_10"]["ref_valid"] == 0
-    assert rows["hold_10"]["path_progress_t"] == pytest.approx(0.0)
-    assert rows["hold_10"]["path_gate"] == pytest.approx(0.0)
-    assert rows["hold_10"]["path_lookahead_m"] == pytest.approx(0.0)
     assert rows["hold_10"]["tau_sum"] == pytest.approx(0.0)
 
     assert rows["recovered"]["status"] == 0
     assert rows["recovered"]["latched"] == 0
-    assert rows["recovered"]["target_valid"] == 1
-    assert rows["recovered"]["ref_valid"] == 1
-    assert rows["recovered"]["path_progress_t"] > 0.0
-    assert rows["recovered"]["path_gate"] == pytest.approx(1.0)
-    assert rows["recovered"]["path_lookahead_m"] > 0.0
     assert rows["recovered"]["traj_t"] > rows["hold_10"]["traj_t"]
 
 
@@ -894,7 +837,7 @@ def test_control_safety_insets_position_limits_and_uses_4rad_velocity_limit(tmp_
           q[0] = safe_max + 0.0001;
           printf("inset_high %d\\n", control_check_safety_arm(ARM_RIGHT, q, qd));
           q[0] = 0.5 * (safe_min + safe_max);
-          qd[0] = 4.001;
+          qd[0] = JOINT_VEL_LIMIT + 0.001;
           printf("vel_high %d %.3f %.2f\\n", control_check_safety_arm(ARM_RIGHT, q, qd),
                  JOINT_VEL_LIMIT, CONTROL_JOINT_LIMIT_INSET_RATIO);
           return 0;
@@ -910,7 +853,7 @@ def test_control_safety_insets_position_limits_and_uses_4rad_velocity_limit(tmp_
     assert int(rows["inset_low"][0]) == -1
     assert int(rows["inset_high"][0]) == -1
     assert int(rows["vel_high"][0]) == -2
-    assert float(rows["vel_high"][1]) == pytest.approx(4.0)
+    assert float(rows["vel_high"][1]) == pytest.approx(5.0)
     assert float(rows["vel_high"][2]) == pytest.approx(0.01)
 
 
@@ -1468,7 +1411,7 @@ def test_uart_protocol_removed_from_portable_stm32_core(tmp_path: Path):
     assert "uart_protocol.h" in completed.stderr
 
 
-def test_h7_clock_sim_samples_1mhz_elapsed_time_with_clamp(tmp_path: Path):
+def test_h7_clock_sim_samples_1mhz_elapsed_time_without_clamp(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "h7_clock_sim.h"
@@ -1487,7 +1430,6 @@ def test_h7_clock_sim_samples_1mhz_elapsed_time_with_clamp(tmp_path: Path):
           h7_clock_sim_t clock;
           h7_clock_sim_init(&clock);
           h7_clock_sim_set_now_fn(&clock, fake_now_us, 0);
-          h7_clock_sim_set_max_elapsed(&clock, 0.02);
           printf("%llu\\n", (unsigned long long)h7_clock_sim_elapsed_us(&clock));
           printf("%llu\\n", (unsigned long long)h7_clock_sim_elapsed_us(&clock));
           printf("%llu\\n", (unsigned long long)h7_clock_sim_elapsed_us(&clock));
@@ -1506,17 +1448,19 @@ def test_h7_clock_sim_samples_1mhz_elapsed_time_with_clamp(tmp_path: Path):
         for line in subprocess.check_output([str(probe)], text=True).splitlines()
     ]
 
-    assert values == [0, 500, 1700, 20000]
+    assert values == [0, 500, 1700, 42800]
 
 
-def test_c_sim_main_uses_fixed_sim_dt_for_path_time():
+def test_c_sim_main_uses_wall_clock_elapsed_time():
     main_source = (PROJECT_ROOT / "c_interface" / "main.c").read_text(encoding="utf-8")
 
     assert "wait_for_h7_due_ticks" not in main_source
     assert "h7_clock_sim_due_ticks" not in main_source
     assert "stm_step_elapsed" in main_source
-    assert "double elapsed_s = CONTROL_DT;" in main_source
-    assert "h7_clock_sim_elapsed_s" not in main_source
+    assert "h7_clock_sim_t clock" in main_source
+    assert "h7_clock_sim_elapsed_s(&clock)" in main_source
+    assert "h7_clock_sim_set_max_elapsed" not in main_source
+    assert "double elapsed_s = CONTROL_DT;" not in main_source
     assert "for (int tick" not in main_source
 
 
@@ -1554,9 +1498,17 @@ def test_stm32h7_porting_doc_describes_elapsed_time_contract():
 
     assert "elapsed_s" in text
     assert "timer_frequency_hz" in text
-    assert "CONTROL_DT" in text
+    assert "CONTROL_DT" not in text
+    assert "CONTROL_MAX_ELAPSED_S" not in text
     assert "h7_clock_sim" in text
     assert "STM_LOG_ERROR" in text
+
+
+def test_stm32_config_has_no_fixed_control_period_or_elapsed_clamp():
+    text = (PROJECT_ROOT / "stm32_code" / "config.h").read_text(encoding="utf-8")
+
+    assert "CONTROL_DT" not in text
+    assert "CONTROL_MAX_ELAPSED_S" not in text
 
 
 def test_cartesian_pd_gains_are_endpoint_tracking_tuned(tmp_path: Path):
@@ -1579,11 +1531,11 @@ def test_cartesian_pd_gains_are_endpoint_tracking_tuned(tmp_path: Path):
     values = [float(value) for value in subprocess.check_output([str(probe)], text=True).split()]
 
     assert values == pytest.approx(
-        [260.0, 260.0, 260.0, 12.0, 12.0, 12.0, 70.0, 70.0, 70.0, 4.0, 4.0, 4.0]
+        [170.0, 170.0, 170.0, 8.0, 8.0, 8.0, 65.0, 65.0, 65.0, 4.0, 4.0, 4.0]
     )
 
 
-def test_stm_controller_uses_linear_path_planner_with_acceleration(tmp_path: Path):
+def test_stm_controller_elapsed_advances_internal_endpoint_reference(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "stm_controller.c"
@@ -1591,303 +1543,237 @@ def test_stm_controller_uses_linear_path_planner_with_acceleration(tmp_path: Pat
         #include <stdio.h>
         #include <string.h>
 
-        static void fill_input(stm_input_t *in, double target_x, double target_y) {
-          memset(in, 0, sizeof(*in));
-          in->active_arm_mask = STM_ARM_MASK_LEFT;
-          in->target_pos[ARM_LEFT][0] = target_x;
-          in->target_pos[ARM_LEFT][1] = target_y;
-          in->target_pos[ARM_LEFT][2] = 0.0;
-          in->target_quat[ARM_LEFT][0] = 1.0;
-          in->target_quat[ARM_LEFT][1] = 0.0;
-          in->target_quat[ARM_LEFT][2] = 0.0;
-          in->target_quat[ARM_LEFT][3] = 0.0;
-        }
-
-        static double dist3(const double a[3], const double b[3]) {
-          double dx = a[0] - b[0];
-          double dy = a[1] - b[1];
-          double dz = a[2] - b[2];
-          return sqrt(dx * dx + dy * dy + dz * dz);
-        }
-
-        int main(void) {
-          stm_input_t in;
-          stm_output_t out;
-          double first_step = 0.5 * (double)TRAJ_PLAN_ACCEL * CONTROL_DT * CONTROL_DT;
-          double second_step = 0.5 * (double)TRAJ_PLAN_ACCEL * (2.0 * CONTROL_DT) * (2.0 * CONTROL_DT);
-          double first_lookahead = CONTROL_PATH_LOOKAHEAD_M * CONTROL_DT / CONTROL_PATH_LOOKAHEAD_RAMP_S;
-          double second_lookahead = CONTROL_PATH_LOOKAHEAD_M * (2.0 * CONTROL_DT) / CONTROL_PATH_LOOKAHEAD_RAMP_S;
-          double start_pos[3];
-          double previous_ref[3];
-          double changed_start[3];
-
-          stm_controller_init();
-          stm_controller_reset();
-          fill_input(&in, 1.0, 0.0);
-          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
-          memcpy(start_pos, g_controller.path_planner[ARM_LEFT].start_pos, sizeof(start_pos));
-          printf("%.12f %.12f %.12f %.12f %.12f %.12f\\n",
-                 dist3(g_controller.ref_pos[ARM_LEFT], start_pos),
-                 first_step + first_lookahead,
-                 g_controller.path_progress_t[ARM_LEFT],
-                 CONTROL_DT,
-                 g_controller.path_planner[ARM_LEFT].v_max,
-                 (double)TRAJ_PLAN_SPEED);
-
-          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
-          memcpy(previous_ref, g_controller.ref_pos[ARM_LEFT], sizeof(previous_ref));
-          printf("%.12f %.12f %.12f %.12f %.12f %.12f\\n",
-                 dist3(g_controller.ref_pos[ARM_LEFT], start_pos),
-                 second_step + second_lookahead,
-                 g_controller.path_progress_t[ARM_LEFT],
-                 2.0 * CONTROL_DT,
-                 g_controller.path_planner[ARM_LEFT].a,
-                 (double)TRAJ_PLAN_ACCEL);
-
-          fill_input(&in, 1.0, 1.0);
-          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
-          memcpy(changed_start, g_controller.path_planner[ARM_LEFT].start_pos,
-                 sizeof(changed_start));
-          printf("%.12f %.12f %.12f %.12f %.12f %.12f\\n",
-                 dist3(g_controller.ref_pos[ARM_LEFT], changed_start),
-                 first_step + second_lookahead + first_lookahead,
-                 g_controller.path_progress_t[ARM_LEFT],
-                 CONTROL_DT,
-                 dist3(changed_start, previous_ref),
-                 0.0);
-          return 0;
-        }
-        """
-    )
-    probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
-    rows = np.array(
-        [
-            [float(value) for value in line.split()]
-            for line in subprocess.check_output([str(probe)], text=True).splitlines()
-        ],
-        dtype=np.float64,
-    )
-
-    np.testing.assert_allclose(rows[0, 0], rows[0, 1], atol=1e-9)
-    np.testing.assert_allclose(rows[0, 2], rows[0, 3], atol=1e-12)
-    assert rows[0, 4] <= rows[0, 5] + 1e-12
-    np.testing.assert_allclose(rows[1, 0], rows[1, 1], atol=1e-9)
-    assert rows[1, 0] > rows[0, 0]
-    np.testing.assert_allclose(rows[1, 2], rows[1, 3], atol=1e-12)
-    np.testing.assert_allclose(rows[1, 4], rows[1, 5], atol=1e-12)
-    np.testing.assert_allclose(rows[2, 0], rows[2, 1], atol=1e-9)
-    np.testing.assert_allclose(rows[2, 2], rows[2, 3], atol=1e-12)
-    np.testing.assert_allclose(rows[2, 4], 0.0, atol=1e-12)
-
-
-def test_stm_controller_path_gate_slows_reference_when_tcp_lags(tmp_path: Path):
-    source = textwrap.dedent(
-        """
-        #include "stm_controller.c"
-        #include <math.h>
-        #include <stdio.h>
-        #include <string.h>
-
-        static double dist3(const double a[3], const double b[3]) {
-          double dx = a[0] - b[0];
-          double dy = a[1] - b[1];
-          double dz = a[2] - b[2];
-          return sqrt(dx * dx + dy * dy + dz * dz);
-        }
-
-        static void fill_input(stm_input_t *in, double start_pos[3]) {
-          control_arm_kinematics_t kin;
+        static void fill_input(stm_input_t *in) {
           memset(in, 0, sizeof(*in));
           in->active_arm_mask = STM_ARM_MASK_LEFT;
           in->q[3] = 1.0;
+          control_arm_kinematics_t kin;
           control_get_arm_kinematics_with_offset(ARM_LEFT, in->q, &kin);
-          memcpy(start_pos, kin.pos, sizeof(double) * 3);
           memcpy(in->target_pos[ARM_LEFT], kin.pos, sizeof(double) * 3);
           memcpy(in->target_quat[ARM_LEFT], kin.quat_wxyz, sizeof(double) * 4);
-          in->target_pos[ARM_LEFT][0] += 0.50;
+          in->target_pos[ARM_LEFT][0] += 0.04;
         }
 
         int main(void) {
           stm_input_t in;
           stm_output_t out;
-          double start_pos[3];
+          CartesianPathState *path;
+          double u;
+          double s;
+          double expected_progress;
+          double linear_step;
 
           stm_controller_init();
           stm_controller_reset();
-          fill_input(&in, start_pos);
-
-          for (int i = 0; i < 2000; ++i) {
-            stm_controller_step_elapsed(&in, &out, CONTROL_DT);
-          }
-
-          printf("%.12f %.12f %.12f %.12f %.12f\\n",
-                 dist3(g_controller.ref_pos[ARM_LEFT], start_pos),
-                 g_controller.path_progress_t[ARM_LEFT],
-                 g_controller.path_gate[ARM_LEFT],
-                 g_controller.path_lookahead_m[ARM_LEFT],
-                 CONTROL_PATH_GATE_STOP_ERROR_M);
+          fill_input(&in);
+          stm_controller_step_elapsed(&in, &out, 0.0);
+          path = &g_controller.path[ARM_LEFT];
+          stm_controller_step_elapsed(&in, &out, 0.02);
+          u = path->path_time_s / path->duration_s;
+          s = 10.0 * u * u * u - 15.0 * u * u * u * u +
+              6.0 * u * u * u * u * u;
+          expected_progress = path->path_length * s;
+          linear_step = END_EFFECTOR_LINEAR_SPEED_MPS * 0.02;
+          printf("%.12f %.12f %.12f %.12f %.12f %.12f %.12f\\n",
+                 path->duration_s, path->path_length, path->path_time_s,
+                 path->progress, expected_progress, linear_step, out.traj_t);
           return 0;
         }
         """
     )
     probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
-    ref_error, progress_t, gate, lookahead, stop_error = [
+    duration, path_length, path_time, progress, expected_progress, linear_step, traj_t = [
         float(value) for value in subprocess.check_output([str(probe)], text=True).split()
     ]
 
-    assert ref_error < 0.05
-    assert ref_error <= stop_error + lookahead + 0.01
-    assert progress_t < 0.5
-    assert gate < 0.1
-    assert lookahead == pytest.approx(0.008)
+    assert path_length == pytest.approx(0.04)
+    assert duration == pytest.approx(1.875 * 0.04 / 0.05)
+    assert path_time == pytest.approx(0.02)
+    assert progress == pytest.approx(expected_progress)
+    assert 0.0 < progress < linear_step
+    assert traj_t == pytest.approx(0.02)
 
 
-def test_stm_controller_path_lookahead_ramps_smoothly(tmp_path: Path):
+def test_quintic_path_reference_velocity_starts_zero_peaks_and_stops(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "stm_controller.c"
-        #include <math.h>
         #include <stdio.h>
         #include <string.h>
 
-        static double dist3(const double a[3], const double b[3]) {
-          double dx = a[0] - b[0];
-          double dy = a[1] - b[1];
-          double dz = a[2] - b[2];
-          return sqrt(dx * dx + dy * dy + dz * dz);
-        }
-
-        static void fill_input(stm_input_t *in, double start_pos[3]) {
-          control_arm_kinematics_t kin;
-          memset(in, 0, sizeof(*in));
-          in->active_arm_mask = STM_ARM_MASK_LEFT;
-          in->q[3] = 1.0;
-          control_get_arm_kinematics_with_offset(ARM_LEFT, in->q, &kin);
-          memcpy(start_pos, kin.pos, sizeof(double) * 3);
-          memcpy(in->target_pos[ARM_LEFT], kin.pos, sizeof(double) * 3);
-          memcpy(in->target_quat[ARM_LEFT], kin.quat_wxyz, sizeof(double) * 4);
-          in->target_pos[ARM_LEFT][0] += 0.50;
-        }
-
         int main(void) {
-          stm_input_t in;
-          stm_output_t out;
-          double start_pos[3];
+          CartesianPathState path;
+          control_arm_kinematics_t kin;
+          double target_pos[3] = {0.04, 0.0, 0.0};
+          double target_quat[4] = {1.0, 0.0, 0.0, 0.0};
+          double ref_twist[6];
+          double twist_start;
+          double twist_mid;
+          double twist_end;
+          double progress_mid;
+          double progress_end;
 
-          stm_controller_init();
-          stm_controller_reset();
-          fill_input(&in, start_pos);
+          memset(&kin, 0, sizeof(kin));
+          kin.quat_wxyz[0] = 1.0;
+          stm_controller_plan_path_from_current(&path, &kin, target_pos,
+                                                target_quat);
+          stm_controller_update_path_reference(&path, 0.0, ref_twist);
+          twist_start = ref_twist[0];
+          stm_controller_update_path_reference(&path, 0.5 * path.duration_s,
+                                               ref_twist);
+          twist_mid = ref_twist[0];
+          progress_mid = path.progress;
+          stm_controller_update_path_reference(&path, 0.5 * path.duration_s,
+                                               ref_twist);
+          twist_end = ref_twist[0];
+          progress_end = path.progress;
 
-          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
-          printf("%.12f %.12f %.12f\\n",
-                 g_controller.path_lookahead_m[ARM_LEFT],
-                 CONTROL_PATH_LOOKAHEAD_M * CONTROL_DT / CONTROL_PATH_LOOKAHEAD_RAMP_S,
-                 dist3(g_controller.ref_pos[ARM_LEFT], start_pos));
-
-          for (int i = 1; i < 300; ++i) {
-            stm_controller_step_elapsed(&in, &out, CONTROL_DT);
-          }
-          printf("%.12f %.12f\\n",
-                 g_controller.path_lookahead_m[ARM_LEFT],
-                 CONTROL_PATH_LOOKAHEAD_M);
+          printf("%.12f %.12f %.12f %.12f %.12f %.12f\\n",
+                 path.duration_s, twist_start, twist_mid, twist_end,
+                 progress_mid, progress_end);
           return 0;
         }
         """
     )
     probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
-    rows = [
-        [float(value) for value in line.split()]
-        for line in subprocess.check_output([str(probe)], text=True).splitlines()
+    duration, twist_start, twist_mid, twist_end, progress_mid, progress_end = [
+        float(value) for value in subprocess.check_output([str(probe)], text=True).split()
     ]
 
-    np.testing.assert_allclose(rows[0][0], rows[0][1], atol=1e-9)
-    assert 0.0 < rows[0][0] < 0.008
-    assert rows[0][2] < 0.001
-    np.testing.assert_allclose(rows[1][0], rows[1][1], atol=1e-9)
+    assert duration == pytest.approx(1.875 * 0.04 / 0.05)
+    assert twist_start == pytest.approx(0.0)
+    assert twist_mid == pytest.approx(0.05)
+    assert twist_end == pytest.approx(0.0)
+    assert progress_mid == pytest.approx(0.02)
+    assert progress_end == pytest.approx(0.04)
 
 
-def test_stm_controller_path_gate_changes_smoothly(tmp_path: Path):
+def test_cartesian_reference_velocity_feedback_tracks_tcp_speed_from_qd(tmp_path: Path):
     source = textwrap.dedent(
         """
-        #include "stm_controller.c"
+        #include "control_logic.h"
+        #include <stdio.h>
+        #include <string.h>
+
+        static void fill_kin(control_arm_kinematics_t *kin) {
+          memset(kin, 0, sizeof(*kin));
+          kin->quat_wxyz[0] = 1.0;
+          kin->quat_xyzw[3] = 1.0;
+          kin->J[0][0] = 1.0;
+        }
+
+        static double task_tau_for_qd(double qd0) {
+          double q[ARM_JOINTS] = {0.0};
+          double qd[ARM_JOINTS] = {0.0};
+          double ref_pos[3] = {0.02, 0.0, 0.0};
+          double ref_quat[4] = {1.0, 0.0, 0.0, 0.0};
+          double ref_twist[6] = {END_EFFECTOR_LINEAR_SPEED_MPS, 0.0, 0.0,
+                                 0.0, 0.0, 0.0};
+          double tau[ARM_JOINTS];
+          double tau_gc[ARM_JOINTS];
+          control_arm_kinematics_t kin;
+          RBDLModel model;
+
+          qd[0] = qd0;
+          fill_kin(&kin);
+          control_step_v2_arm_with_reference(ARM_LEFT, ref_pos, ref_quat,
+                                             ref_twist, q, qd, &kin, tau);
+          build_am_d02_arm_model(ARM_LEFT, &model);
+          rbdl_calc_gc(&model, q, qd, tau_gc);
+          return tau[0] - tau_gc[0];
+        }
+
+        int main(void) {
+          control_init();
+          printf("%.12f %.12f %.12f\\n",
+                 (double)END_EFFECTOR_LINEAR_SPEED_MPS,
+                 task_tau_for_qd(0.0),
+                 task_tau_for_qd(2.0 * END_EFFECTOR_LINEAR_SPEED_MPS));
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source)
+    speed, tau_slow, tau_fast = [
+        float(value) for value in subprocess.check_output([str(probe)], text=True).split()
+    ]
+
+    assert speed == pytest.approx(0.05)
+    assert tau_slow > 0.0
+    assert tau_slow - tau_fast == pytest.approx(2.0 * 65.0 * speed)
+    assert tau_fast < tau_slow
+
+
+def test_stm_controller_replans_immediately_when_target_changes(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "control_logic.h"
+        #include "stm_controller.h"
         #include <math.h>
         #include <stdio.h>
         #include <string.h>
 
-        static void fill_input(stm_input_t *in, double current_pos[3]) {
+        static void fill_input(stm_input_t *in, double target_dx) {
           control_arm_kinematics_t kin;
           memset(in, 0, sizeof(*in));
           in->active_arm_mask = STM_ARM_MASK_LEFT;
           in->q[3] = 1.0;
           control_get_arm_kinematics_with_offset(ARM_LEFT, in->q, &kin);
-          memcpy(current_pos, kin.pos, sizeof(double) * 3);
           memcpy(in->target_pos[ARM_LEFT], kin.pos, sizeof(double) * 3);
           memcpy(in->target_quat[ARM_LEFT], kin.quat_wxyz, sizeof(double) * 4);
-          in->target_pos[ARM_LEFT][0] += 0.50;
+          in->target_pos[ARM_LEFT][0] += target_dx;
         }
 
         int main(void) {
           stm_input_t in;
           stm_output_t out;
-          double current_pos[3];
+          double tau_forward[NUM_JOINTS];
+          double tau_reverse[NUM_JOINTS];
+          double diff = 0.0;
 
           stm_controller_init();
           stm_controller_reset();
-          fill_input(&in, current_pos);
-          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
+          fill_input(&in, 0.04);
+          stm_controller_step_elapsed(&in, &out, 0.02);
+          memcpy(tau_forward, out.tau, sizeof(tau_forward));
 
-          memcpy(g_controller.ref_pos[ARM_LEFT], current_pos, sizeof(current_pos));
-          g_controller.ref_pos[ARM_LEFT][0] += CONTROL_PATH_GATE_STOP_ERROR_M + 0.01;
-          g_controller.path_gate[ARM_LEFT] = 1.0;
-          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
-          printf("%.12f %.12f\\n",
-                 g_controller.path_gate[ARM_LEFT],
-                 1.0 - CONTROL_DT / CONTROL_PATH_GATE_FALL_TIME_S);
+          fill_input(&in, -0.04);
+          stm_controller_step_elapsed(&in, &out, 0.02);
+          memcpy(tau_reverse, out.tau, sizeof(tau_reverse));
 
-          memcpy(g_controller.ref_pos[ARM_LEFT], current_pos, sizeof(current_pos));
-          g_controller.path_gate[ARM_LEFT] = 0.0;
-          stm_controller_step_elapsed(&in, &out, CONTROL_DT);
-          printf("%.12f %.12f\\n",
-                 g_controller.path_gate[ARM_LEFT],
-                 CONTROL_DT / CONTROL_PATH_GATE_RISE_TIME_S);
+          for (int i = 0; i < ARM_JOINTS; ++i) {
+            diff += fabs(tau_forward[i] - tau_reverse[i]);
+          }
+          printf("%.12f %.12f %.12f\\n", diff, tau_forward[0], tau_reverse[0]);
           return 0;
         }
         """
     )
-    probe = _compile_c_probe(tmp_path, source, include_stm_controller=False)
-    rows = np.array(
-        [
-            [float(value) for value in line.split()]
-            for line in subprocess.check_output([str(probe)], text=True).splitlines()
-        ],
-        dtype=np.float64,
-    )
+    probe = _compile_c_probe(tmp_path, source)
+    diff, tau_forward_0, tau_reverse_0 = [
+        float(value) for value in subprocess.check_output([str(probe)], text=True).split()
+    ]
 
-    np.testing.assert_allclose(rows[:, 0], rows[:, 1], atol=1e-9)
-    assert 0.0 < rows[0, 0] < 1.0
-    assert 0.0 < rows[1, 0] < 1.0
+    assert diff > 0.001
+    assert tau_forward_0 != pytest.approx(tau_reverse_0, abs=1e-6)
 
 
-def test_trajectory_speed_is_real_safe_tuned(tmp_path: Path):
+def test_endpoint_velocity_defaults_are_real_safe_tuned(tmp_path: Path):
     source = textwrap.dedent(
         """
         #include "config.h"
         #include <stdio.h>
 
         int main(void) {
-          printf("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\\n",
-                 (double)TRAJ_PLAN_SPEED,
-                 (double)TRAJ_PLAN_ACCEL,
+          printf("%.4f %.4f %.4f %.4f %.7f %.7f %.3f %.3f\\n",
+                 (double)END_EFFECTOR_LINEAR_SPEED_MPS,
+                 (double)END_EFFECTOR_TARGET_POS_TOL_M,
+                 (double)END_EFFECTOR_TARGET_ORI_TOL_RAD,
+                 (double)END_EFFECTOR_ARRIVAL_SPEED_TOL_MPS,
+                 (double)TRAJ_TARGET_CHANGE_POS_EPS_M,
+                 (double)TRAJ_TARGET_CHANGE_ORI_EPS_RAD,
                  JOINT_VEL_LIMIT,
-                 CONTROL_JOINT_LIMIT_INSET_RATIO,
-                 CONTROL_PATH_GATE_FULL_ERROR_M,
-                 CONTROL_PATH_GATE_STOP_ERROR_M,
-                 CONTROL_PATH_GATE_RISE_TIME_S,
-                 CONTROL_PATH_GATE_FALL_TIME_S,
-                 CONTROL_PATH_LOOKAHEAD_M,
-                 CONTROL_PATH_LOOKAHEAD_RAMP_S,
-                 CONTROL_TARGET_REPLAN_POS_EPS_M,
-                 CONTROL_TARGET_REPLAN_ORI_EPS_RAD);
+                 CONTROL_JOINT_LIMIT_INSET_RATIO);
           return 0;
         }
         """
@@ -1896,23 +1782,62 @@ def test_trajectory_speed_is_real_safe_tuned(tmp_path: Path):
     values = [float(value) for value in subprocess.check_output([str(probe)], text=True).split()]
 
     assert values == pytest.approx(
-        [3.0, 2.0, 4.0, 0.01, 0.005, 0.02, 0.08, 0.03, 0.008, 0.30, 0.001, 0.002]
+        [0.05, 0.0025, 0.005, 0.02, 0.0001, 0.0005, 5.0, 0.01]
     )
+    config_text = (PROJECT_ROOT / "stm32_code" / "config.h").read_text(encoding="utf-8")
+    assert "WAYPOINT_" not in config_text
+    assert "TRAJ_PLAN_SPEED" not in config_text
+    assert "TRAJ_PLAN_ACCEL" not in config_text
+    assert not (PROJECT_ROOT / "stm32_code" / "trajectory_lib.c").exists()
+    assert not (PROJECT_ROOT / "stm32_code" / "trajectory_lib.h").exists()
 
 
-def test_python_config_mirrors_c_path_gate_defaults():
+def test_c_control_core_has_no_nullspace_output_chain():
+    config_text = (PROJECT_ROOT / "stm32_code" / "config.h").read_text(encoding="utf-8")
+    control_text = (PROJECT_ROOT / "stm32_code" / "control_logic.c").read_text(encoding="utf-8")
+
+    for removed_macro in (
+        "KP_JOINT_",
+        "KD_JOINT_",
+        "Q_PREF_",
+        "POSTURE_ALPHA",
+        "W_JOINT",
+        "NULLSPACE_",
+    ):
+        assert removed_macro not in config_text
+
+    for removed_symbol in (
+        "tau_null",
+        "J_pinv",
+        "q_ref",
+        "POSTURE_ALPHA",
+        "NULLSPACE_",
+        "W_JOINT",
+    ):
+        assert removed_symbol not in control_text
+
+
+def test_python_config_mirrors_c_endpoint_control_defaults():
     from config import Config
 
-    assert Config.TRAJ_PLAN_SPEED == pytest.approx(3.0)
-    assert Config.TRAJ_PLAN_ACCEL == pytest.approx(2.0)
-    assert Config.CONTROL_PATH_GATE_FULL_ERROR_M == pytest.approx(0.005)
-    assert Config.CONTROL_PATH_GATE_STOP_ERROR_M == pytest.approx(0.020)
-    assert Config.CONTROL_PATH_GATE_RISE_TIME_S == pytest.approx(0.080)
-    assert Config.CONTROL_PATH_GATE_FALL_TIME_S == pytest.approx(0.030)
-    assert Config.CONTROL_PATH_LOOKAHEAD_M == pytest.approx(0.008)
-    assert Config.CONTROL_PATH_LOOKAHEAD_RAMP_S == pytest.approx(0.30)
-    assert Config.CONTROL_TARGET_REPLAN_POS_EPS_M == pytest.approx(0.001)
-    assert Config.CONTROL_TARGET_REPLAN_ORI_EPS_RAD == pytest.approx(0.002)
+    assert Config.END_EFFECTOR_LINEAR_SPEED_MPS == pytest.approx(0.05)
+    assert Config.JOINT_VEL_LIMIT == pytest.approx(5.0)
+    assert [Config.KP_CART_X, Config.KP_CART_Y, Config.KP_CART_Z] == pytest.approx(
+        [170.0, 170.0, 170.0]
+    )
+    assert [
+        Config.KP_CART_ROLL,
+        Config.KP_CART_PITCH,
+        Config.KP_CART_YAW,
+    ] == pytest.approx([8.0, 8.0, 8.0])
+    assert [Config.KD_CART_X, Config.KD_CART_Y, Config.KD_CART_Z] == pytest.approx(
+        [65.0, 65.0, 65.0]
+    )
+    assert [
+        Config.KD_CART_ROLL,
+        Config.KD_CART_PITCH,
+        Config.KD_CART_YAW,
+    ] == pytest.approx([4.0, 4.0, 4.0])
 
 
 def test_stm_controller_step_elapsed_hot_path_benchmark_probe(tmp_path: Path):
