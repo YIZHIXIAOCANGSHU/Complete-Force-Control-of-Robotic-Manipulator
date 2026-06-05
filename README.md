@@ -5,6 +5,7 @@
 - `sim`：Python 侧启动 MuJoCo 仿真服务器，C 侧运行实时控制回路。
 - `real`：Python 侧通过 SocketCAN USB2FDCAN 连接真实左右臂，C 侧运行同一套控制核心。
 - `mc`：复用同一个 MuJoCo 模型，对左右双臂关节空间做蒙特卡罗采样并输出两侧末端位姿范围。
+- `sim-report`：生成 sim-only 报告数据包，包含蒙特卡罗工作空间和确定性闭环多目标阶跃实验。
 
 旧串口真机链路和旧 AM-D02-AemLURDF0413 模型入口不再恢复；真机只保留当前双臂 SocketCAN MIT torque 链路。
 
@@ -47,6 +48,24 @@
 ```bash
 ./run.sh mc -n 10000 --seed 42 --no-viewer
 ```
+
+生成报告数据包：
+
+```bash
+./run.sh sim-report
+./run.sh sim-report --output-dir results/sim_report_demo -n 500000 --seed 42 --max-hull-points 20000 --control-duration-s 10
+```
+
+`sim-report` 默认关闭 viewer/Rerun，使用随机种子 `42`、`500000` 个蒙特卡罗样本和 `10s`
+闭环多目标阶跃实验。输出目录默认是 `results/sim_report_<timestamp>/`；输出文件包括：
+
+- `workspace_points.csv`：左右臂末端位置和四元数采样点，不保存采样关节角。
+- `workspace_summary.json`：关节采样边界、末端位姿范围、安全内部长方体和模型/控制配置元数据。
+- `control_loop.csv`：闭环实验逐步数据，包含目标/实际 TCP 位置、误差、速度、状态、力矩、`q` 和 `qd`。
+- `control_summary.json`：闭环误差、力矩、状态计数和目标段信息。
+- `report.md` 与若干 `.svg`：中文报告摘要和可直接引用的工作空间/闭环曲线图。
+
+注意：`sim-report` 输出只代表 MuJoCo 仿真和 C 控制核心证据，不能替代真机验证。
 
 ## 仓库结构
 
@@ -443,7 +462,21 @@ both  -> can0 + can1，同时控制 14 轴
 ./run.sh real left
 ./run.sh real right
 ./run.sh real both
+./run.sh real both --no-send
+./run.sh real both --gravity-only
+./run.sh real left --send
 ```
+
+直接运行 `./run.sh` 进入交互菜单时，选择 real 和 left/right/both 后，还会继续选择控制量下发方式：
+
+- `send control`：默认真机闭环模式。C 控制器计算 `tau` 后，TX worker 按 CAN 接口下发 MIT torque。
+- `no-send/observe`：仍读取 CAN 反馈、调用 C 控制器并把计算力矩显示到 Rerun，但实际 CAN 只持续下发全 0 MIT torque。Rerun 中 `tau_raw/tau_total` 用于观察计算结果，`tx_label/tx_str` 标明实际下发为 0。
+- `gravity-only`：仍计算完整控制量并显示到 Rerun，但实际 CAN 只下发纯 `G(q)` 重力补偿，不包含 Coriolis/centrifugal 或笛卡尔 PD 任务力矩。
+- `AM_D02_REAL_FEEDBACK_ONLY=1`：诊断模式。不调用 C 控制器，只镜像反馈并发送 0 keepalive；它和 `--no-send` 不同，不能用于观察控制器计算力矩。
+
+`gravity-only` 不是 C 端单独闭环模式，而是 Python 真机发送层的力矩选择模式：`RealControllerBridge`
+每周期仍调用 C 控制核心，返回完整 `tau` 和单独的 `tau_gravity`；Rerun 继续记录完整 `tau`，
+TX worker 只把当前激活臂的 `tau_gravity = G(q)` 复制到 CAN 下发缓冲，未激活臂保持 0。该模式适合真机上单独验证重力补偿方向、量级和关节符号，不会加入 `G+C` 中的速度相关项，也不会加入 TCP 笛卡尔 PD 任务力矩。
 
 默认接口可用环境变量覆盖：
 
@@ -455,20 +488,24 @@ AM_D02_CAN_DATA_BITRATE=5000000
 AM_D02_CAN_FORCE_FD=1
 AM_D02_CAN_CONFIGURE_INTERFACE=0
 AM_D02_CAN_FEEDBACK_TIMEOUT_S=0.10
+AM_D02_REAL_CONTROL_TARGET_HZ=1000
+AM_D02_REAL_C_BRIDGE_TIMEOUT_S=0.005
+AM_D02_REAL_STATS_INTERVAL_S=1.0
 AM_D02_REAL_THREAD_JOIN_TIMEOUT_S=2.0
 ```
 
 真机模式启动后会拉起一个 MuJoCo viewer 做镜像对照和目标输入界面：
 
 - CAN 链路内部使用多线程流水线：feedback worker 持续收真实电机反馈，控制线程只消费最新完整 active-arm 快照并调用 `c_interface/real/real_controller`，每个 CAN 接口各有 TX worker 下发 MIT torque。
+- 控制链以 1 kHz 为目标预算：feedback worker 有帧时会连续 drain，TX worker 忙时覆盖旧 pending 命令只保留最新力矩，Rerun 和 MuJoCo viewer 不进入 CAN/C 热路径。
 - 主线程负责 MuJoCo viewer，把真实 `q[14] / qd[14]` 镜像到模型中，并读取左右目标块拖拽后的目标位姿。
 - MuJoCo 在 real 模式下不跑真实动力学，也不把 `tau` 施加到物理仿真；它只显示真机反馈姿态、当前 TCP 和目标块。
 - 第一轮完整反馈后，viewer 会用真实关节角初始化，并把目标块放到当前 TCP，避免启动瞬间追旧目标。
 
 real 模式默认启用 Rerun，会记录完整闭环数据：`q[14]`、`qd[14]`、C 输出
-`tau_total[14]`、CAN 回传 `tau_actual[14]`、`torque_gap`、TCP 实际/目标位姿、位置/姿态误差和
+`tau_total[14]`、CAN 回传 `tau_actual[14]`、`torque_gap`、TCP 实际/目标位姿、位置/姿态误差、C bridge 耗时、反馈等待、TX 覆盖计数和
 控制链路周期。单臂模式下只把当前激活臂作为有效控制对象；未激活臂不会参与反馈等待、控制计算或安全恢复。
-如需关闭，可用 `AM_D02_ENABLE_RERUN=0 ./run.sh real right c`。
+如需关闭，可用 `AM_D02_ENABLE_RERUN=0 ./run.sh real right`。
 
 如果反馈超时、CAN 异常、viewer 关闭、Ctrl+C 或 C 控制器返回 `status < 0`，程序会对当前激活臂发送零力矩并 disable，然后退出。
 
@@ -479,8 +516,19 @@ AM_D02_PYTHON=/path/to/python
 AM_D02_VENV_DIR=.venv
 AM_D02_ENABLE_VIEWER=1
 AM_D02_ENABLE_RERUN=1
-AM_D02_RERUN_LOG_STRIDE=10
-AM_D02_RERUN_MAX_HZ=30
+AM_D02_VISUAL_PROFILE=balanced   # balanced | full | fast
+AM_D02_RERUN_LOG_STRIDE=20
+AM_D02_RERUN_MAX_HZ=15
+AM_D02_SIM_TARGET_HZ=1000
+AM_D02_SIM_STATS_INTERVAL_S=1.0
+AM_D02_SIM_VIEWER_FPS=30
+AM_D02_SIM_VIEWER_LOCK_TIMEOUT_S=0.0002
+AM_D02_SIM_VIEWER_SYNC_BUDGET_MS=1.0
+AM_D02_SIM_VIEWER_BACKOFF_FRAMES=2
+AM_D02_RERUN_DETAILED_PERF=0
+AM_D02_SIM_RERUN_INCLUDE_TWIST=0
+AM_D02_SIM_RERUN_QUEUE_SIZE=512
+AM_D02_SIM_UDP_TIMEOUT_S=0.002
 AM_D02_FIX_UNCONTROLLED_JOINTS=1
 AM_D02_ENABLE_BODY_GUI=1
 AM_D02_MC_SAMPLES=50000
@@ -490,7 +538,9 @@ AM_D02_MC_MAX_VIS_POINTS=3000
 AM_D02_MC_MAX_HULL_POINTS=12000
 ```
 
+`AM_D02_VISUAL_PROFILE=balanced` 是默认档位：保留 MuJoCo viewer 完整交互，但把 Rerun 默认降到 15 Hz / stride 20，并只记录关键性能曲线。需要完整诊断时用 `AM_D02_VISUAL_PROFILE=full`，会恢复 60 FPS viewer、30 Hz Rerun、stride 10、详细 performance 曲线和 sim TCP twist 采样；只追速度时可用 `AM_D02_VISUAL_PROFILE=fast`。
 `AM_D02_RERUN_MAX_HZ` 是 Rerun 最大发送频率上限；控制频率很高时，日志线程会合并积压旧帧并只发送最新状态，避免 Rerun gRPC 接收端 backpressure。
+`sim` UDP 链路以 `AM_D02_SIM_TARGET_HZ` 作为监控目标，不主动 sleep 限频；MuJoCo viewer 保留完整交互能力，但 sync 线程只在 `AM_D02_SIM_VIEWER_LOCK_TIMEOUT_S` 内拿到仿真锁时刷新，且 `viewer.sync()` 超过 `AM_D02_SIM_VIEWER_SYNC_BUDGET_MS` 后会临时退避 `AM_D02_SIM_VIEWER_BACKOFF_FRAMES` 帧，把仿真锁让回 UDP 热路径。
 
 ## 开发与验证
 
