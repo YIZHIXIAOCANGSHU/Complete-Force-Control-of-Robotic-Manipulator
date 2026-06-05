@@ -94,6 +94,16 @@ int control_check_safety_arm(int side, const double q[ARM_JOINTS],
 void control_filter_velocities_arm(int side, const double qd_raw[ARM_JOINTS],
                                    double qd_filtered[ARM_JOINTS]);
 
+/**
+ * @brief Compute pure gravity compensation torque for one arm.
+ *
+ * This intentionally excludes Coriolis/centrifugal terms and Cartesian task
+ * torque. It uses the current body-gravity context set by
+ * control_update_body_gravity().
+ */
+void control_compute_gravity_torque_arm(int side, const double q[ARM_JOINTS],
+                                        double tau_g[ARM_JOINTS]);
+
 #ifdef __cplusplus
 }
 #endif

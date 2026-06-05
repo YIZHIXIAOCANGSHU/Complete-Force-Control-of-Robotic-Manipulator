@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+from datetime import datetime
+import json
+from pathlib import Path
 import socket
 import sys
 import time
@@ -23,6 +27,11 @@ DEFAULT_MC_PROGRESS_INTERVAL = 100
 DEFAULT_MC_FALLBACK_LIMIT = np.pi
 DEFAULT_MC_MAX_VIS_POINTS = 2000
 DEFAULT_MC_MAX_HULL_POINTS = 6000
+DEFAULT_REPORT_SAMPLES = 500000
+DEFAULT_REPORT_PROGRESS_INTERVAL = 10000
+DEFAULT_REPORT_CONTROL_DURATION_S = 10.0
+DEFAULT_REPORT_CONTROL_LOG_STRIDE = 10
+DEFAULT_REPORT_MAX_SVG_POINTS = 1800
 WORKSPACE_PADDING_RATIO = 0.08
 WORKSPACE_MIN_HALF_SIZE = 0.01
 
@@ -30,6 +39,60 @@ WORKSPACE_MIN_HALF_SIZE = 0.01
 def _should_log_sim_rerun_step(step_count: int) -> bool:
     stride = max(1, int(Config.RERUN_LOG_STRIDE))
     return stride <= 1 or int(step_count) % stride == 0
+
+
+def _sim_rerun_stats(rerun_logger) -> tuple[int, int]:
+    if rerun_logger is None:
+        return 0, 0
+    return (
+        int(getattr(rerun_logger, "overwritten_payload_count", 0)),
+        int(getattr(rerun_logger, "dropped_payload_count", 0)),
+    )
+
+
+def _sim_viewer_stats(viewer_worker) -> dict[str, float | int]:
+    if viewer_worker is None or not hasattr(viewer_worker, "stats_snapshot"):
+        return {
+            "viewer_sync_count": 0,
+            "viewer_skip_count": 0,
+            "viewer_sync_ms": 0.0,
+            "viewer_lock_wait_ms": 0.0,
+        }
+    return viewer_worker.stats_snapshot()
+
+
+def _maybe_print_sim_stats(
+    *,
+    now_s: float,
+    last_print_s: float | None,
+    loop_hz: float,
+    loop_ms: float,
+    mujoco_step_ms: float,
+    state_packet_ms: float,
+    rerun_overwrite_count: int,
+    rerun_drop_count: int,
+    viewer_stats: dict[str, float | int],
+    socket_timeout_count: int,
+) -> float | None:
+    if Config.SIM_STATS_INTERVAL_S <= 0.0:
+        return last_print_s
+    if last_print_s is not None and now_s - last_print_s < Config.SIM_STATS_INTERVAL_S:
+        return last_print_s
+    print(
+        "[Sim Stats] "
+        f"target={Config.SIM_TARGET_HZ:.0f}Hz "
+        f"loop={loop_hz:.1f}Hz/{loop_ms:.3f}ms "
+        f"mujoco_step={mujoco_step_ms:.3f}ms "
+        f"state_packet={state_packet_ms:.3f}ms "
+        f"rerun_overwrites={rerun_overwrite_count} "
+        f"rerun_drops={rerun_drop_count} "
+        f"viewer_sync={int(viewer_stats['viewer_sync_count'])} "
+        f"viewer_skip={int(viewer_stats['viewer_skip_count'])} "
+        f"viewer_sync_ms={float(viewer_stats['viewer_sync_ms']):.3f} "
+        f"viewer_lock_wait_ms={float(viewer_stats['viewer_lock_wait_ms']):.3f} "
+        f"socket_timeouts={socket_timeout_count}"
+    )
+    return now_s
 
 
 class SimRerunLogger:
@@ -55,6 +118,9 @@ class SimRerunLogger:
         self._sleep_fn = sleep_fn
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._stats_lock = threading.Lock()
+        self._overwritten_payload_count = 0
+        self._dropped_payload_count = 0
 
     def start(self) -> None:
         if self._thread is not None:
@@ -70,12 +136,25 @@ class SimRerunLogger:
         except queue.Full:
             try:
                 self._queue.get_nowait()
+                with self._stats_lock:
+                    self._overwritten_payload_count += 1
             except queue.Empty:
                 pass
             try:
                 self._queue.put_nowait(payload)
             except queue.Full:
-                pass
+                with self._stats_lock:
+                    self._dropped_payload_count += 1
+
+    @property
+    def overwritten_payload_count(self) -> int:
+        with self._stats_lock:
+            return int(self._overwritten_payload_count)
+
+    @property
+    def dropped_payload_count(self) -> int:
+        with self._stats_lock:
+            return int(self._dropped_payload_count)
 
     def _worker(self) -> None:
         while not self._stop_event.is_set() or not self._queue.empty():
@@ -111,15 +190,38 @@ class SimViewerSyncWorker:
         shutdown_event: threading.Event,
         *,
         fps: float | None = None,
+        lock_timeout_s: float | None = None,
+        sync_budget_ms: float | None = None,
+        backoff_frames: int | None = None,
+        perf_counter=time.perf_counter,
         sleep_fn=time.sleep,
     ) -> None:
         self.viewer = viewer
         self.env_lock = env_lock
         self.shutdown_event = shutdown_event
         self.fps = max(1.0, float(Config.SIM_VIEWER_FPS if fps is None else fps))
+        self.lock_timeout_s = max(
+            0.0,
+            float(Config.SIM_VIEWER_LOCK_TIMEOUT_S if lock_timeout_s is None else lock_timeout_s),
+        )
+        self.sync_budget_ms = max(
+            0.0,
+            float(Config.SIM_VIEWER_SYNC_BUDGET_MS if sync_budget_ms is None else sync_budget_ms),
+        )
+        self.backoff_frames = max(
+            0,
+            int(Config.SIM_VIEWER_BACKOFF_FRAMES if backoff_frames is None else backoff_frames),
+        )
+        self._perf_counter = perf_counter
         self._sleep_fn = sleep_fn
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._stats_lock = threading.Lock()
+        self._sync_count = 0
+        self._skip_count = 0
+        self._last_sync_ms = 0.0
+        self._last_lock_wait_ms = 0.0
+        self._backoff_remaining = 0
 
     def start(self) -> None:
         if self._thread is not None:
@@ -131,8 +233,36 @@ class SimViewerSyncWorker:
         if hasattr(self.viewer, "is_running") and not self.viewer.is_running():
             self.shutdown_event.set()
             return False
-        with self.env_lock:
+        if self._backoff_remaining > 0:
+            self._backoff_remaining -= 1
+            with self._stats_lock:
+                self._skip_count += 1
+                self._last_lock_wait_ms = 0.0
+            return True
+        lock_wait_start = self._perf_counter()
+        acquired = self.env_lock.acquire(timeout=self.lock_timeout_s)
+        lock_wait_ms = max(0.0, (self._perf_counter() - lock_wait_start) * 1000.0)
+        if not acquired:
+            with self._stats_lock:
+                self._skip_count += 1
+                self._last_lock_wait_ms = lock_wait_ms
+            return True
+        sync_start = self._perf_counter()
+        try:
             self.viewer.sync()
+        finally:
+            sync_ms = max(0.0, (self._perf_counter() - sync_start) * 1000.0)
+            self.env_lock.release()
+        with self._stats_lock:
+            self._sync_count += 1
+            self._last_sync_ms = sync_ms
+            self._last_lock_wait_ms = lock_wait_ms
+        if (
+            self.sync_budget_ms > 0.0
+            and self.backoff_frames > 0
+            and sync_ms > self.sync_budget_ms
+        ):
+            self._backoff_remaining = self.backoff_frames
         return True
 
     def _worker(self) -> None:
@@ -146,6 +276,15 @@ class SimViewerSyncWorker:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
+
+    def stats_snapshot(self) -> dict[str, float | int]:
+        with self._stats_lock:
+            return {
+                "viewer_sync_count": int(self._sync_count),
+                "viewer_skip_count": int(self._skip_count),
+                "viewer_sync_ms": float(self._last_sync_ms),
+                "viewer_lock_wait_ms": float(self._last_lock_wait_ms),
+            }
 
 
 @dataclass(frozen=True)
@@ -230,6 +369,48 @@ class InternalWorkspaceBox:
     @property
     def is_empty(self) -> bool:
         return self.volume <= 0.0 or not np.all(self.half_size > 0.0)
+
+
+@dataclass(frozen=True)
+class MonteCarloWorkspaceResult:
+    samples: int
+    seed: int | None
+    joint_lower: np.ndarray
+    joint_upper: np.ndarray
+    points: list[np.ndarray]
+    quats: list[np.ndarray]
+    pos_stats: list[RangeSnapshot]
+    quat_stats: list[RangeSnapshot]
+    quat_norm_stats: list[RangeSnapshot]
+    workspace_hulls: list[WorkspaceHull]
+    internal_boxes: list[InternalWorkspaceBox]
+    hull_point_count: int
+    last_qpos: np.ndarray
+    report_text: str
+
+
+@dataclass(frozen=True)
+class ControlTargetSegment:
+    index: int
+    label: str
+    start_s: float
+    end_s: float
+    target_pos_base: np.ndarray
+    target_quat_base: np.ndarray
+
+
+@dataclass(frozen=True)
+class ControlLoopResult:
+    duration_s: float
+    dt_s: float
+    steps: int
+    log_stride: int
+    schedule: list[ControlTargetSegment]
+    telemetry_rows: list[dict[str, object]]
+    summary: dict[str, object]
+    error_history: np.ndarray
+    tau_history: np.ndarray
+    time_history: np.ndarray
 
 
 def _write_ready_file(ready_file: str | None) -> None:
@@ -1211,6 +1392,904 @@ def _format_dual_monte_carlo_report(
     return "\n".join(lines)
 
 
+def _array_to_list(values: np.ndarray) -> list[float]:
+    return [float(value) for value in np.asarray(values, dtype=np.float64).tolist()]
+
+
+def _snapshot_to_dict(snapshot: RangeSnapshot) -> dict[str, object]:
+    return {
+        "count": int(snapshot.count),
+        "minimum": _array_to_list(snapshot.minimum),
+        "maximum": _array_to_list(snapshot.maximum),
+        "span": _array_to_list(snapshot.span),
+        "mean": _array_to_list(snapshot.mean),
+        "last": _array_to_list(snapshot.last),
+    }
+
+
+def _internal_box_to_dict(box: InternalWorkspaceBox) -> dict[str, object]:
+    return {
+        "available": not box.is_empty,
+        "center": _array_to_list(box.center),
+        "half_size": _array_to_list(box.half_size),
+        "lower": _array_to_list(box.lower),
+        "upper": _array_to_list(box.upper),
+        "volume": float(box.volume),
+    }
+
+
+def _write_monte_carlo_report_assets(
+    output_dir: str | Path,
+    *,
+    samples: int,
+    seed: int | None,
+    joint_lower: np.ndarray,
+    joint_upper: np.ndarray,
+    points: list[np.ndarray],
+    quats: list[np.ndarray],
+    pos_stats: list[RangeSnapshot],
+    quat_stats: list[RangeSnapshot],
+    quat_norm_stats: list[RangeSnapshot],
+    internal_boxes: list[InternalWorkspaceBox],
+    hull_point_count: int,
+    report_text: str,
+    metadata: dict[str, object] | None = None,
+    extra_files: dict[str, str] | None = None,
+) -> None:
+    """Write report-facing Monte Carlo artifacts without changing sampling."""
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    points_path = out / "workspace_points.csv"
+    with points_path.open("w", newline="", encoding="utf-8") as handle:
+        fieldnames = ["sample", "arm", "x", "y", "z", "qx", "qy", "qz", "qw"]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        arm_labels = ("left", "right")
+        row_count = min(len(points[Config.LEFT_ARM]), len(points[Config.RIGHT_ARM]))
+        for sample_index in range(row_count):
+            for arm_index, arm_label in enumerate(arm_labels):
+                pos = np.asarray(points[arm_index][sample_index], dtype=np.float64)
+                quat = np.asarray(quats[arm_index][sample_index], dtype=np.float64)
+                writer.writerow(
+                    {
+                        "sample": sample_index,
+                        "arm": arm_label,
+                        "x": f"{pos[0]:.9f}",
+                        "y": f"{pos[1]:.9f}",
+                        "z": f"{pos[2]:.9f}",
+                        "qx": f"{quat[1]:.9f}",
+                        "qy": f"{quat[2]:.9f}",
+                        "qz": f"{quat[3]:.9f}",
+                        "qw": f"{quat[0]:.9f}",
+                    }
+                )
+
+    summary = {
+        "samples": int(samples),
+        "seed": None if seed is None else int(seed),
+        "joint_lower_rad": _array_to_list(joint_lower),
+        "joint_upper_rad": _array_to_list(joint_upper),
+        "hull_point_count": int(hull_point_count),
+        "arms": {
+            "left": {
+                "position": _snapshot_to_dict(pos_stats[Config.LEFT_ARM]),
+                "quaternion_wxyz": _snapshot_to_dict(quat_stats[Config.LEFT_ARM]),
+                "quaternion_norm": _snapshot_to_dict(quat_norm_stats[Config.LEFT_ARM]),
+                "internal_workspace_box": _internal_box_to_dict(internal_boxes[Config.LEFT_ARM]),
+            },
+            "right": {
+                "position": _snapshot_to_dict(pos_stats[Config.RIGHT_ARM]),
+                "quaternion_wxyz": _snapshot_to_dict(quat_stats[Config.RIGHT_ARM]),
+                "quaternion_norm": _snapshot_to_dict(quat_norm_stats[Config.RIGHT_ARM]),
+                "internal_workspace_box": _internal_box_to_dict(internal_boxes[Config.RIGHT_ARM]),
+            },
+        },
+        "files": {
+            "workspace_points_csv": str(points_path),
+            "terminal_summary_txt": str(out / "mc_terminal_summary.txt"),
+        },
+    }
+    if metadata is not None:
+        summary["metadata"] = metadata
+    if extra_files is not None:
+        summary["files"].update(extra_files)
+    (out / "workspace_summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (out / "mc_terminal_summary.txt").write_text(report_text + "\n", encoding="utf-8")
+    print(f"[MC] 报告数据已保存: {out}")
+
+
+def _default_report_output_dir() -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Path(Config.RESULTS_DIR) / f"sim_report_{timestamp}"
+
+
+def _model_metadata() -> dict[str, object]:
+    return {
+        "label": "sim-only MuJoCo/C-controller data",
+        "urdf_path": Config.URDF_PATH,
+        "dt_s": float(Config.DT),
+        "num_arms": int(Config.NUM_ARMS),
+        "num_joints": int(Config.NUM_JOINTS),
+        "arm_names": list(Config.ARM_NAMES),
+        "joint_names": list(Config.JOINT_NAMES),
+        "body_joint_names": list(Config.BODY_JOINT_NAMES),
+        "torque_limits_nm": _array_to_list(Config.TORQUE_LIMITS),
+        "joint_velocity_limit_rad_s": float(Config.JOINT_VEL_LIMIT),
+        "enable_follower_friction": bool(Config.ENABLE_FOLLOWER_FRICTION),
+        "end_effector_linear_speed_mps": float(Config.END_EFFECTOR_LINEAR_SPEED_MPS),
+        "end_effector_real_speed_limit_mps": float(Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS),
+    }
+
+
+def _collect_monte_carlo_workspace(
+    *,
+    env,
+    samples: int,
+    seed: int | None,
+    progress_interval: int,
+    fallback_joint_limit: float = DEFAULT_MC_FALLBACK_LIMIT,
+    max_hull_points: int = DEFAULT_MC_MAX_HULL_POINTS,
+) -> MonteCarloWorkspaceResult:
+    if samples <= 0:
+        raise ValueError("samples 必须为正数")
+    if progress_interval < 0:
+        raise ValueError("progress_interval 不能为负数")
+    if max_hull_points <= 0:
+        raise ValueError("max_hull_points 必须为正数")
+
+    env.reset(Config.HOME_QPOS)
+    env.forward()
+    joint_lower, joint_upper = resolve_sampling_bounds(
+        env.joint_lower,
+        env.joint_upper,
+        fallback_limit=fallback_joint_limit,
+    )
+    rng = np.random.default_rng(seed)
+    pos_stats = [RangeAccumulator(3) for _ in range(Config.NUM_ARMS)]
+    quat_stats = [RangeAccumulator(4) for _ in range(Config.NUM_ARMS)]
+    quat_norm_stats = [RangeAccumulator(1) for _ in range(Config.NUM_ARMS)]
+    points = [
+        np.empty((samples, 3), dtype=np.float64)
+        for _ in range(Config.NUM_ARMS)
+    ]
+    quats = [
+        np.empty((samples, 4), dtype=np.float64)
+        for _ in range(Config.NUM_ARMS)
+    ]
+    last_qpos = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
+
+    for index in range(samples):
+        last_qpos = rng.uniform(joint_lower, joint_upper)
+        env.set_qpos(last_qpos)
+        env.set_qvel(np.zeros_like(last_qpos))
+        env.forward()
+
+        pos = env.get_all_ee_pos()
+        quat = env.get_all_ee_quat()
+        for arm in range(Config.NUM_ARMS):
+            points[arm][index] = pos[arm]
+            quats[arm][index] = quat[arm]
+            pos_stats[arm].update(pos[arm])
+            quat_stats[arm].update(quat[arm])
+            quat_norm_stats[arm].update(np.array([np.linalg.norm(quat[arm])], dtype=np.float64))
+
+        current = index + 1
+        if progress_interval and (current % progress_interval == 0 or current == samples):
+            sys.stdout.write(
+                "\r"
+                f"[Report MC] {current:>{len(str(samples))}}/{samples} "
+                f"左臂={_format_vector(pos[Config.LEFT_ARM], precision=4)} "
+                f"右臂={_format_vector(pos[Config.RIGHT_ARM], precision=4)}"
+            )
+            sys.stdout.flush()
+    if progress_interval:
+        sys.stdout.write("\n")
+
+    hull_points = [select_visualization_points(arm_points, max_hull_points) for arm_points in points]
+    workspace_hulls = [compute_workspace_hull(arm_points) for arm_points in hull_points]
+    internal_boxes = [compute_largest_internal_workspace_box(hull) for hull in workspace_hulls]
+    pos_snapshots = [stats.snapshot() for stats in pos_stats]
+    quat_snapshots = [stats.snapshot() for stats in quat_stats]
+    quat_norm_snapshots = [stats.snapshot() for stats in quat_norm_stats]
+    hull_point_count = len(hull_points[Config.LEFT_ARM])
+    report_text = _format_dual_monte_carlo_report(
+        samples=samples,
+        seed=seed,
+        joint_lower=joint_lower,
+        joint_upper=joint_upper,
+        pos_stats=pos_snapshots,
+        quat_stats=quat_snapshots,
+        quat_norm_stats=quat_norm_snapshots,
+        internal_boxes=internal_boxes,
+        hull_point_count=hull_point_count,
+        last_qpos=last_qpos,
+    )
+    return MonteCarloWorkspaceResult(
+        samples=samples,
+        seed=seed,
+        joint_lower=joint_lower,
+        joint_upper=joint_upper,
+        points=points,
+        quats=quats,
+        pos_stats=pos_snapshots,
+        quat_stats=quat_snapshots,
+        quat_norm_stats=quat_norm_snapshots,
+        workspace_hulls=workspace_hulls,
+        internal_boxes=internal_boxes,
+        hull_point_count=hull_point_count,
+        last_qpos=last_qpos,
+        report_text=report_text,
+    )
+
+
+def _build_control_target_schedule(
+    home_pos_base: np.ndarray,
+    home_quat_base: np.ndarray,
+    *,
+    duration_s: float,
+) -> list[ControlTargetSegment]:
+    if duration_s <= 0.0:
+        raise ValueError("control_duration_s 必须为正数")
+    home_pos = np.asarray(home_pos_base, dtype=np.float64).reshape(Config.NUM_ARMS, 3)
+    home_quat = np.asarray(home_quat_base, dtype=np.float64).reshape(Config.NUM_ARMS, 4)
+    segment_duration = float(duration_s) / 5.0
+    offsets = [
+        np.zeros((Config.NUM_ARMS, 3), dtype=np.float64),
+        np.array([[0.020, 0.000, 0.015], [0.018, -0.012, 0.012]], dtype=np.float64),
+        np.array([[-0.015, 0.018, 0.010], [-0.015, -0.018, 0.010]], dtype=np.float64),
+        np.array([[0.000, -0.020, 0.018], [0.000, 0.020, 0.018]], dtype=np.float64),
+        np.zeros((Config.NUM_ARMS, 3), dtype=np.float64),
+    ]
+    labels = ["home_hold", "step_1", "step_2", "step_3", "return_home"]
+    segments: list[ControlTargetSegment] = []
+    for index, (label, offset) in enumerate(zip(labels, offsets)):
+        segments.append(
+            ControlTargetSegment(
+                index=index,
+                label=label,
+                start_s=index * segment_duration,
+                end_s=(index + 1) * segment_duration if index < 4 else float(duration_s),
+                target_pos_base=home_pos + offset,
+                target_quat_base=home_quat.copy(),
+            )
+        )
+    return segments
+
+
+def _segment_for_time(schedule: list[ControlTargetSegment], t_s: float) -> ControlTargetSegment:
+    for segment in schedule:
+        if t_s < segment.end_s or segment.index == len(schedule) - 1:
+            return segment
+    return schedule[-1]
+
+
+def _status_counts(status_values: np.ndarray) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for status in np.asarray(status_values, dtype=np.int32):
+        key = str(int(status))
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _summarize_control_loop_arrays(
+    *,
+    duration_s: float,
+    dt_s: float,
+    log_stride: int,
+    error_history: np.ndarray,
+    tau_history: np.ndarray,
+    status_history: np.ndarray,
+) -> dict[str, object]:
+    errors = np.asarray(error_history, dtype=np.float64)
+    tau = np.asarray(tau_history, dtype=np.float64)
+    statuses = np.asarray(status_history, dtype=np.int32)
+    if errors.ndim != 2 or errors.shape[1] != Config.NUM_ARMS:
+        raise ValueError(f"error_history must have shape (N, {Config.NUM_ARMS})")
+    if tau.ndim != 2 or tau.shape[1] != Config.NUM_JOINTS:
+        raise ValueError(f"tau_history must have shape (N, {Config.NUM_JOINTS})")
+    steps = int(errors.shape[0])
+    steady_steps = max(1, min(steps, int(round(min(1.0, max(duration_s, dt_s)) / dt_s))))
+    arms: dict[str, object] = {}
+    for arm_index, arm_label in enumerate(Config.ARM_NAMES):
+        arm_slice = slice(arm_index * Config.ARM_JOINTS, (arm_index + 1) * Config.ARM_JOINTS)
+        arm_errors = errors[:, arm_index]
+        arm_tau = tau[:, arm_slice]
+        arms[arm_label] = {
+            "max_error_m": float(np.max(arm_errors)),
+            "mean_error_m": float(np.mean(arm_errors)),
+            "final_error_m": float(arm_errors[-1]),
+            "steady_state_error_m": float(np.mean(arm_errors[-steady_steps:])),
+            "peak_abs_tau_nm": float(np.max(np.abs(arm_tau))),
+            "rms_tau_nm": float(np.sqrt(np.mean(arm_tau * arm_tau))),
+        }
+    return {
+        "sim_only": True,
+        "duration_s": float(duration_s),
+        "dt_s": float(dt_s),
+        "steps": steps,
+        "log_stride": int(log_stride),
+        "status_counts": _status_counts(statuses),
+        "arms": arms,
+    }
+
+
+def _control_csv_fieldnames() -> list[str]:
+    fields = [
+        "step",
+        "t_s",
+        "segment",
+        "status",
+        "traj_t",
+        "left_error_m",
+        "right_error_m",
+        "left_speed_mps",
+        "right_speed_mps",
+    ]
+    for arm_label in Config.ARM_NAMES:
+        for prefix in ("target", "actual"):
+            for axis in ("x", "y", "z"):
+                fields.append(f"{arm_label}_{prefix}_{axis}_m")
+    fields.extend([f"tau_{index:02d}_nm" for index in range(Config.NUM_JOINTS)])
+    fields.extend([f"q_{index:02d}_rad" for index in range(Config.NUM_JOINTS)])
+    fields.extend([f"qd_{index:02d}_rad_s" for index in range(Config.NUM_JOINTS)])
+    return fields
+
+
+def _telemetry_row(
+    *,
+    step: int,
+    t_s: float,
+    segment: ControlTargetSegment,
+    status: int,
+    traj_t: float,
+    target_pos: np.ndarray,
+    actual_pos: np.ndarray,
+    errors: np.ndarray,
+    speeds: np.ndarray,
+    tau: np.ndarray,
+    q: np.ndarray,
+    qd: np.ndarray,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "step": int(step),
+        "t_s": f"{t_s:.6f}",
+        "segment": segment.label,
+        "status": int(status),
+        "traj_t": f"{traj_t:.6f}",
+        "left_error_m": f"{errors[Config.LEFT_ARM]:.9f}",
+        "right_error_m": f"{errors[Config.RIGHT_ARM]:.9f}",
+        "left_speed_mps": f"{speeds[Config.LEFT_ARM]:.9f}",
+        "right_speed_mps": f"{speeds[Config.RIGHT_ARM]:.9f}",
+    }
+    for arm_index, arm_label in enumerate(Config.ARM_NAMES):
+        for prefix, values in (("target", target_pos[arm_index]), ("actual", actual_pos[arm_index])):
+            for axis, value in zip(("x", "y", "z"), values):
+                row[f"{arm_label}_{prefix}_{axis}_m"] = f"{float(value):.9f}"
+    for index, value in enumerate(np.asarray(tau, dtype=np.float64)):
+        row[f"tau_{index:02d}_nm"] = f"{float(value):.9f}"
+    for index, value in enumerate(np.asarray(q, dtype=np.float64)):
+        row[f"q_{index:02d}_rad"] = f"{float(value):.9f}"
+    for index, value in enumerate(np.asarray(qd, dtype=np.float64)):
+        row[f"qd_{index:02d}_rad_s"] = f"{float(value):.9f}"
+    return row
+
+
+def _run_closed_loop_report_experiment(
+    *,
+    env,
+    duration_s: float,
+    log_stride: int,
+) -> ControlLoopResult:
+    if duration_s <= 0.0:
+        raise ValueError("control_duration_s 必须为正数")
+    if log_stride <= 0:
+        raise ValueError("control_log_stride 必须为正数")
+
+    from real.controller_bridge import RealControllerBridge
+
+    dt_s = float(Config.DT)
+    steps = max(1, int(round(duration_s / dt_s)))
+    env.reset(Config.HOME_QPOS)
+    env.forward()
+    home_pos = env.get_all_ee_pos()
+    home_quat = env.get_all_ee_quat()
+    schedule = _build_control_target_schedule(home_pos, home_quat, duration_s=duration_s)
+
+    error_history = np.zeros((steps, Config.NUM_ARMS), dtype=np.float64)
+    tau_history = np.zeros((steps, Config.NUM_JOINTS), dtype=np.float64)
+    status_history = np.zeros(steps, dtype=np.int32)
+    time_history = np.zeros(steps, dtype=np.float64)
+    telemetry_rows: list[dict[str, object]] = []
+
+    bridge = RealControllerBridge(exchange_timeout_s=1.0)
+    try:
+        for step in range(steps):
+            t_s = step * dt_s
+            segment = _segment_for_time(schedule, t_s)
+            env.set_all_target_poses_base(segment.target_pos_base, segment.target_quat_base)
+            target_pos_body, target_quat_body = env.get_all_target_poses()
+
+            q = env.get_qpos()
+            qd = env.get_qvel()
+            output = bridge.compute(
+                active_arm_mask=(1 << Config.LEFT_ARM) | (1 << Config.RIGHT_ARM),
+                elapsed_s=dt_s,
+                q=q,
+                qd=qd,
+                body_q=env.get_body_qpos(),
+                target_pos=target_pos_body,
+                target_quat=target_quat_body,
+            )
+            clipped_tau = env.clip_torque(output.tau)
+            env.apply_torque(clipped_tau)
+            env.step()
+            if env.enforce_joint_limits():
+                env.forward()
+
+            actual_pos = env.get_all_ee_pos()
+            actual_twist = env.get_all_ee_twist()
+            errors = np.linalg.norm(segment.target_pos_base - actual_pos, axis=1)
+            speeds = np.linalg.norm(actual_twist[:, :3], axis=1)
+            error_history[step] = errors
+            tau_history[step] = clipped_tau
+            status_history[step] = int(output.status)
+            time_history[step] = t_s
+
+            if step % log_stride == 0 or step == steps - 1:
+                telemetry_rows.append(
+                    _telemetry_row(
+                        step=step,
+                        t_s=t_s,
+                        segment=segment,
+                        status=int(output.status),
+                        traj_t=float(output.traj_t),
+                        target_pos=segment.target_pos_base,
+                        actual_pos=actual_pos,
+                        errors=errors,
+                        speeds=speeds,
+                        tau=clipped_tau,
+                        q=env.get_qpos(),
+                        qd=env.get_qvel(),
+                    )
+                )
+    finally:
+        bridge.close()
+
+    summary = _summarize_control_loop_arrays(
+        duration_s=duration_s,
+        dt_s=dt_s,
+        log_stride=log_stride,
+        error_history=error_history,
+        tau_history=tau_history,
+        status_history=status_history,
+    )
+    summary["schedule"] = [
+        {
+            "index": segment.index,
+            "label": segment.label,
+            "start_s": float(segment.start_s),
+            "end_s": float(segment.end_s),
+            "target_pos_base_m": [
+                _array_to_list(segment.target_pos_base[Config.LEFT_ARM]),
+                _array_to_list(segment.target_pos_base[Config.RIGHT_ARM]),
+            ],
+        }
+        for segment in schedule
+    ]
+    return ControlLoopResult(
+        duration_s=duration_s,
+        dt_s=dt_s,
+        steps=steps,
+        log_stride=log_stride,
+        schedule=schedule,
+        telemetry_rows=telemetry_rows,
+        summary=summary,
+        error_history=error_history,
+        tau_history=tau_history,
+        time_history=time_history,
+    )
+
+
+def _write_control_loop_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_control_csv_fieldnames())
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def _downsample_indices(length: int, max_points: int) -> np.ndarray:
+    if length <= 0:
+        return np.empty(0, dtype=np.int64)
+    if max_points <= 0 or length <= max_points:
+        return np.arange(length, dtype=np.int64)
+    return np.linspace(0, length - 1, max_points, dtype=np.int64)
+
+
+def _svg_scale(
+    values: np.ndarray,
+    lower: float,
+    upper: float,
+    *,
+    start: float,
+    end: float,
+    invert: bool = False,
+) -> np.ndarray:
+    span = max(float(upper - lower), 1e-12)
+    scaled = start + (np.asarray(values, dtype=np.float64) - lower) / span * (end - start)
+    return start + end - scaled if invert else scaled
+
+
+def _write_workspace_projection_svg(
+    path: Path,
+    *,
+    points: list[np.ndarray],
+    axes: tuple[int, int],
+    title: str,
+    max_points: int = DEFAULT_REPORT_MAX_SVG_POINTS,
+) -> None:
+    width, height, margin = 760, 520, 58
+    axis_names = ("x", "y", "z")
+    selected = []
+    for arm_points in points:
+        indices = _downsample_indices(len(arm_points), max_points)
+        selected.append(np.asarray(arm_points, dtype=np.float64)[indices][:, axes])
+    combined = np.vstack(selected)
+    lower = np.min(combined, axis=0)
+    upper = np.max(combined, axis=0)
+    padding = np.maximum((upper - lower) * 0.08, 1e-3)
+    lower -= padding
+    upper += padding
+    colors = ("#1f77b4", "#d9480f")
+    circles = []
+    for arm_index, arm_points in enumerate(selected):
+        xs = _svg_scale(arm_points[:, 0], lower[0], upper[0], start=margin, end=width - margin)
+        ys = _svg_scale(arm_points[:, 1], lower[1], upper[1], start=margin, end=height - margin, invert=True)
+        color = colors[arm_index % len(colors)]
+        for x, y in zip(xs, ys):
+            circles.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="1.6" fill="{color}" opacity="0.45"/>')
+    path.write_text(
+        "\n".join(
+            [
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+                '<rect width="100%" height="100%" fill="#ffffff"/>',
+                f'<text x="{width / 2:.1f}" y="28" text-anchor="middle" font-size="20" font-family="Arial">{title}</text>',
+                f'<rect x="{margin}" y="{margin}" width="{width - 2 * margin}" height="{height - 2 * margin}" fill="#f8fafc" stroke="#334155"/>',
+                *circles,
+                f'<text x="{width / 2:.1f}" y="{height - 16}" text-anchor="middle" font-size="14" font-family="Arial">{axis_names[axes[0]]} / m</text>',
+                f'<text x="18" y="{height / 2:.1f}" transform="rotate(-90 18 {height / 2:.1f})" text-anchor="middle" font-size="14" font-family="Arial">{axis_names[axes[1]]} / m</text>',
+                f'<text x="{margin}" y="48" font-size="13" font-family="Arial" fill="#1f77b4">left</text>',
+                f'<text x="{margin + 62}" y="48" font-size="13" font-family="Arial" fill="#d9480f">right</text>',
+                "</svg>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_position_span_svg(path: Path, *, pos_stats: list[RangeSnapshot]) -> None:
+    width, height, margin = 760, 420, 58
+    labels = ["x", "y", "z"]
+    values = np.vstack([snapshot.span for snapshot in pos_stats])
+    max_value = max(float(np.max(values)), 1e-9)
+    colors = ("#1f77b4", "#d9480f")
+    bar_width = 54
+    group_gap = 150
+    bars = []
+    for axis_index, axis_label in enumerate(labels):
+        group_x = margin + 75 + axis_index * group_gap
+        for arm_index, arm_label in enumerate(Config.ARM_NAMES):
+            value = float(values[arm_index, axis_index])
+            bar_h = value / max_value * (height - 2 * margin - 30)
+            x = group_x + arm_index * (bar_width + 14)
+            y = height - margin - bar_h
+            bars.extend(
+                [
+                    f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_width}" height="{bar_h:.1f}" fill="{colors[arm_index]}"/>',
+                    f'<text x="{x + bar_width / 2:.1f}" y="{y - 6:.1f}" text-anchor="middle" font-size="12" font-family="Arial">{value:.3f}</text>',
+                    f'<text x="{x + bar_width / 2:.1f}" y="{height - margin + 18}" text-anchor="middle" font-size="12" font-family="Arial">{axis_label}-{arm_label}</text>',
+                ]
+            )
+    path.write_text(
+        "\n".join(
+            [
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+                '<rect width="100%" height="100%" fill="#ffffff"/>',
+                f'<text x="{width / 2:.1f}" y="30" text-anchor="middle" font-size="20" font-family="Arial">Monte Carlo TCP position span</text>',
+                f'<line x1="{margin}" y1="{height - margin}" x2="{width - margin}" y2="{height - margin}" stroke="#334155"/>',
+                *bars,
+                f'<text x="18" y="{height / 2:.1f}" transform="rotate(-90 18 {height / 2:.1f})" text-anchor="middle" font-size="14" font-family="Arial">span / m</text>',
+                "</svg>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _polyline_points(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    *,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    width: int,
+    height: int,
+    margin: int,
+) -> str:
+    xs = _svg_scale(x_values, x_min, x_max, start=margin, end=width - margin)
+    ys = _svg_scale(y_values, y_min, y_max, start=margin, end=height - margin, invert=True)
+    return " ".join(f"{x:.2f},{y:.2f}" for x, y in zip(xs, ys))
+
+
+def _write_control_error_svg(path: Path, *, control: ControlLoopResult) -> None:
+    width, height, margin = 760, 420, 58
+    indices = _downsample_indices(len(control.time_history), 1400)
+    times = control.time_history[indices]
+    errors = control.error_history[indices]
+    y_max = max(float(np.max(errors)), 1e-6)
+    colors = ("#1f77b4", "#d9480f")
+    lines = []
+    for arm_index, arm_label in enumerate(Config.ARM_NAMES):
+        points = _polyline_points(
+            times,
+            errors[:, arm_index],
+            x_min=0.0,
+            x_max=max(float(control.duration_s), float(times[-1]) if len(times) else 1.0),
+            y_min=0.0,
+            y_max=y_max * 1.08,
+            width=width,
+            height=height,
+            margin=margin,
+        )
+        lines.append(f'<polyline points="{points}" fill="none" stroke="{colors[arm_index]}" stroke-width="2.0"/>')
+        lines.append(f'<text x="{margin + arm_index * 70}" y="48" font-size="13" font-family="Arial" fill="{colors[arm_index]}">{arm_label}</text>')
+    path.write_text(
+        "\n".join(
+            [
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+                '<rect width="100%" height="100%" fill="#ffffff"/>',
+                f'<text x="{width / 2:.1f}" y="30" text-anchor="middle" font-size="20" font-family="Arial">Closed-loop TCP position error</text>',
+                f'<rect x="{margin}" y="{margin}" width="{width - 2 * margin}" height="{height - 2 * margin}" fill="#f8fafc" stroke="#334155"/>',
+                *lines,
+                f'<text x="{width / 2:.1f}" y="{height - 16}" text-anchor="middle" font-size="14" font-family="Arial">time / s</text>',
+                f'<text x="18" y="{height / 2:.1f}" transform="rotate(-90 18 {height / 2:.1f})" text-anchor="middle" font-size="14" font-family="Arial">error / m</text>',
+                "</svg>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_torque_summary_svg(path: Path, *, control_summary: dict[str, object]) -> None:
+    width, height, margin = 760, 420, 58
+    arms = control_summary["arms"]
+    values = []
+    labels = []
+    for arm_label in Config.ARM_NAMES:
+        arm_summary = arms[arm_label]
+        values.extend([float(arm_summary["peak_abs_tau_nm"]), float(arm_summary["rms_tau_nm"])])
+        labels.extend([f"{arm_label} peak", f"{arm_label} rms"])
+    max_value = max(max(values), 1e-9)
+    colors = ("#1f77b4", "#60a5fa", "#d9480f", "#fb923c")
+    bars = []
+    for index, (label, value) in enumerate(zip(labels, values)):
+        bar_h = value / max_value * (height - 2 * margin - 30)
+        x = margin + 52 + index * 145
+        y = height - margin - bar_h
+        bars.extend(
+            [
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="78" height="{bar_h:.1f}" fill="{colors[index]}"/>',
+                f'<text x="{x + 39:.1f}" y="{y - 6:.1f}" text-anchor="middle" font-size="12" font-family="Arial">{value:.2f}</text>',
+                f'<text x="{x + 39:.1f}" y="{height - margin + 18}" text-anchor="middle" font-size="12" font-family="Arial">{label}</text>',
+            ]
+        )
+    path.write_text(
+        "\n".join(
+            [
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+                '<rect width="100%" height="100%" fill="#ffffff"/>',
+                f'<text x="{width / 2:.1f}" y="30" text-anchor="middle" font-size="20" font-family="Arial">Closed-loop torque summary</text>',
+                f'<line x1="{margin}" y1="{height - margin}" x2="{width - margin}" y2="{height - margin}" stroke="#334155"/>',
+                *bars,
+                f'<text x="18" y="{height / 2:.1f}" transform="rotate(-90 18 {height / 2:.1f})" text-anchor="middle" font-size="14" font-family="Arial">N m</text>',
+                "</svg>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _markdown_workspace_table(mc: MonteCarloWorkspaceResult) -> str:
+    lines = ["| Arm | X span m | Y span m | Z span m | Safe box volume m^3 |", "|---|---:|---:|---:|---:|"]
+    for arm_index, arm_label in enumerate(Config.ARM_NAMES):
+        span = mc.pos_stats[arm_index].span
+        box = mc.internal_boxes[arm_index]
+        lines.append(
+            f"| {arm_label} | {span[0]:.6f} | {span[1]:.6f} | {span[2]:.6f} | {box.volume:.9f} |"
+        )
+    return "\n".join(lines)
+
+
+def _markdown_control_table(control: ControlLoopResult) -> str:
+    arms = control.summary["arms"]
+    lines = ["| Arm | Max error m | Mean error m | Final error m | Steady error m | Peak tau Nm | RMS tau Nm |", "|---|---:|---:|---:|---:|---:|---:|"]
+    for arm_label in Config.ARM_NAMES:
+        arm_summary = arms[arm_label]
+        lines.append(
+            "| "
+            f"{arm_label} | "
+            f"{float(arm_summary['max_error_m']):.6f} | "
+            f"{float(arm_summary['mean_error_m']):.6f} | "
+            f"{float(arm_summary['final_error_m']):.6f} | "
+            f"{float(arm_summary['steady_state_error_m']):.6f} | "
+            f"{float(arm_summary['peak_abs_tau_nm']):.3f} | "
+            f"{float(arm_summary['rms_tau_nm']):.3f} |"
+        )
+    return "\n".join(lines)
+
+
+def _write_report_markdown(
+    path: Path,
+    *,
+    mc: MonteCarloWorkspaceResult,
+    control: ControlLoopResult,
+    files: dict[str, str],
+) -> None:
+    seed_text = "随机" if mc.seed is None else str(mc.seed)
+    file_lines = "\n".join(f"- `{name}`: `{value}`" for name, value in sorted(files.items()))
+    path.write_text(
+        "\n".join(
+            [
+                "# AM-DPBSURDF0422 Sim-only 数据报告",
+                "",
+                "本报告包只使用 MuJoCo 仿真和 C/STM32 控制核心生成，不包含真机实验结论。",
+                "",
+                "## 实验配置",
+                f"- 模型: `{Path(Config.URDF_PATH).name}`",
+                f"- Monte Carlo 样本数: `{mc.samples}`",
+                f"- Monte Carlo 随机种子: `{seed_text}`",
+                f"- 闭环实验时长: `{control.duration_s:.3f} s`",
+                f"- 固定步长: `{control.dt_s:.6f} s`",
+                f"- 闭环目标段数: `{len(control.schedule)}`",
+                "",
+                "## Monte Carlo 工作空间结果",
+                _markdown_workspace_table(mc),
+                "",
+                "说明：`workspace_points.csv` 仅保留末端位置和四元数，不保存采样 qpos；关节采样边界和统计摘要保存在 `workspace_summary.json`。",
+                "",
+                "## 闭环多目标阶跃结果",
+                _markdown_control_table(control),
+                "",
+                f"状态计数: `{json.dumps(control.summary['status_counts'], ensure_ascii=False)}`",
+                "",
+                "## 可复现性",
+                "- 数据包中的 CSV/JSON/SVG 均由同一次 `sim-report` 运行生成。",
+                "- 闭环实验使用固定 `Config.DT` 推进控制器时间，不依赖墙钟周期。",
+                "- 所有结论应表述为 sim-only 证据，不能替代真机验证。",
+                "",
+                "## 文件索引",
+                file_lines,
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_sim_report_assets(
+    output_dir: Path,
+    *,
+    mc: MonteCarloWorkspaceResult,
+    control: ControlLoopResult,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    control_csv = output_dir / "control_loop.csv"
+    control_summary_path = output_dir / "control_summary.json"
+    report_md = output_dir / "report.md"
+    chart_paths = {
+        "workspace_xy_svg": output_dir / "workspace_xy.svg",
+        "workspace_xz_svg": output_dir / "workspace_xz.svg",
+        "workspace_yz_svg": output_dir / "workspace_yz.svg",
+        "workspace_span_svg": output_dir / "workspace_position_spans.svg",
+        "control_error_svg": output_dir / "control_error.svg",
+        "control_torque_svg": output_dir / "control_torque.svg",
+    }
+    file_index = {
+        "workspace_points_csv": str(output_dir / "workspace_points.csv"),
+        "workspace_summary_json": str(output_dir / "workspace_summary.json"),
+        "mc_terminal_summary_txt": str(output_dir / "mc_terminal_summary.txt"),
+        "control_loop_csv": str(control_csv),
+        "control_summary_json": str(control_summary_path),
+        "report_md": str(report_md),
+        **{name: str(path) for name, path in chart_paths.items()},
+    }
+
+    _write_control_loop_csv(control_csv, control.telemetry_rows)
+    control_summary = {
+        **control.summary,
+        "metadata": _model_metadata(),
+        "files": file_index,
+    }
+    control_summary_path.write_text(
+        json.dumps(control_summary, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_workspace_projection_svg(chart_paths["workspace_xy_svg"], points=mc.points, axes=(0, 1), title="Workspace projection XY")
+    _write_workspace_projection_svg(chart_paths["workspace_xz_svg"], points=mc.points, axes=(0, 2), title="Workspace projection XZ")
+    _write_workspace_projection_svg(chart_paths["workspace_yz_svg"], points=mc.points, axes=(1, 2), title="Workspace projection YZ")
+    _write_position_span_svg(chart_paths["workspace_span_svg"], pos_stats=mc.pos_stats)
+    _write_control_error_svg(chart_paths["control_error_svg"], control=control)
+    _write_torque_summary_svg(chart_paths["control_torque_svg"], control_summary=control.summary)
+    _write_report_markdown(report_md, mc=mc, control=control, files=file_index)
+    _write_monte_carlo_report_assets(
+        output_dir,
+        samples=mc.samples,
+        seed=mc.seed,
+        joint_lower=mc.joint_lower,
+        joint_upper=mc.joint_upper,
+        points=mc.points,
+        quats=mc.quats,
+        pos_stats=mc.pos_stats,
+        quat_stats=mc.quat_stats,
+        quat_norm_stats=mc.quat_norm_stats,
+        internal_boxes=mc.internal_boxes,
+        hull_point_count=mc.hull_point_count,
+        report_text=mc.report_text,
+        metadata=_model_metadata(),
+        extra_files={key: value for key, value in file_index.items() if key != "workspace_points_csv"},
+    )
+
+
+def run_sim_report(
+    *,
+    samples: int = DEFAULT_REPORT_SAMPLES,
+    seed: int | None = 42,
+    progress_interval: int = DEFAULT_REPORT_PROGRESS_INTERVAL,
+    max_hull_points: int = DEFAULT_MC_MAX_HULL_POINTS,
+    output_dir: str | Path | None = None,
+    control_duration_s: float = DEFAULT_REPORT_CONTROL_DURATION_S,
+    control_log_stride: int = DEFAULT_REPORT_CONTROL_LOG_STRIDE,
+) -> Path:
+    """Generate a sim-only report package with MC workspace and closed-loop data."""
+    out = Path(output_dir) if output_dir is not None else _default_report_output_dir()
+    print("=" * 60)
+    print("      AM-DPBSURDF0422 Sim-only 报告数据包生成      ")
+    print("=" * 60)
+    print(f"[Report] 输出目录: {out}")
+    print(f"[Report] Monte Carlo samples={samples}, seed={'随机' if seed is None else seed}")
+    sys.stdout.flush()
+
+    env = _create_sim_env()
+    mc_result = _collect_monte_carlo_workspace(
+        env=env,
+        samples=samples,
+        seed=seed,
+        progress_interval=progress_interval,
+        max_hull_points=max_hull_points,
+    )
+    print(mc_result.report_text)
+    print(f"[Report] 运行闭环多目标阶跃实验: duration={control_duration_s:.3f}s")
+    control_result = _run_closed_loop_report_experiment(
+        env=env,
+        duration_s=control_duration_s,
+        log_stride=control_log_stride,
+    )
+    _write_sim_report_assets(out, mc=mc_result, control=control_result)
+    print(f"[Report] 报告数据包已生成: {out}")
+    print(f"[Report] 中文摘要: {out / 'report.md'}")
+    return out
+
+
 def run_monte_carlo_range_check(
     *,
     samples: int = DEFAULT_MC_SAMPLES,
@@ -1220,6 +2299,7 @@ def run_monte_carlo_range_check(
     show_viewer: bool = True,
     max_visual_points: int = DEFAULT_MC_MAX_VIS_POINTS,
     max_hull_points: int = DEFAULT_MC_MAX_HULL_POINTS,
+    output_dir: str | Path | None = None,
 ) -> None:
     """Use the normal sim environment to sample FK ranges without starting UDP."""
     if samples <= 0:
@@ -1250,6 +2330,7 @@ def run_monte_carlo_range_check(
     quat_norm_stats = [RangeAccumulator(1) for _ in range(Config.NUM_ARMS)]
     last_qpos = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
     ee_points: list[list[np.ndarray]] = [[] for _ in range(Config.NUM_ARMS)]
+    ee_quats: list[list[np.ndarray]] = [[] for _ in range(Config.NUM_ARMS)]
 
     print(f"[MC] 采样数量={samples}, 随机种子={'随机' if seed is None else seed}")
     print("[MC] 使用原 sim 的 MujocoSimEnv 做双臂 FK 采样，按 Ctrl+C 可提前输出已采样范围。")
@@ -1268,6 +2349,7 @@ def run_monte_carlo_range_check(
                 quat_stats[arm].update(quat[arm])
                 quat_norm_stats[arm].update(np.array([np.linalg.norm(quat[arm])], dtype=np.float64))
                 ee_points[arm].append(pos[arm])
+                ee_quats[arm].append(quat[arm])
 
             current = index + 1
             if progress_interval and (current % progress_interval == 0 or current == samples):
@@ -1297,20 +2379,36 @@ def run_monte_carlo_range_check(
     quat_snapshots = [stats.snapshot() for stats in quat_stats]
     quat_norm_snapshots = [stats.snapshot() for stats in quat_norm_stats]
 
-    print(
-        _format_dual_monte_carlo_report(
+    report_text = _format_dual_monte_carlo_report(
+        samples=pos_snapshots[Config.LEFT_ARM].count,
+        seed=seed,
+        joint_lower=joint_lower,
+        joint_upper=joint_upper,
+        pos_stats=pos_snapshots,
+        quat_stats=quat_snapshots,
+        quat_norm_stats=quat_norm_snapshots,
+        internal_boxes=internal_boxes,
+        hull_point_count=len(hull_points[Config.LEFT_ARM]),
+        last_qpos=last_qpos,
+    )
+    print(report_text)
+
+    if output_dir is not None:
+        _write_monte_carlo_report_assets(
+            output_dir,
             samples=pos_snapshots[Config.LEFT_ARM].count,
             seed=seed,
             joint_lower=joint_lower,
             joint_upper=joint_upper,
+            points=points_array,
+            quats=[np.asarray(quats, dtype=np.float64) for quats in ee_quats],
             pos_stats=pos_snapshots,
             quat_stats=quat_snapshots,
             quat_norm_stats=quat_norm_snapshots,
             internal_boxes=internal_boxes,
             hull_point_count=len(hull_points[Config.LEFT_ARM]),
-            last_qpos=last_qpos,
+            report_text=report_text,
         )
-    )
 
     if show_viewer:
         _show_monte_carlo_workspace_viewer(
@@ -1381,11 +2479,12 @@ def run_udp_server(ready_file: str | None = None) -> None:
     state_packet = np.empty(CONTROL_INPUT_PACKET_SIZE, dtype=np.float64)
     state_packet_view = memoryview(state_packet).cast("B")
     expected_torque_bytes = TORQUE_OUTPUT_PACKET_SIZE * np.dtype("<f8").itemsize
+    last_loop_end_s = None
+    last_stats_print_s = None
+    socket_timeout_count = 0
 
     try:
         while not shutdown_event.is_set():
-            body_gui.apply_pending()
-
             try:
                 data, addr = sock.recvfrom(1024)
 
@@ -1401,25 +2500,35 @@ def run_udp_server(ready_file: str | None = None) -> None:
                     print(f"[UDP Server] 收到未知长度的数据: {len(data)} bytes")
                     continue
 
+                service_start_s = time.perf_counter()
                 tau = np.frombuffer(data, dtype="<f8", count=Config.NUM_JOINTS)
                 rerun_payload = None
-                t_start = time.perf_counter()
                 with env_lock:
                     body_gui.apply_pending()
                     clipped_tau = env.clip_torque(tau)
+                    step_start_s = time.perf_counter()
                     env.apply_torque(clipped_tau)
                     env.step()
                     clipped = env.enforce_joint_limits()
                     if clipped:
                         env.forward()
-                    cycle_time_ms = (time.perf_counter() - t_start) * 1000.0
+                    mujoco_step_ms = (time.perf_counter() - step_start_s) * 1000.0
 
                     if (
                         Config.ENABLE_RERUN
                         and rerun_logger is not None
                         and _should_log_sim_rerun_step(step_count)
                     ):
-                        q, qd, pos_current, quat_current, pos_desired, quat_desired = env.get_state_snapshot()
+                        include_twist = bool(Config.SIM_RERUN_INCLUDE_TWIST)
+                        (
+                            q,
+                            qd,
+                            pos_current,
+                            quat_current,
+                            pos_desired,
+                            quat_desired,
+                            *twist_values,
+                        ) = env.get_state_snapshot(include_twist=include_twist)
                         rerun_payload = {
                             "t": step_count * Config.DT,
                             "pos_actual": pos_current,
@@ -1427,21 +2536,62 @@ def run_udp_server(ready_file: str | None = None) -> None:
                             "quat_actual": quat_current,
                             "quat_desired": quat_desired,
                             "tau_total": clipped_tau.copy(),
-                            "cycle_time": cycle_time_ms,
                             "q": q,
                             "qd": qd,
-                            "ee_twist": env.get_all_ee_twist(),
                             "step_count": step_count,
                         }
+                        if include_twist:
+                            rerun_payload["ee_twist"] = twist_values[0]
 
+                    packet_start_s = time.perf_counter()
                     env.write_state_packet(state_packet)
+                    state_packet_ms = (time.perf_counter() - packet_start_s) * 1000.0
 
-                if rerun_payload is not None:
-                    rerun_logger.log_step(**rerun_payload)
                 sock.sendto(state_packet_view, addr)
+                loop_end_s = time.perf_counter()
+                service_ms = max(0.0, (loop_end_s - service_start_s) * 1000.0)
+                loop_ms = 0.0
+                loop_hz = 0.0
+                if last_loop_end_s is not None:
+                    loop_dt_s = loop_end_s - last_loop_end_s
+                    if loop_dt_s > 0.0:
+                        loop_ms = loop_dt_s * 1000.0
+                        loop_hz = 1.0 / loop_dt_s
+                last_loop_end_s = loop_end_s
+
+                rerun_overwrites, rerun_drops = _sim_rerun_stats(rerun_logger)
+                viewer_stats = _sim_viewer_stats(viewer_worker)
+                if rerun_payload is not None:
+                    rerun_logger.log_step(
+                        **rerun_payload,
+                        cycle_time=service_ms,
+                        uart_latency_ms=loop_ms,
+                        uart_cycle_hz=loop_hz,
+                        sim_target_hz=Config.SIM_TARGET_HZ,
+                        sim_service_ms=service_ms,
+                        sim_mujoco_step_ms=mujoco_step_ms,
+                        sim_state_packet_ms=state_packet_ms,
+                        sim_rerun_overwrite_count=rerun_overwrites,
+                        sim_rerun_drop_count=rerun_drops,
+                        sim_socket_timeout_count=socket_timeout_count,
+                        **viewer_stats,
+                    )
+                last_stats_print_s = _maybe_print_sim_stats(
+                    now_s=loop_end_s,
+                    last_print_s=last_stats_print_s,
+                    loop_hz=loop_hz,
+                    loop_ms=loop_ms,
+                    mujoco_step_ms=mujoco_step_ms,
+                    state_packet_ms=state_packet_ms,
+                    rerun_overwrite_count=rerun_overwrites,
+                    rerun_drop_count=rerun_drops,
+                    viewer_stats=viewer_stats,
+                    socket_timeout_count=socket_timeout_count,
+                )
                 step_count += 1
 
             except socket.timeout:
+                socket_timeout_count += 1
                 continue
 
     except KeyboardInterrupt:

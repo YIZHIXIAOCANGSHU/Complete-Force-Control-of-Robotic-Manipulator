@@ -401,12 +401,14 @@ class MujocoSimEnv:
 
     def get_state_snapshot(
         self,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        *,
+        include_twist: bool = False,
+    ) -> tuple[np.ndarray, ...]:
         """一次性取出 UDP / Rerun 所需状态，减少热路径上的重复函数往返。"""
         pos_desired, quat_desired = self.get_all_target_poses()
         pos_desired_base = self.target_frame_to_base_pos(pos_desired)
         quat_desired_base = self.target_frame_to_base_quat(quat_desired)
-        return (
+        snapshot = (
             self.data.qpos[self.joint_qpos_ids].copy(),
             self.data.qvel[self.dof_ids].copy(),
             self.data.xpos[self.ee_body_ids].copy(),
@@ -414,6 +416,9 @@ class MujocoSimEnv:
             pos_desired_base,
             quat_desired_base,
         )
+        if include_twist:
+            return (*snapshot, self.get_all_ee_twist())
+        return snapshot
 
     def write_state_packet(self, state_packet: np.ndarray) -> None:
         """直接将当前反馈和 Body0422 目标坐标写入预分配 C 控制输入包。"""

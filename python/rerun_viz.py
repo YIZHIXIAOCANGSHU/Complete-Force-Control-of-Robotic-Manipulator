@@ -59,6 +59,48 @@ _POSE_NAME_MAP = {
 
 _ARM_LABELS = ("left", "right")
 _ARM_DISPLAY_NAMES = ("Left", "Right")
+_ESSENTIAL_PERFORMANCE_PATHS = {
+    "performance/c_engine_time",
+    "performance/elapsed_s",
+    "performance/link_latency",
+    "performance/link_cycle_hz",
+    "performance/sim_target_hz",
+    "performance/sim_service_ms",
+    "performance/sim_mujoco_step_ms",
+    "performance/sim_state_packet_ms",
+    "performance/sim_rerun_overwrite_count",
+    "performance/sim_rerun_drop_count",
+    "performance/viewer_sync_ms",
+}
+_DETAILED_PERFORMANCE_PATHS = {
+    "performance/link_transfer_kbps",
+    "performance/stm32_calc_time",
+    "performance/stm32_calc_hz",
+    "performance/feedback_wait_ms",
+    "performance/tx_overwrite_count",
+    "performance/can_backpressure_count",
+    "performance/control_target_hz",
+    "performance/sim_socket_timeout_count",
+    "performance/viewer_sync_count",
+    "performance/viewer_skip_count",
+    "performance/viewer_lock_wait_ms",
+}
+
+
+def _rerun_detailed_perf_enabled() -> bool:
+    return bool(getattr(Config, "RERUN_DETAILED_PERF", False))
+
+
+def _rerun_should_log_perf(path: str) -> bool:
+    return path in _ESSENTIAL_PERFORMANCE_PATHS or (
+        _rerun_detailed_perf_enabled() and path in _DETAILED_PERFORMANCE_PATHS
+    )
+
+
+def _log_perf_scalar(path: str, value) -> None:
+    if value is None or not _rerun_should_log_perf(path):
+        return
+    rr.log(path, rr.Scalars(float(value)))
 
 
 def _as_arm_array(values: np.ndarray, width: int) -> np.ndarray:
@@ -240,42 +282,37 @@ def _setup_trajectory_styles():
         static=True,
     )
 
-    rr.log("performance/c_engine_time",
-           rr.SeriesLines(colors=[_MODE_COLORS['c_engine']],
-                          names=["Python Control Step Time (ms)"],
-                          widths=[2]),
-           static=True)
-
-    rr.log("performance/link_latency",
-           rr.SeriesLines(colors=[[230, 150, 50]],
-                          names=["Control Link Period (ms)"],
-                          widths=[2]),
-           static=True)
-
-    rr.log("performance/link_cycle_hz",
-           rr.SeriesLines(colors=[[230, 120, 40]],
-                          names=["Control Link Rate (Hz)"],
-                          widths=[2]),
-           static=True)
-
-    rr.log("performance/link_transfer_kbps",
-           rr.SeriesLines(colors=[[230, 180, 80]],
-                          names=["Control Link Throughput (kbps)"],
-                          widths=[2]),
-           static=True)
-    
-    # STM32 计算耗时样式
-    rr.log("performance/stm32_calc_time",
-           rr.SeriesLines(colors=[[100, 200, 100]],
-                          names=["STM32 Algorithm Calc Time (ms)"],
-                          widths=[2]),
-           static=True)
-
-    rr.log("performance/stm32_calc_hz",
-           rr.SeriesLines(colors=[[80, 180, 220]],
-                          names=["STM32 Calc Rate (Hz)"],
-                          widths=[2]),
-           static=True)
+    performance_styles = {
+        "performance/c_engine_time": (_MODE_COLORS["c_engine"], "Python Control Step Time (ms)", 2),
+        "performance/link_latency": ([230, 150, 50], "Control Link Period (ms)", 2),
+        "performance/link_cycle_hz": ([230, 120, 40], "Control Link Rate (Hz)", 2),
+        "performance/link_transfer_kbps": ([230, 180, 80], "Control Link Throughput (kbps)", 2),
+        "performance/stm32_calc_time": ([100, 200, 100], "STM32 Algorithm Calc Time (ms)", 2),
+        "performance/stm32_calc_hz": ([80, 180, 220], "STM32 Calc Rate (Hz)", 2),
+        "performance/feedback_wait_ms": ([120, 180, 240], "Feedback Wait (ms)", 2),
+        "performance/tx_overwrite_count": ([220, 120, 80], "TX Pending Overwrites", 2),
+        "performance/can_backpressure_count": ([180, 80, 160], "CAN Backpressure Count", 2),
+        "performance/control_target_hz": ([120, 120, 120], "Control Target Hz", 1.5),
+        "performance/sim_target_hz": ([120, 120, 120], "Sim Target Hz", 1.5),
+        "performance/sim_service_ms": ([50, 150, 230], "Sim UDP Service Time (ms)", 2),
+        "performance/sim_mujoco_step_ms": ([80, 190, 80], "Sim MuJoCo Step Time (ms)", 2),
+        "performance/sim_state_packet_ms": ([230, 180, 80], "Sim State Packet Time (ms)", 2),
+        "performance/sim_rerun_overwrite_count": ([220, 120, 80], "Sim Rerun Overwrites", 2),
+        "performance/sim_rerun_drop_count": ([210, 80, 80], "Sim Rerun Drops", 2),
+        "performance/sim_socket_timeout_count": ([180, 80, 160], "Sim Socket Timeouts", 2),
+        "performance/viewer_sync_count": ([90, 170, 230], "Viewer Sync Count", 2),
+        "performance/viewer_skip_count": ([230, 120, 60], "Viewer Skip Count", 2),
+        "performance/viewer_sync_ms": ([120, 200, 120], "Viewer Sync Time (ms)", 2),
+        "performance/viewer_lock_wait_ms": ([200, 170, 80], "Viewer Lock Wait (ms)", 2),
+    }
+    for path, (color, name, width) in performance_styles.items():
+        if not _rerun_should_log_perf(path):
+            continue
+        rr.log(
+            path,
+            rr.SeriesLines(colors=[color], names=[name], widths=[width]),
+            static=True,
+        )
 
 
 def _setup_arm_realtime_styles() -> None:
@@ -409,12 +446,9 @@ def setup_realtime_styles():
             rr.log(f"arms/{arm_label}/velocity_margin/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/limit_margin_low/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/limit_margin_high/{joint}/value", rr.Scalars(0.0))
-    rr.log("performance/c_engine_time", rr.Scalars(0.0))
-    rr.log("performance/link_latency", rr.Scalars(0.0))
-    rr.log("performance/link_cycle_hz", rr.Scalars(0.0))
-    rr.log("performance/link_transfer_kbps", rr.Scalars(0.0))
-    rr.log("performance/stm32_calc_time", rr.Scalars(0.0))
-    rr.log("performance/stm32_calc_hz", rr.Scalars(0.0))
+    for path in sorted(_ESSENTIAL_PERFORMANCE_PATHS | _DETAILED_PERFORMANCE_PATHS):
+        if _rerun_should_log_perf(path):
+            rr.log(path, rr.Scalars(0.0))
     rr.log(
         "limits/tcp_speed",
         rr.SeriesLines(colors=[[120, 120, 120]], names=["TCP Speed Limit"], widths=[1.5]),
@@ -429,27 +463,35 @@ def setup_realtime_styles():
 
     link_log_view = rrb.TextLogView(name="Control Link Log", origin="/control_link_log")
 
-    latency_view = link_latency_view()
+    def performance_view(name: str, path: str):
+        if not _rerun_should_log_perf(path):
+            return None
+        return rrb.TimeSeriesView(name=name, origin=f"/{path}")
 
-    link_cycle_rate_view = rrb.TimeSeriesView(
-        name="Control Link Rate (Hz)", origin="/performance/link_cycle_hz",
-    )
-
-    link_transfer_rate_view = rrb.TimeSeriesView(
-        name="Control Link Throughput (kbps)", origin="/performance/link_transfer_kbps",
-    )
-    
-    stm32_time_view = rrb.TimeSeriesView(
-        name="STM32 Calculation Time (ms)", origin="/performance/stm32_calc_time",
-    )
-
-    stm32_rate_view = rrb.TimeSeriesView(
-        name="STM32 Calculation Rate (Hz)", origin="/performance/stm32_calc_hz",
-    )
-
-    python_time_view = rrb.TimeSeriesView(
-        name="Python Control Step Time (ms)", origin="/performance/c_engine_time",
-    )
+    performance_views = [
+        performance_view("Python Control Step Time (ms)", "performance/c_engine_time"),
+        performance_view("Control Link Rate (Hz)", "performance/link_cycle_hz"),
+        performance_view("Control Link Period (ms)", "performance/link_latency"),
+        performance_view("Sim Target Hz", "performance/sim_target_hz"),
+        performance_view("Sim UDP Service Time (ms)", "performance/sim_service_ms"),
+        performance_view("Sim MuJoCo Step Time (ms)", "performance/sim_mujoco_step_ms"),
+        performance_view("Sim State Packet Time (ms)", "performance/sim_state_packet_ms"),
+        performance_view("Sim Rerun Overwrites", "performance/sim_rerun_overwrite_count"),
+        performance_view("Sim Rerun Drops", "performance/sim_rerun_drop_count"),
+        performance_view("Viewer Sync Time (ms)", "performance/viewer_sync_ms"),
+        performance_view("Control Link Throughput (kbps)", "performance/link_transfer_kbps"),
+        performance_view("STM32 Calculation Time (ms)", "performance/stm32_calc_time"),
+        performance_view("STM32 Calculation Rate (Hz)", "performance/stm32_calc_hz"),
+        performance_view("Feedback Wait (ms)", "performance/feedback_wait_ms"),
+        performance_view("TX Pending Overwrites", "performance/tx_overwrite_count"),
+        performance_view("CAN Backpressure Count", "performance/can_backpressure_count"),
+        performance_view("Control Target Hz", "performance/control_target_hz"),
+        performance_view("Sim Socket Timeouts", "performance/sim_socket_timeout_count"),
+        performance_view("Viewer Sync Count", "performance/viewer_sync_count"),
+        performance_view("Viewer Skip Count", "performance/viewer_skip_count"),
+        performance_view("Viewer Lock Wait (ms)", "performance/viewer_lock_wait_ms"),
+    ]
+    performance_views = [view for view in performance_views if view is not None]
 
     def control_link_view():
         return rrb.Vertical(
@@ -533,12 +575,7 @@ def setup_realtime_styles():
             arm_joint_axis_view("left", "Left", "limit_margin_high", "High Limit Margin", "rad"),
             arm_joint_axis_view("right", "Right", "limit_margin_high", "High Limit Margin", "rad"),
             rrb.Vertical(
-                python_time_view,
-                link_cycle_rate_view,
-                link_transfer_rate_view,
-                latency_view,
-                stm32_time_view,
-                stm32_rate_view,
+                *performance_views,
                 name="Performance",
             ),
             control_link_view(),
@@ -571,6 +608,22 @@ def log_realtime_step(
     uart_transfer_kbps: float = None,
     stm32_calc_time_ms: float = None,
     stm32_calc_hz: float = None,
+    c_bridge_ms: float = None,
+    feedback_wait_ms: float = None,
+    tx_overwrite_count: int = None,
+    can_backpressure_count: int = None,
+    control_target_hz: float = None,
+    sim_target_hz: float = None,
+    sim_service_ms: float = None,
+    sim_mujoco_step_ms: float = None,
+    sim_state_packet_ms: float = None,
+    sim_rerun_overwrite_count: int = None,
+    sim_rerun_drop_count: int = None,
+    sim_socket_timeout_count: int = None,
+    viewer_sync_count: int = None,
+    viewer_skip_count: int = None,
+    viewer_sync_ms: float = None,
+    viewer_lock_wait_ms: float = None,
 ):
     """单步记录交互式仿真数据"""
     if not RERUN_AVAILABLE: return
@@ -667,19 +720,29 @@ def log_realtime_step(
         rr.log("control_link_log", rr.TextLog(f"[{step_count}] RX (Positions): {rx_str}\n[{step_count}] TX ({tx_label}): {tx_str}"))
 
     # Performance
-    rr.log("performance/c_engine_time", rr.Scalars(float(cycle_time)))
-    if elapsed_s is not None:
-        rr.log("performance/elapsed_s", rr.Scalars(float(elapsed_s)))
-    if uart_latency_ms is not None:
-        rr.log("performance/link_latency", rr.Scalars(float(uart_latency_ms)))
-    if uart_cycle_hz is not None:
-        rr.log("performance/link_cycle_hz", rr.Scalars(float(uart_cycle_hz)))
-    if uart_transfer_kbps is not None:
-        rr.log("performance/link_transfer_kbps", rr.Scalars(float(uart_transfer_kbps)))
-    if stm32_calc_time_ms is not None:
-        rr.log("performance/stm32_calc_time", rr.Scalars(float(stm32_calc_time_ms)))
-    if stm32_calc_hz is not None:
-        rr.log("performance/stm32_calc_hz", rr.Scalars(float(stm32_calc_hz)))
+    _log_perf_scalar("performance/c_engine_time", cycle_time)
+    _log_perf_scalar("performance/elapsed_s", elapsed_s)
+    _log_perf_scalar("performance/link_latency", uart_latency_ms)
+    _log_perf_scalar("performance/link_cycle_hz", uart_cycle_hz)
+    _log_perf_scalar("performance/link_transfer_kbps", uart_transfer_kbps)
+    _log_perf_scalar("performance/stm32_calc_time", stm32_calc_time_ms)
+    _log_perf_scalar("performance/stm32_calc_hz", stm32_calc_hz)
+    _log_perf_scalar("performance/stm32_calc_time", c_bridge_ms)
+    _log_perf_scalar("performance/feedback_wait_ms", feedback_wait_ms)
+    _log_perf_scalar("performance/tx_overwrite_count", tx_overwrite_count)
+    _log_perf_scalar("performance/can_backpressure_count", can_backpressure_count)
+    _log_perf_scalar("performance/control_target_hz", control_target_hz)
+    _log_perf_scalar("performance/sim_target_hz", sim_target_hz)
+    _log_perf_scalar("performance/sim_service_ms", sim_service_ms)
+    _log_perf_scalar("performance/sim_mujoco_step_ms", sim_mujoco_step_ms)
+    _log_perf_scalar("performance/sim_state_packet_ms", sim_state_packet_ms)
+    _log_perf_scalar("performance/sim_rerun_overwrite_count", sim_rerun_overwrite_count)
+    _log_perf_scalar("performance/sim_rerun_drop_count", sim_rerun_drop_count)
+    _log_perf_scalar("performance/sim_socket_timeout_count", sim_socket_timeout_count)
+    _log_perf_scalar("performance/viewer_sync_count", viewer_sync_count)
+    _log_perf_scalar("performance/viewer_skip_count", viewer_skip_count)
+    _log_perf_scalar("performance/viewer_sync_ms", viewer_sync_ms)
+    _log_perf_scalar("performance/viewer_lock_wait_ms", viewer_lock_wait_ms)
 
     if right_j7_diag:
         for key in ("q", "qd", "tau_cmd_raw", "tau_cmd_sent", "tau_actual"):

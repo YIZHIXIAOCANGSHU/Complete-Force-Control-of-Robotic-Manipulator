@@ -1,0 +1,186 @@
+{
+  "sim_only": true,
+  "duration_s": 10.0,
+  "dt_s": 0.001,
+  "steps": 10000,
+  "log_stride": 10,
+  "status_counts": {
+    "0": 10000
+  },
+  "arms": {
+    "left": {
+      "max_error_m": 0.04456453875036747,
+      "mean_error_m": 0.013809561821049431,
+      "final_error_m": 9.234406993597968e-05,
+      "steady_state_error_m": 0.00012274047137178973,
+      "peak_abs_tau_nm": 0.7218712720925937,
+      "rms_tau_nm": 0.19825723774537427
+    },
+    "right": {
+      "max_error_m": 0.043113430973737744,
+      "mean_error_m": 0.01168592210408604,
+      "final_error_m": 0.005498549816070217,
+      "steady_state_error_m": 0.006372475812847183,
+      "peak_abs_tau_nm": 1.0046654263395782,
+      "rms_tau_nm": 0.33296098824635456
+    }
+  },
+  "schedule": [
+    {
+      "index": 0,
+      "label": "home_hold",
+      "start_s": 0.0,
+      "end_s": 2.0,
+      "target_pos_base_m": [
+        [
+          0.0718675,
+          0.21536077599999995,
+          0.012730000000000186
+        ],
+        [
+          0.16313242390645374,
+          -0.21233780809970723,
+          0.022708943810492863
+        ]
+      ]
+    },
+    {
+      "index": 1,
+      "label": "step_1",
+      "start_s": 2.0,
+      "end_s": 4.0,
+      "target_pos_base_m": [
+        [
+          0.0918675,
+          0.21536077599999995,
+          0.027730000000000185
+        ],
+        [
+          0.18113242390645373,
+          -0.22433780809970724,
+          0.03470894381049286
+        ]
+      ]
+    },
+    {
+      "index": 2,
+      "label": "step_2",
+      "start_s": 4.0,
+      "end_s": 6.0,
+      "target_pos_base_m": [
+        [
+          0.0568675,
+          0.23336077599999994,
+          0.022730000000000188
+        ],
+        [
+          0.14813242390645376,
+          -0.23033780809970722,
+          0.032708943810492865
+        ]
+      ]
+    },
+    {
+      "index": 3,
+      "label": "step_3",
+      "start_s": 6.0,
+      "end_s": 8.0,
+      "target_pos_base_m": [
+        [
+          0.0718675,
+          0.19536077599999996,
+          0.030730000000000184
+        ],
+        [
+          0.16313242390645374,
+          -0.19233780809970724,
+          0.040708943810492865
+        ]
+      ]
+    },
+    {
+      "index": 4,
+      "label": "return_home",
+      "start_s": 8.0,
+      "end_s": 10.0,
+      "target_pos_base_m": [
+        [
+          0.0718675,
+          0.21536077599999995,
+          0.012730000000000186
+        ],
+        [
+          0.16313242390645374,
+          -0.21233780809970723,
+          0.022708943810492863
+        ]
+      ]
+    }
+  ],
+  "metadata": {
+    "label": "sim-only MuJoCo/C-controller data",
+    "urdf_path": "/home/luwen/桌面/真机启动 （double）/AM-DPBSURDF0422/urdf/AM-DPBSURDF0422.urdf",
+    "dt_s": 0.001,
+    "num_arms": 2,
+    "num_joints": 14,
+    "arm_names": [
+      "left",
+      "right"
+    ],
+    "joint_names": [
+      "ArmL02_Joint",
+      "AM-D02-J14_Joint",
+      "ArmL04_Joint",
+      "ArmL05_Joint",
+      "ArmL06_Joint",
+      "ArmL07_Joint",
+      "ArmL07Output_Joint",
+      "ArmR01_Joint_duplicate_2",
+      "AM-D02R-J03_Joint",
+      "ArmR04_Joint",
+      "ArmR05_Link",
+      "ArmR06_Link",
+      "ArmR07_Link",
+      "ArmR07Output_Link"
+    ],
+    "body_joint_names": [
+      "Waist01_Joint",
+      "Waist02_Joint",
+      "Body0422_Joint"
+    ],
+    "torque_limits_nm": [
+      40.0,
+      40.0,
+      27.0,
+      27.0,
+      7.0,
+      7.0,
+      9.0,
+      40.0,
+      40.0,
+      27.0,
+      27.0,
+      9.0,
+      9.0,
+      9.0
+    ],
+    "joint_velocity_limit_rad_s": 5.0,
+    "enable_follower_friction": true,
+    "end_effector_linear_speed_mps": 0.05,
+    "end_effector_real_speed_limit_mps": 0.05
+  },
+  "files": {
+    "workspace_points_csv": "results/sim_report_20260604_500k/workspace_points.csv",
+    "workspace_summary_json": "results/sim_report_20260604_500k/workspace_summary.json",
+    "mc_terminal_summary_txt": "results/sim_report_20260604_500k/mc_terminal_summary.txt",
+    "control_loop_csv": "results/sim_report_20260604_500k/control_loop.csv",
+    "control_summary_json": "results/sim_report_20260604_500k/control_summary.json",
+    "report_md": "results/sim_report_20260604_500k/report.md",
+    "workspace_xy_svg": "results/sim_report_20260604_500k/workspace_xy.svg",
+    "workspace_xz_svg": "results/sim_report_20260604_500k/workspace_xz.svg",
+    "workspace_yz_svg": "results/sim_report_20260604_500k/workspace_yz.svg",
+    "workspace_span_svg": "results/sim_report_20260604_500k/workspace_position_spans.svg",
+    "control_error_svg": "results/sim_report_20260604_500k/control_error.svg",
+    "control_torque_svg": "results/sim_report_20260604_500k/control_torque.svg"
+  }
+}

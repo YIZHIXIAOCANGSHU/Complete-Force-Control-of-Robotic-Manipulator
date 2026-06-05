@@ -52,6 +52,7 @@ show_main_menu() {
     echo "  1) sim  - 软硬件联合仿真"
     echo "  2) real - 真实硬件控制"
     echo "  3) mc   - 蒙特卡罗范围检查 + MuJoCo 窗口"
+    echo "  4) sim-report - 生成可复现实验报告数据包"
     echo "  q) 退出"
     echo "----------------------------------------------------------"
 }
@@ -64,6 +65,18 @@ show_real_menu() {
     echo "  1) left  - 左臂真机 can0"
     echo "  2) right - 右臂真机 can1"
     echo "  3) both  - 双臂真机 can0 + can1"
+    echo "  q) 退出"
+    echo "----------------------------------------------------------"
+}
+
+show_real_send_menu() {
+    echo "=========================================================="
+    echo "        AM-DPBSURDF0422 Real 控制量下发"
+    echo "=========================================================="
+    echo "请选择控制量下发方式："
+    echo "  1) send control     - 正常下发 C/STM32 计算力矩"
+    echo "  2) no-send/observe  - CAN 只下发 0，计算结果只显示到 Rerun"
+    echo "  3) gravity-only     - 只下发纯重力补偿 G(q)"
     echo "  q) 退出"
     echo "----------------------------------------------------------"
 }
@@ -97,6 +110,36 @@ select_real_arm_from_menu() {
     done
 }
 
+select_real_send_from_menu() {
+    local choice
+    REAL_SEND_ARG="--send"
+    while true; do
+        show_real_send_menu
+        read -r -p "输入数字选择 Real 控制量下发方式: " choice
+        case "$choice" in
+            1)
+                REAL_SEND_ARG="--send"
+                break
+                ;;
+            2)
+                REAL_SEND_ARG="--no-send"
+                break
+                ;;
+            3)
+                REAL_SEND_ARG="--gravity-only"
+                break
+                ;;
+            q|Q)
+                echo "已退出。"
+                exit 0
+                ;;
+            *)
+                PRINT_RED "无效选择: $choice"
+                ;;
+        esac
+    done
+}
+
 select_mode_from_menu() {
     local choice
     while true; do
@@ -110,10 +153,15 @@ select_mode_from_menu() {
             2)
                 MODE="real"
                 select_real_arm_from_menu
+                select_real_send_from_menu
                 break
                 ;;
             3)
                 MODE="mc"
+                break
+                ;;
+            4)
+                MODE="sim-report"
                 break
                 ;;
             q|Q)
@@ -138,6 +186,12 @@ resolve_numeric_mode() {
         3)
             MODE="mc"
             ;;
+        4)
+            MODE="sim-report"
+            ;;
+        report)
+            MODE="sim-report"
+            ;;
         real-left)
             MODE="real"
             REAL_ARM="left"
@@ -155,6 +209,7 @@ resolve_numeric_mode() {
 
 MODE=${1:-}
 REAL_ARM=${AM_D02_REAL_ARM:-}
+REAL_SEND_ARG=""
 if [ -z "$MODE" ] || [[ "$MODE" == -* ]]; then
     select_mode_from_menu
 else
@@ -169,10 +224,14 @@ else
         esac
         if [ -z "$REAL_ARM" ]; then
             select_real_arm_from_menu
+            select_real_send_from_menu
         fi
     fi
 fi
 APP_ARGS=("$@")
+if [ "$MODE" == "real" ] && [ -n "$REAL_SEND_ARG" ]; then
+    APP_ARGS=("$REAL_SEND_ARG" "${APP_ARGS[@]}")
+fi
 select_python
 
 if [ "$MODE" == "real" ]; then
@@ -189,8 +248,10 @@ elif [ "$MODE" == "real" ]; then
     echo "    AM-DPBSURDF0422 双臂真机 SocketCAN 控制系统 (Real) "
 elif [ "$MODE" == "mc" ] || [ "$MODE" == "monte-carlo" ]; then
     echo "    AM-DPBSURDF0422 双臂蒙特卡罗末端位姿范围检查      "
+elif [ "$MODE" == "sim-report" ]; then
+    echo "    AM-DPBSURDF0422 Sim 报告数据包生成系统            "
 else
-    PRINT_RED "错误: 未知模式 '$MODE'。请使用 'sim'、'real'、'mc' 或 'monte-carlo'。"
+    PRINT_RED "错误: 未知模式 '$MODE'。请使用 'sim'、'real'、'mc'、'monte-carlo' 或 'sim-report'。"
     exit 1
 fi
 echo "=========================================================="
@@ -291,6 +352,16 @@ fi
 : "${AM_D02_ENABLE_RERUN:=0}"
 export AM_D02_ENABLE_VIEWER
 export AM_D02_ENABLE_RERUN
+
+if [ "$MODE" == "sim-report" ]; then
+    PRINT_BLUE "[1/3] 正在编译可复用 C/STM32 控制桥..."
+    make -C c_interface real_controller
+    PRINT_BLUE "[2/3] 启动 MuJoCo + C 控制桥确定性实验..."
+    PRINT_GREEN "[3/3] 导出 Monte Carlo 与闭环控制报告数据包..."
+    echo "----------------------------------------------------------"
+    "$PYTHON_BIN" python/sim/main_server.py --report "${APP_ARGS[@]}"
+    exit $?
+fi
 
 PRINT_BLUE "[1/3] Monte Carlo 模式不需要编译 C 控制回路，跳过。"
 PRINT_BLUE "[2/3] 启动 MuJoCo 模型并随机采样关节空间..."

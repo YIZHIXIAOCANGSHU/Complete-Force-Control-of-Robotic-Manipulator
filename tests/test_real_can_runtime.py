@@ -126,6 +126,7 @@ class StopAfterOneBridge:
         return SimpleNamespace(
             status=0,
             tau=np.arange(1.0, Config.NUM_JOINTS + 1.0),
+            tau_gravity=np.arange(101.0, 101.0 + Config.NUM_JOINTS),
             ee_pos=np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float64),
             ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
             ee_twist=np.array([[0.01, 0.02, 0.03, 0.1, 0.2, 0.3], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=np.float64),
@@ -153,6 +154,7 @@ class StopAfterTwoBridge:
         return SimpleNamespace(
             status=0,
             tau=np.ones(Config.NUM_JOINTS, dtype=np.float64),
+            tau_gravity=np.full(Config.NUM_JOINTS, 0.5, dtype=np.float64),
             ee_pos=np.zeros((Config.NUM_ARMS, 3), dtype=np.float64),
             ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
             ee_twist=np.zeros((Config.NUM_ARMS, 6), dtype=np.float64),
@@ -180,11 +182,22 @@ class MovingTcpZeroTwistBridge:
         return SimpleNamespace(
             status=0,
             tau=np.ones(Config.NUM_JOINTS, dtype=np.float64),
+            tau_gravity=np.full(Config.NUM_JOINTS, 0.5, dtype=np.float64),
             ee_pos=ee_pos,
             ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
             ee_twist=np.zeros((Config.NUM_ARMS, 6), dtype=np.float64),
             traj_t=float(len(self.calls)),
         )
+
+
+class TimeoutBridge:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def compute(self, active_arm_mask, elapsed_s, q, qd, body_q, target_pos, target_quat):
+        _ = active_arm_mask, elapsed_s, q, qd, body_q, target_pos, target_quat
+        self.calls += 1
+        raise TimeoutError("real controller bridge timed out")
 
 
 class ShutdownAfterFirstControlThenPartialFeedbackTransport(ChunkedFeedbackTransport):
@@ -271,6 +284,7 @@ def test_real_tx_worker_coalesces_pending_torque_to_latest():
     assert [cmd[2] for cmd in nonzero[: Config.ARM_JOINTS]] == [1.0] * Config.ARM_JOINTS
     assert [cmd[2] for cmd in nonzero[-Config.ARM_JOINTS :]] == [3.0] * Config.ARM_JOINTS
     assert all(cmd[2] != 2.0 for cmd in nonzero)
+    assert worker.overwritten_pending_count == 1
 
 
 def test_real_feedback_worker_publishes_complete_arm_snapshot_across_reads():
@@ -293,6 +307,45 @@ def test_real_feedback_worker_publishes_complete_arm_snapshot_across_reads():
     assert snapshot.seq == 1
     np.testing.assert_allclose(snapshot.q[Config.ARM_JOINTS :], [0.1 * i for i in range(1, 8)])
     np.testing.assert_allclose(snapshot.qd[Config.ARM_JOINTS :], [0.01 * i for i in range(1, 8)])
+
+
+def test_real_feedback_worker_drains_available_frames_before_sleeping():
+    sleeps = []
+
+    class StopAfterSecondReadTransport(ChunkedFeedbackTransport):
+        def read_available(self, max_frames: int) -> bytes:
+            result = super().read_available(max_frames)
+            if len(self.read_available_calls) >= 2:
+                runtime.shutdown_event.set()
+            return result
+
+    transport = StopAfterSecondReadTransport(
+        [
+            [_feedback_frame(i) for i in range(1, 4)],
+            [_feedback_frame(i) for i in range(4, 8)],
+        ]
+    )
+    arm_runtime = runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", transport)
+    hub = runtime.RealFeedbackHub()
+    worker = runtime.RealFeedbackWorker(
+        arm_runtime,
+        hub,
+        poll_sleep_s=0.001,
+        join_timeout_s=0.5,
+        sleep_fn=lambda seconds: sleeps.append(float(seconds)),
+    )
+
+    runtime.shutdown_event.clear()
+    try:
+        worker.start()
+        snapshot = hub.wait_for_next(runtime.ACTIVE_ARM_MASK["left"], last_seq=0, timeout_s=1.0)
+    finally:
+        worker.stop()
+        runtime.shutdown_event.clear()
+
+    assert snapshot is not None
+    assert len(transport.read_available_calls) >= 2
+    assert sleeps == []
 
 
 class FakeEnv:
@@ -624,7 +677,10 @@ def test_real_control_does_not_zero_last_command_while_waiting_for_next_feedback
         runtime.shutdown_event.clear()
 
     assert len(bridge.calls) == 1
-    assert transport.command_count_when_partial_feedback_read == Config.ARM_JOINTS
+    nonzero_torques = [cmd for cmd in transport.commands if cmd[0] == "torque" and cmd[2] not in (0.0, None)]
+    assert len(nonzero_torques) == Config.ARM_JOINTS
+    assert transport.zero_before_shutdown == 0
+    assert transport.command_count_when_partial_feedback_read is not None
 
 
 def test_feedback_timeout_budget_starts_after_startup_enable(monkeypatch):
@@ -904,6 +960,11 @@ def test_real_control_step_logs_full_rerun_payload(monkeypatch):
             "quat_desired",
             "elapsed_s",
             "right_j7_diag",
+            "c_bridge_ms",
+            "feedback_wait_ms",
+            "tx_overwrite_count",
+            "can_backpressure_count",
+            "control_target_hz",
         ]
     ).issubset(payload)
     np.testing.assert_allclose(payload["tau_raw"], np.arange(1.0, Config.NUM_JOINTS + 1.0))
@@ -914,6 +975,111 @@ def test_real_control_step_logs_full_rerun_payload(monkeypatch):
     np.testing.assert_allclose(payload["tau_actual"][: Config.ARM_JOINTS], [0.001 * i for i in range(1, 8)])
     assert payload["elapsed_s"] == pytest.approx(0.1)
     assert payload["right_j7_diag"]["joint"] == "right/J7"
+    assert payload["control_target_hz"] == pytest.approx(1000.0)
+    assert payload["c_bridge_ms"] >= 0.0
+    assert payload["feedback_wait_ms"] >= 0.0
+
+
+def test_real_no_send_computes_and_logs_but_sends_zero_torque(monkeypatch):
+    times = iter([0.0, 0.1, 0.1, 0.1])
+    monkeypatch.setattr(runtime.time, "perf_counter", lambda: next(times, 0.1))
+
+    transport = FakeTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
+    runtimes = (runtime.ArmCanRuntime(Config.RIGHT_ARM, "can1", transport),)
+    bridge = StopAfterOneBridge()
+    logger = FakeRerunLogger()
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_can_control_loop(
+            mode="right",
+            bridge=bridge,
+            runtimes=runtimes,
+            shared_state=runtime.RealSharedState(),
+            rerun_logger=logger,
+            startup_enable=False,
+            send_control=False,
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    assert len(bridge.calls) == 1
+    torque_values = [cmd[2] for cmd in transport.commands if cmd[0] == "torque"]
+    assert torque_values
+    assert all(value == 0.0 for value in torque_values)
+    assert len(logger.payloads) == 1
+    payload = logger.payloads[0]
+    expected_raw = np.arange(1.0, Config.NUM_JOINTS + 1.0)
+    expected_display = expected_raw.copy()
+    expected_display[: Config.ARM_JOINTS] = 0.0
+    np.testing.assert_allclose(payload["tau_raw"], expected_raw)
+    np.testing.assert_allclose(payload["tau_total"], expected_display)
+    assert payload["tx_label"] == "Zero MIT torque (control no-send)"
+    assert payload["right_j7_diag"]["tau_cmd_raw"] == pytest.approx(14.0)
+    assert payload["right_j7_diag"]["tau_cmd_sent"] == pytest.approx(0.0)
+
+
+def test_real_gravity_only_sends_gravity_but_logs_full_control(monkeypatch):
+    times = iter([0.0, 0.1, 0.1, 0.1])
+    monkeypatch.setattr(runtime.time, "perf_counter", lambda: next(times, 0.1))
+
+    transport = FakeTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
+    runtimes = (runtime.ArmCanRuntime(Config.RIGHT_ARM, "can1", transport),)
+    bridge = StopAfterOneBridge()
+    logger = FakeRerunLogger()
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_can_control_loop(
+            mode="right",
+            bridge=bridge,
+            runtimes=runtimes,
+            shared_state=runtime.RealSharedState(),
+            rerun_logger=logger,
+            startup_enable=False,
+            send_mode="gravity",
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    sent = [cmd[2] for cmd in transport.commands if cmd[0] == "torque" and cmd[2] not in (0.0, None)]
+    assert sent == [float(value) for value in range(108, 115)]
+    assert len(logger.payloads) == 1
+    payload = logger.payloads[0]
+    expected_raw = np.arange(1.0, Config.NUM_JOINTS + 1.0)
+    expected_display = expected_raw.copy()
+    expected_display[: Config.ARM_JOINTS] = 0.0
+    np.testing.assert_allclose(payload["tau_raw"], expected_raw)
+    np.testing.assert_allclose(payload["tau_total"], expected_display)
+    assert payload["tx_label"] == "Gravity compensation MIT torque"
+    assert payload["right_j7_diag"]["tau_cmd_raw"] == pytest.approx(14.0)
+    assert payload["right_j7_diag"]["tau_cmd_sent"] == pytest.approx(114.0)
+
+
+def test_real_bridge_timeout_zeroes_and_disables_active_arm(capsys):
+    transport = FakeTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
+    runtimes = (runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", transport),)
+    bridge = TimeoutBridge()
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_can_control_loop(
+            mode="left",
+            bridge=bridge,
+            runtimes=runtimes,
+            shared_state=runtime.RealSharedState(),
+            startup_enable=False,
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    captured = capsys.readouterr().out
+    nonzero_torques = [cmd for cmd in transport.commands if cmd[0] == "torque" and cmd[2] not in (0.0, None)]
+    assert bridge.calls == 1
+    assert nonzero_torques == []
+    assert ("torque", 1, 0.0) in transport.commands
+    assert ("disable", 7, None) in transport.commands
+    assert "real controller bridge failed" in captured
 
 
 def test_real_feedback_only_mirrors_feedback_without_control_bridge(monkeypatch):

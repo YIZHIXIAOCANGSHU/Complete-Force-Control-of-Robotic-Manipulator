@@ -30,6 +30,7 @@ typedef struct {
 
 typedef struct {
   double tau[NUM_JOINTS];
+  double tau_gravity[NUM_JOINTS];
   int status;
   double ee_pos[NUM_ARMS][3];
   double ee_quat[NUM_ARMS][4];

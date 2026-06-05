@@ -90,6 +90,22 @@ def test_mc_routes_to_monte_carlo_entrypoint():
     ]
 
 
+def test_sim_report_routes_to_report_entrypoint_with_headless_defaults():
+    completed = _run_script("sim-report", "--output-dir", "results/custom", "-n", "12")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "AM_D02_ENABLE_VIEWER=0" in completed.stdout
+    assert "AM_D02_ENABLE_RERUN=0" in completed.stdout
+    assert _fake_python_args(completed) == [
+        "python/sim/main_server.py",
+        "--report",
+        "--output-dir",
+        "results/custom",
+        "-n",
+        "12",
+    ]
+
+
 def test_run_sh_requires_project_venv_when_no_python_override():
     completed = _run_script("mc", env_overrides={"AM_D02_VENV_DIR": "/tmp/am_d02_missing_venv_for_test"})
 
@@ -133,6 +149,27 @@ def test_real_right_routes_to_real_entrypoint():
     assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right"]
 
 
+def test_real_both_no_send_routes_to_real_entrypoint_with_no_send_flag():
+    completed = _run_script("real", "both", "--no-send")
+
+    assert completed.returncode == 0, completed.stderr
+    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "both", "--no-send"]
+
+
+def test_real_left_send_routes_to_real_entrypoint_with_send_flag():
+    completed = _run_script("real", "left", "--send")
+
+    assert completed.returncode == 0, completed.stderr
+    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "left", "--send"]
+
+
+def test_real_both_gravity_only_routes_to_real_entrypoint_with_gravity_flag():
+    completed = _run_script("real", "both", "--gravity-only")
+
+    assert completed.returncode == 0, completed.stderr
+    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "both", "--gravity-only"]
+
+
 def test_real_both_routes_to_real_entrypoint():
     completed = _run_script("real", "both")
 
@@ -148,11 +185,27 @@ def test_real_split_alias_routes_to_real_entrypoint():
 
 
 def test_interactive_menu_can_select_real_right():
-    completed = _run_script(input_text="2\n2\n")
+    completed = _run_script(input_text="2\n2\n1\n")
 
     assert completed.returncode == 0, completed.stderr
     assert "Real 真机模式" in completed.stdout
-    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right"]
+    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right", "--send"]
+
+
+def test_interactive_menu_can_select_real_right_no_send():
+    completed = _run_script(input_text="2\n2\n2\n")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Real 控制量下发" in completed.stdout
+    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right", "--no-send"]
+
+
+def test_interactive_menu_can_select_real_right_gravity_only():
+    completed = _run_script(input_text="2\n2\n3\n")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Real 控制量下发" in completed.stdout
+    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right", "--gravity-only"]
 
 
 def test_interactive_menu_can_select_mc():

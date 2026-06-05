@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import select
 import struct
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,10 +25,24 @@ NUM_JOINTS = 14
 NUM_BODY_JOINTS = 3
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+DEFAULT_EXCHANGE_TIMEOUT_S = max(0.0, _env_float("AM_D02_REAL_C_BRIDGE_TIMEOUT_S", 0.005))
+
+
 @dataclass(frozen=True)
 class RealControllerOutput:
     status: int
     tau: np.ndarray
+    tau_gravity: np.ndarray
     ee_pos: np.ndarray
     ee_quat: np.ndarray
     ee_twist: np.ndarray
@@ -38,12 +54,22 @@ class RealControllerBridge:
     """Low-overhead stdin/stdout bridge for the C real controller."""
 
     _input_struct = struct.Struct("<HBBd14d14d3d6d8d")
-    _output_struct = struct.Struct("<Hi14d6d8d12ddi")
+    _output_struct = struct.Struct("<Hi14d14d6d8d12ddi")
 
-    def __init__(self, executable: str | os.PathLike[str] = DEFAULT_CONTROLLER) -> None:
+    def __init__(
+        self,
+        executable: str | os.PathLike[str] = DEFAULT_CONTROLLER,
+        *,
+        exchange_timeout_s: float | None = None,
+    ) -> None:
         self.executable = Path(executable)
         if not self.executable.exists():
             raise FileNotFoundError(f"real controller not found: {self.executable}")
+        self.exchange_timeout_s = (
+            DEFAULT_EXCHANGE_TIMEOUT_S
+            if exchange_timeout_s is None
+            else max(0.0, float(exchange_timeout_s))
+        )
         self.process = subprocess.Popen(
             [str(self.executable)],
             stdin=subprocess.PIPE,
@@ -54,12 +80,21 @@ class RealControllerBridge:
         self._in_buffer = bytearray(self._input_struct.size)
         self._out_buffer = bytearray(self._output_struct.size)
 
-    def _read_exact(self) -> bool:
+    def _read_exact(self, timeout_s: float | None = None) -> bool:
         if self.process.stdout is None:
             return False
         view = memoryview(self._out_buffer)
         received = 0
+        timeout = self.exchange_timeout_s if timeout_s is None else max(0.0, float(timeout_s))
+        deadline = time.monotonic() + timeout if timeout > 0.0 else None
         while received < len(self._out_buffer):
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise TimeoutError(f"real controller output timeout after {timeout:.6f}s")
+                ready, _, _ = select.select([self.process.stdout], [], [], remaining)
+                if not ready:
+                    raise TimeoutError(f"real controller output timeout after {timeout:.6f}s")
             chunk = self.process.stdout.readinto(view[received:])
             if not chunk:
                 return False
@@ -110,11 +145,12 @@ class RealControllerBridge:
         return RealControllerOutput(
             status=int(parsed[1]),
             tau=np.asarray(parsed[2:16], dtype=np.float64),
-            ee_pos=np.asarray(parsed[16:22], dtype=np.float64).reshape(NUM_ARMS, 3),
-            ee_quat=np.asarray(parsed[22:30], dtype=np.float64).reshape(NUM_ARMS, 4),
-            ee_twist=np.asarray(parsed[30:42], dtype=np.float64).reshape(NUM_ARMS, 6),
-            traj_t=float(parsed[42]),
-            step_count=int(parsed[43]),
+            tau_gravity=np.asarray(parsed[16:30], dtype=np.float64),
+            ee_pos=np.asarray(parsed[30:36], dtype=np.float64).reshape(NUM_ARMS, 3),
+            ee_quat=np.asarray(parsed[36:44], dtype=np.float64).reshape(NUM_ARMS, 4),
+            ee_twist=np.asarray(parsed[44:56], dtype=np.float64).reshape(NUM_ARMS, 6),
+            traj_t=float(parsed[56]),
+            step_count=int(parsed[57]),
         )
 
     def compute(

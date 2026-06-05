@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 import numpy as np
@@ -14,12 +15,18 @@ from udp_server import (
     RangeAccumulator,
     RangeSnapshot,
     WorkspaceHull,
+    _build_control_target_schedule,
     _format_internal_workspace_box,
     _format_monte_carlo_report,
+    _summarize_control_loop_arrays,
+    _write_monte_carlo_report_assets,
+    _write_sim_report_assets,
     _workspace_box_edges,
     compute_largest_internal_workspace_box,
     compute_workspace_hull,
     compute_workspace_bounds,
+    ControlLoopResult,
+    MonteCarloWorkspaceResult,
     resolve_sampling_bounds,
     select_visualization_points,
 )
@@ -266,3 +273,224 @@ def test_workspace_box_edges_returns_twelve_edges():
     for start, end in edges:
         assert start.shape == (3,)
         assert end.shape == (3,)
+
+
+def test_write_monte_carlo_report_assets_exports_csv_json_and_terminal_text(tmp_path):
+    pos_stats = [
+        RangeSnapshot(
+            count=2,
+            minimum=np.array([0.0, 1.0, 2.0]),
+            maximum=np.array([1.0, 2.0, 3.0]),
+            mean=np.array([0.5, 1.5, 2.5]),
+            last=np.array([1.0, 2.0, 3.0]),
+        ),
+        RangeSnapshot(
+            count=2,
+            minimum=np.array([-1.0, -2.0, -3.0]),
+            maximum=np.array([0.0, -1.0, -2.0]),
+            mean=np.array([-0.5, -1.5, -2.5]),
+            last=np.array([0.0, -1.0, -2.0]),
+        ),
+    ]
+    quat_stats = [
+        RangeSnapshot(2, np.array([1.0, 0.0, 0.0, 0.0]), np.array([1.0, 0.1, 0.2, 0.3]), np.array([1.0, 0.05, 0.1, 0.15]), np.array([1.0, 0.1, 0.2, 0.3])),
+        RangeSnapshot(2, np.array([1.0, -0.3, -0.2, -0.1]), np.array([1.0, 0.0, 0.0, 0.0]), np.array([1.0, -0.15, -0.1, -0.05]), np.array([1.0, 0.0, 0.0, 0.0])),
+    ]
+    quat_norm_stats = [
+        RangeSnapshot(2, np.array([1.0]), np.array([1.1]), np.array([1.05]), np.array([1.1])),
+        RangeSnapshot(2, np.array([1.0]), np.array([1.2]), np.array([1.1]), np.array([1.2])),
+    ]
+    boxes = [
+        InternalWorkspaceBox(np.array([0.5, 1.5, 2.5]), np.array([0.5, 0.5, 0.5]), np.array([0.0, 1.0, 2.0]), np.array([1.0, 2.0, 3.0]), 1.0),
+        InternalWorkspaceBox(np.array([-0.5, -1.5, -2.5]), np.array([0.5, 0.5, 0.5]), np.array([-1.0, -2.0, -3.0]), np.array([0.0, -1.0, -2.0]), 1.0),
+    ]
+    points = [
+        np.array([[0.0, 1.0, 2.0], [1.0, 2.0, 3.0]], dtype=np.float64),
+        np.array([[-1.0, -2.0, -3.0], [0.0, -1.0, -2.0]], dtype=np.float64),
+    ]
+    quats = [
+        np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.1, 0.2, 0.3]], dtype=np.float64),
+        np.array([[1.0, -0.3, -0.2, -0.1], [1.0, 0.0, 0.0, 0.0]], dtype=np.float64),
+    ]
+
+    _write_monte_carlo_report_assets(
+        tmp_path,
+        samples=2,
+        seed=42,
+        joint_lower=np.array([-1.0, -2.0]),
+        joint_upper=np.array([1.0, 2.0]),
+        points=points,
+        quats=quats,
+        pos_stats=pos_stats,
+        quat_stats=quat_stats,
+        quat_norm_stats=quat_norm_stats,
+        internal_boxes=boxes,
+        hull_point_count=2,
+        report_text="terminal report",
+    )
+
+    csv_text = (tmp_path / "workspace_points.csv").read_text(encoding="utf-8")
+    summary = json.loads((tmp_path / "workspace_summary.json").read_text(encoding="utf-8"))
+    terminal = (tmp_path / "mc_terminal_summary.txt").read_text(encoding="utf-8")
+
+    assert "sample,arm,x,y,z,qx,qy,qz,qw" in csv_text
+    assert "left" in csv_text
+    assert summary["samples"] == 2
+    assert summary["seed"] == 42
+    assert summary["arms"]["left"]["position"]["span"] == [1.0, 1.0, 1.0]
+    assert "terminal report" in terminal
+
+
+def test_control_target_schedule_uses_five_small_step_segments():
+    home_pos = np.array([[0.4, 0.2, 0.3], [0.4, -0.2, 0.3]], dtype=np.float64)
+    home_quat = np.tile([1.0, 0.0, 0.0, 0.0], (2, 1))
+
+    schedule = _build_control_target_schedule(home_pos, home_quat, duration_s=10.0)
+
+    assert len(schedule) == 5
+    assert [segment.label for segment in schedule] == [
+        "home_hold",
+        "step_1",
+        "step_2",
+        "step_3",
+        "return_home",
+    ]
+    np.testing.assert_allclose(schedule[0].target_pos_base, home_pos)
+    np.testing.assert_allclose(schedule[-1].target_pos_base, home_pos)
+    for segment in schedule[1:4]:
+        assert np.max(np.abs(segment.target_pos_base - home_pos)) <= 0.03
+    assert schedule[0].start_s == pytest.approx(0.0)
+    assert schedule[-1].end_s == pytest.approx(10.0)
+
+
+def test_summarize_control_loop_arrays_reports_error_torque_and_status_counts():
+    error_history = np.array(
+        [
+            [0.03, 0.04],
+            [0.02, 0.03],
+            [0.01, 0.02],
+            [0.005, 0.010],
+        ],
+        dtype=np.float64,
+    )
+    tau_history = np.zeros((4, 14), dtype=np.float64)
+    tau_history[:, 0] = [1.0, -2.0, 3.0, -4.0]
+    tau_history[:, 7] = [0.5, -1.0, 1.5, -2.0]
+    status_history = np.array([0, 0, -1, 0], dtype=np.int32)
+
+    summary = _summarize_control_loop_arrays(
+        duration_s=0.004,
+        dt_s=0.001,
+        log_stride=2,
+        error_history=error_history,
+        tau_history=tau_history,
+        status_history=status_history,
+    )
+
+    assert summary["steps"] == 4
+    assert summary["status_counts"] == {"0": 3, "-1": 1}
+    assert summary["arms"]["left"]["max_error_m"] == pytest.approx(0.03)
+    assert summary["arms"]["left"]["final_error_m"] == pytest.approx(0.005)
+    assert summary["arms"]["left"]["peak_abs_tau_nm"] == pytest.approx(4.0)
+    assert summary["arms"]["right"]["peak_abs_tau_nm"] == pytest.approx(2.0)
+
+
+def test_write_sim_report_assets_exports_report_package(tmp_path):
+    pos_stats = [
+        RangeSnapshot(2, np.array([0.0, 1.0, 2.0]), np.array([1.0, 2.0, 3.0]), np.array([0.5, 1.5, 2.5]), np.array([1.0, 2.0, 3.0])),
+        RangeSnapshot(2, np.array([-1.0, -2.0, -3.0]), np.array([0.0, -1.0, -2.0]), np.array([-0.5, -1.5, -2.5]), np.array([0.0, -1.0, -2.0])),
+    ]
+    quat_stats = [
+        RangeSnapshot(2, np.array([1.0, 0.0, 0.0, 0.0]), np.array([1.0, 0.1, 0.2, 0.3]), np.array([1.0, 0.05, 0.1, 0.15]), np.array([1.0, 0.1, 0.2, 0.3])),
+        RangeSnapshot(2, np.array([1.0, -0.3, -0.2, -0.1]), np.array([1.0, 0.0, 0.0, 0.0]), np.array([1.0, -0.15, -0.1, -0.05]), np.array([1.0, 0.0, 0.0, 0.0])),
+    ]
+    quat_norm_stats = [
+        RangeSnapshot(2, np.array([1.0]), np.array([1.0]), np.array([1.0]), np.array([1.0])),
+        RangeSnapshot(2, np.array([1.0]), np.array([1.0]), np.array([1.0]), np.array([1.0])),
+    ]
+    boxes = [
+        InternalWorkspaceBox(np.array([0.5, 1.5, 2.5]), np.array([0.5, 0.5, 0.5]), np.array([0.0, 1.0, 2.0]), np.array([1.0, 2.0, 3.0]), 1.0),
+        InternalWorkspaceBox(np.array([-0.5, -1.5, -2.5]), np.array([0.5, 0.5, 0.5]), np.array([-1.0, -2.0, -3.0]), np.array([0.0, -1.0, -2.0]), 1.0),
+    ]
+    points = [
+        np.array([[0.0, 1.0, 2.0], [1.0, 2.0, 3.0]], dtype=np.float64),
+        np.array([[-1.0, -2.0, -3.0], [0.0, -1.0, -2.0]], dtype=np.float64),
+    ]
+    quats = [
+        np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.1, 0.2, 0.3]], dtype=np.float64),
+        np.array([[1.0, -0.3, -0.2, -0.1], [1.0, 0.0, 0.0, 0.0]], dtype=np.float64),
+    ]
+    mc = MonteCarloWorkspaceResult(
+        samples=2,
+        seed=42,
+        joint_lower=np.array([-1.0, -2.0]),
+        joint_upper=np.array([1.0, 2.0]),
+        points=points,
+        quats=quats,
+        pos_stats=pos_stats,
+        quat_stats=quat_stats,
+        quat_norm_stats=quat_norm_stats,
+        workspace_hulls=[
+            WorkspaceHull(np.empty((0, 3)), np.empty((0, 3), dtype=np.int32), [], np.zeros(3)),
+            WorkspaceHull(np.empty((0, 3)), np.empty((0, 3), dtype=np.int32), [], np.zeros(3)),
+        ],
+        internal_boxes=boxes,
+        hull_point_count=2,
+        last_qpos=np.zeros(14),
+        report_text="terminal report",
+    )
+    home_pos = np.array([[0.4, 0.2, 0.3], [0.4, -0.2, 0.3]], dtype=np.float64)
+    schedule = _build_control_target_schedule(
+        home_pos,
+        np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)),
+        duration_s=0.004,
+    )
+    control_summary = _summarize_control_loop_arrays(
+        duration_s=0.004,
+        dt_s=0.001,
+        log_stride=1,
+        error_history=np.array([[0.02, 0.03], [0.01, 0.02]], dtype=np.float64),
+        tau_history=np.zeros((2, 14), dtype=np.float64),
+        status_history=np.array([0, 0], dtype=np.int32),
+    )
+    control = ControlLoopResult(
+        duration_s=0.004,
+        dt_s=0.001,
+        steps=2,
+        log_stride=1,
+        schedule=schedule,
+        telemetry_rows=[
+            {
+                field: 0
+                for field in [
+                    "step",
+                    "t_s",
+                    "segment",
+                    "status",
+                    "traj_t",
+                    "left_error_m",
+                    "right_error_m",
+                    "left_speed_mps",
+                    "right_speed_mps",
+                ]
+            }
+        ],
+        summary=control_summary,
+        error_history=np.array([[0.02, 0.03], [0.01, 0.02]], dtype=np.float64),
+        tau_history=np.zeros((2, 14), dtype=np.float64),
+        time_history=np.array([0.0, 0.001], dtype=np.float64),
+    )
+
+    _write_sim_report_assets(tmp_path, mc=mc, control=control)
+
+    assert (tmp_path / "workspace_points.csv").is_file()
+    assert (tmp_path / "control_loop.csv").is_file()
+    assert (tmp_path / "control_summary.json").is_file()
+    assert (tmp_path / "report.md").is_file()
+    assert (tmp_path / "workspace_xy.svg").read_text(encoding="utf-8").startswith("<svg")
+    workspace_csv = (tmp_path / "workspace_points.csv").read_text(encoding="utf-8")
+    assert "sample,arm,x,y,z,qx,qy,qz,qw" in workspace_csv
+    assert "q_00_rad" not in workspace_csv
+    control_summary_json = json.loads((tmp_path / "control_summary.json").read_text(encoding="utf-8"))
+    assert control_summary_json["sim_only"] is True
+    assert "Sim-only" in (tmp_path / "report.md").read_text(encoding="utf-8")

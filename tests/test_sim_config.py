@@ -234,18 +234,36 @@ def test_sim_threading_config_defaults_are_exposed():
         import sys
         sys.path.insert(0, "python")
         from config import Config
+        print(Config.VISUAL_PROFILE)
         print(Config.SIM_VIEWER_FPS)
         print(Config.SIM_RERUN_QUEUE_SIZE)
         print(Config.SIM_UDP_TIMEOUT_S)
+        print(Config.SIM_TARGET_HZ)
+        print(Config.SIM_STATS_INTERVAL_S)
+        print(Config.SIM_VIEWER_LOCK_TIMEOUT_S)
         print(Config.RERUN_MAX_HZ)
+        print(Config.RERUN_LOG_STRIDE)
+        print(Config.RERUN_DETAILED_PERF)
+        print(Config.SIM_RERUN_INCLUDE_TWIST)
+        print(Config.SIM_VIEWER_SYNC_BUDGET_MS)
+        print(Config.SIM_VIEWER_BACKOFF_FRAMES)
         """
     )
     env = os.environ.copy()
     for name in (
+        "AM_D02_VISUAL_PROFILE",
         "AM_D02_SIM_VIEWER_FPS",
         "AM_D02_SIM_RERUN_QUEUE_SIZE",
         "AM_D02_SIM_UDP_TIMEOUT_S",
+        "AM_D02_SIM_TARGET_HZ",
+        "AM_D02_SIM_STATS_INTERVAL_S",
+        "AM_D02_SIM_VIEWER_LOCK_TIMEOUT_S",
         "AM_D02_RERUN_MAX_HZ",
+        "AM_D02_RERUN_LOG_STRIDE",
+        "AM_D02_RERUN_DETAILED_PERF",
+        "AM_D02_SIM_RERUN_INCLUDE_TWIST",
+        "AM_D02_SIM_VIEWER_SYNC_BUDGET_MS",
+        "AM_D02_SIM_VIEWER_BACKOFF_FRAMES",
     ):
         env.pop(name, None)
 
@@ -258,7 +276,21 @@ def test_sim_threading_config_defaults_are_exposed():
         capture_output=True,
     )
 
-    assert result.stdout.strip().splitlines() == ["60.0", "512", "0.002", "30.0"]
+    assert result.stdout.strip().splitlines() == [
+        "balanced",
+        "30.0",
+        "512",
+        "0.002",
+        "1000.0",
+        "1.0",
+        "0.0002",
+        "15.0",
+        "20",
+        "False",
+        "False",
+        "1.0",
+        "2",
+    ]
 
 
 def test_sim_threading_config_can_be_overridden_by_env():
@@ -267,17 +299,35 @@ def test_sim_threading_config_can_be_overridden_by_env():
         import sys
         sys.path.insert(0, "python")
         from config import Config
+        print(Config.VISUAL_PROFILE)
         print(Config.SIM_VIEWER_FPS)
         print(Config.SIM_RERUN_QUEUE_SIZE)
         print(Config.SIM_UDP_TIMEOUT_S)
+        print(Config.SIM_TARGET_HZ)
+        print(Config.SIM_STATS_INTERVAL_S)
+        print(Config.SIM_VIEWER_LOCK_TIMEOUT_S)
         print(Config.RERUN_MAX_HZ)
+        print(Config.RERUN_LOG_STRIDE)
+        print(Config.RERUN_DETAILED_PERF)
+        print(Config.SIM_RERUN_INCLUDE_TWIST)
+        print(Config.SIM_VIEWER_SYNC_BUDGET_MS)
+        print(Config.SIM_VIEWER_BACKOFF_FRAMES)
         """
     )
     env = os.environ.copy()
+    env["AM_D02_VISUAL_PROFILE"] = "fast"
     env["AM_D02_SIM_VIEWER_FPS"] = "24"
     env["AM_D02_SIM_RERUN_QUEUE_SIZE"] = "3"
     env["AM_D02_SIM_UDP_TIMEOUT_S"] = "0.01"
+    env["AM_D02_SIM_TARGET_HZ"] = "750"
+    env["AM_D02_SIM_STATS_INTERVAL_S"] = "0.25"
+    env["AM_D02_SIM_VIEWER_LOCK_TIMEOUT_S"] = "0.0007"
     env["AM_D02_RERUN_MAX_HZ"] = "45"
+    env["AM_D02_RERUN_LOG_STRIDE"] = "4"
+    env["AM_D02_RERUN_DETAILED_PERF"] = "1"
+    env["AM_D02_SIM_RERUN_INCLUDE_TWIST"] = "1"
+    env["AM_D02_SIM_VIEWER_SYNC_BUDGET_MS"] = "2.5"
+    env["AM_D02_SIM_VIEWER_BACKOFF_FRAMES"] = "5"
 
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -288,7 +338,58 @@ def test_sim_threading_config_can_be_overridden_by_env():
         capture_output=True,
     )
 
-    assert result.stdout.strip().splitlines() == ["24.0", "3", "0.01", "45.0"]
+    assert result.stdout.strip().splitlines() == [
+        "fast",
+        "24.0",
+        "3",
+        "0.01",
+        "750.0",
+        "0.25",
+        "0.0007",
+        "45.0",
+        "4",
+        "True",
+        "True",
+        "2.5",
+        "5",
+    ]
+
+
+def test_visual_profile_full_restores_old_visual_defaults():
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.path.insert(0, "python")
+        from config import Config
+        print(Config.VISUAL_PROFILE)
+        print(Config.SIM_VIEWER_FPS)
+        print(Config.RERUN_MAX_HZ)
+        print(Config.RERUN_LOG_STRIDE)
+        print(Config.RERUN_DETAILED_PERF)
+        print(Config.SIM_RERUN_INCLUDE_TWIST)
+        """
+    )
+    env = os.environ.copy()
+    env["AM_D02_VISUAL_PROFILE"] = "full"
+    for name in (
+        "AM_D02_SIM_VIEWER_FPS",
+        "AM_D02_RERUN_MAX_HZ",
+        "AM_D02_RERUN_LOG_STRIDE",
+        "AM_D02_RERUN_DETAILED_PERF",
+        "AM_D02_SIM_RERUN_INCLUDE_TWIST",
+    ):
+        env.pop(name, None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_repo_root(),
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.stdout.strip().splitlines() == ["full", "60.0", "30.0", "10", "True", "True"]
 
 
 def test_fix_uncontrolled_joints_marks_only_non_controlled_joints_fixed():

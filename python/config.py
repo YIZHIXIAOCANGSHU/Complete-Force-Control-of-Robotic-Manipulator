@@ -29,6 +29,34 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_choice(name: str, default: str, choices: tuple[str, ...]) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in choices:
+        return normalized
+    return default
+
+
+_VISUAL_PROFILE_CHOICES = ("balanced", "full", "fast")
+_RERUN_LOG_STRIDE_BY_PROFILE = {
+    "balanced": 20,
+    "full": 10,
+    "fast": 50,
+}
+_RERUN_MAX_HZ_BY_PROFILE = {
+    "balanced": 15.0,
+    "full": 30.0,
+    "fast": 5.0,
+}
+_SIM_VIEWER_FPS_BY_PROFILE = {
+    "balanced": 30.0,
+    "full": 60.0,
+    "fast": 15.0,
+}
+
+
 class Config:
     # === 路径配置 (Paths) ===
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,13 +69,30 @@ class Config:
     RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
     
     # === 可视化配置 (Visualization) ===
+    VISUAL_PROFILE = _env_choice("AM_D02_VISUAL_PROFILE", "balanced", _VISUAL_PROFILE_CHOICES)
     ENABLE_VIEWER = _env_bool("AM_D02_ENABLE_VIEWER", True)
     ENABLE_RERUN = _env_bool("AM_D02_ENABLE_RERUN", True)
-    RERUN_LOG_STRIDE = max(1, _env_int("AM_D02_RERUN_LOG_STRIDE", 10))
-    RERUN_MAX_HZ = max(0.0, _env_float("AM_D02_RERUN_MAX_HZ", 30.0))
-    SIM_VIEWER_FPS = max(1.0, _env_float("AM_D02_SIM_VIEWER_FPS", 60.0))
+    RERUN_LOG_STRIDE = max(
+        1,
+        _env_int("AM_D02_RERUN_LOG_STRIDE", _RERUN_LOG_STRIDE_BY_PROFILE[VISUAL_PROFILE]),
+    )
+    RERUN_MAX_HZ = max(
+        0.0,
+        _env_float("AM_D02_RERUN_MAX_HZ", _RERUN_MAX_HZ_BY_PROFILE[VISUAL_PROFILE]),
+    )
+    SIM_VIEWER_FPS = max(
+        1.0,
+        _env_float("AM_D02_SIM_VIEWER_FPS", _SIM_VIEWER_FPS_BY_PROFILE[VISUAL_PROFILE]),
+    )
     SIM_RERUN_QUEUE_SIZE = max(1, _env_int("AM_D02_SIM_RERUN_QUEUE_SIZE", 512))
     SIM_UDP_TIMEOUT_S = max(0.0005, _env_float("AM_D02_SIM_UDP_TIMEOUT_S", 0.002))
+    SIM_TARGET_HZ = max(1.0, _env_float("AM_D02_SIM_TARGET_HZ", 1000.0))
+    SIM_STATS_INTERVAL_S = max(0.0, _env_float("AM_D02_SIM_STATS_INTERVAL_S", 1.0))
+    SIM_VIEWER_LOCK_TIMEOUT_S = max(0.0, _env_float("AM_D02_SIM_VIEWER_LOCK_TIMEOUT_S", 0.0002))
+    SIM_VIEWER_SYNC_BUDGET_MS = max(0.0, _env_float("AM_D02_SIM_VIEWER_SYNC_BUDGET_MS", 1.0))
+    SIM_VIEWER_BACKOFF_FRAMES = max(0, _env_int("AM_D02_SIM_VIEWER_BACKOFF_FRAMES", 2))
+    RERUN_DETAILED_PERF = _env_bool("AM_D02_RERUN_DETAILED_PERF", VISUAL_PROFILE == "full")
+    SIM_RERUN_INCLUDE_TWIST = _env_bool("AM_D02_SIM_RERUN_INCLUDE_TWIST", VISUAL_PROFILE == "full")
     FIX_UNCONTROLLED_JOINTS = _env_bool("AM_D02_FIX_UNCONTROLLED_JOINTS", True)
     ENABLE_BODY_GUI = _env_bool("AM_D02_ENABLE_BODY_GUI", True)
     
@@ -171,12 +216,12 @@ class Config:
     # === 控制器参数 ===
     # 笛卡尔 PD 与 stm32_code/config.h 保持一致；末端参考由五次 S 曲线生成，
     # END_EFFECTOR_LINEAR_SPEED_MPS 表示峰值线速度。
-    KP_CART_X = 170.0
-    KP_CART_Y = 170.0
-    KP_CART_Z = 170.0
-    KD_CART_X = 65.0
-    KD_CART_Y = 65.0
-    KD_CART_Z = 65.0
+    KP_CART_X = 300.0
+    KP_CART_Y = 300.0
+    KP_CART_Z = 300.0
+    KD_CART_X = 90.0
+    KD_CART_Y = 90.0
+    KD_CART_Z = 90.0
     KP_CART_ROLL = 8.0
     KP_CART_PITCH = 8.0
     KP_CART_YAW = 8.0

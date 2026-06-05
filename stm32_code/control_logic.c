@@ -500,3 +500,11 @@ void control_filter_velocities_arm(int side, const double qd_raw[ARM_JOINTS],
     qd_filtered[i] = kalman_filter1d_update(&ctx->vel_filters[i], qd_raw[i]);
   }
 }
+
+void control_compute_gravity_torque_arm(int side, const double q[ARM_JOINTS],
+                                        double tau_g[ARM_JOINTS]) {
+  int arm_side = normalize_side(side);
+  ControlArmContext *ctx = control_get_context(arm_side);
+  control_init_context(arm_side);
+  rbdl_calc_gravity(&ctx->rbdl_model, q, tau_g);
+}

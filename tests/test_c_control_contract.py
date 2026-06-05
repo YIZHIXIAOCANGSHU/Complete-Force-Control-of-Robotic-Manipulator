@@ -281,6 +281,42 @@ def test_dual_control_zero_pose_error_outputs_bias_compensation_only(tmp_path: P
     assert max_extra < 1e-7
 
 
+def test_control_compute_gravity_torque_arm_matches_rbdl_gravity(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "control_logic.h"
+        #include <math.h>
+        #include <stdio.h>
+
+        int main(void) {
+          double q[7] = {0.2, -0.1, 0.3, 1.1, -0.2, 0.4, -0.15};
+          double tau_helper[7];
+          double tau_expected[7];
+          double max_diff = 0.0;
+          RBDLModel model;
+
+          control_init();
+          control_compute_gravity_torque_arm(ARM_RIGHT, q, tau_helper);
+          build_am_d02_arm_model(ARM_RIGHT, &model);
+          rbdl_calc_gravity(&model, q, tau_expected);
+
+          for (int i = 0; i < 7; ++i) {
+            double diff = fabs(tau_helper[i] - tau_expected[i]);
+            if (diff > max_diff) {
+              max_diff = diff;
+            }
+          }
+          printf("%.12f\\n", max_diff);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source)
+    max_diff = float(subprocess.check_output([str(probe)], text=True).strip())
+
+    assert max_diff < 1e-9
+
+
 def test_dual_control_nonzero_pose_error_adds_cartesian_correction(tmp_path: Path):
     source = textwrap.dedent(
         """
@@ -1512,6 +1548,8 @@ def test_stm32_config_has_no_fixed_control_period_or_elapsed_clamp():
 
 
 def test_cartesian_pd_gains_are_endpoint_tracking_tuned(tmp_path: Path):
+    from config import Config
+
     source = textwrap.dedent(
         """
         #include "config.h"
@@ -1531,7 +1569,20 @@ def test_cartesian_pd_gains_are_endpoint_tracking_tuned(tmp_path: Path):
     values = [float(value) for value in subprocess.check_output([str(probe)], text=True).split()]
 
     assert values == pytest.approx(
-        [170.0, 170.0, 170.0, 8.0, 8.0, 8.0, 65.0, 65.0, 65.0, 4.0, 4.0, 4.0]
+        [
+            Config.KP_CART_X,
+            Config.KP_CART_Y,
+            Config.KP_CART_Z,
+            Config.KP_CART_ROLL,
+            Config.KP_CART_PITCH,
+            Config.KP_CART_YAW,
+            Config.KD_CART_X,
+            Config.KD_CART_Y,
+            Config.KD_CART_Z,
+            Config.KD_CART_ROLL,
+            Config.KD_CART_PITCH,
+            Config.KD_CART_YAW,
+        ]
     )
 
 
@@ -1649,6 +1700,8 @@ def test_quintic_path_reference_velocity_starts_zero_peaks_and_stops(tmp_path: P
 
 
 def test_cartesian_reference_velocity_feedback_tracks_tcp_speed_from_qd(tmp_path: Path):
+    from config import Config
+
     source = textwrap.dedent(
         """
         #include "control_logic.h"
@@ -1700,7 +1753,7 @@ def test_cartesian_reference_velocity_feedback_tracks_tcp_speed_from_qd(tmp_path
 
     assert speed == pytest.approx(0.05)
     assert tau_slow > 0.0
-    assert tau_slow - tau_fast == pytest.approx(0.5 * 65.0 * speed)
+    assert tau_slow - tau_fast == pytest.approx(0.5 * Config.KD_CART_X * speed)
     assert tau_fast < tau_slow
 
 
@@ -1928,7 +1981,7 @@ def test_python_config_mirrors_c_endpoint_control_defaults():
     assert Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS == pytest.approx(0.05)
     assert Config.JOINT_VEL_LIMIT == pytest.approx(5.0)
     assert [Config.KP_CART_X, Config.KP_CART_Y, Config.KP_CART_Z] == pytest.approx(
-        [170.0, 170.0, 170.0]
+        [300.0, 300.0, 300.0]
     )
     assert [
         Config.KP_CART_ROLL,
@@ -1936,7 +1989,7 @@ def test_python_config_mirrors_c_endpoint_control_defaults():
         Config.KP_CART_YAW,
     ] == pytest.approx([8.0, 8.0, 8.0])
     assert [Config.KD_CART_X, Config.KD_CART_Y, Config.KD_CART_Z] == pytest.approx(
-        [65.0, 65.0, 65.0]
+        [90.0, 90.0, 90.0]
     )
     assert [
         Config.KD_CART_ROLL,

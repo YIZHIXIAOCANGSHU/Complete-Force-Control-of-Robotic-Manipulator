@@ -26,6 +26,7 @@ typedef struct {
   uint16_t magic;
   int32_t status;
   double tau[NUM_JOINTS];
+  double tau_gravity[NUM_JOINTS];
   double ee_pos[NUM_ARMS][3];
   double ee_quat[NUM_ARMS][4];
   double ee_twist[NUM_ARMS][6];
@@ -44,6 +45,7 @@ static void run_fk_only(const real_input_t *in, real_output_t *out) {
   control_arm_kinematics_t kin;
 
   memset(out->tau, 0, sizeof(out->tau));
+  memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
   out->status = STM_STATUS_OK;
 
   if (in->body_q[0] == in->body_q[0] && in->body_q[1] == in->body_q[1] &&
@@ -102,6 +104,7 @@ int main(void) {
       stm_controller_step_elapsed(&stm_in, &stm_out, in.elapsed_s);
       out.status = (int32_t)stm_out.status;
       memcpy(out.tau, stm_out.tau, sizeof(out.tau));
+      memcpy(out.tau_gravity, stm_out.tau_gravity, sizeof(out.tau_gravity));
       memcpy(out.ee_pos, stm_out.ee_pos, sizeof(out.ee_pos));
       memcpy(out.ee_quat, stm_out.ee_quat, sizeof(out.ee_quat));
       memcpy(out.ee_twist, stm_out.ee_twist, sizeof(out.ee_twist));

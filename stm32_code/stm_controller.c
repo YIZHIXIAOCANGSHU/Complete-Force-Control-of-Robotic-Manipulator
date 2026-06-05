@@ -483,6 +483,7 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
   if (stm_controller_update_safety_recovery(in->qd, elapsed_s)) {
     out->status = STM_STATUS_WAITING_ZERO;
     memset(out->tau, 0, sizeof(out->tau));
+    memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
     goto finalize_step;
   }
 
@@ -507,11 +508,14 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
                                         active_arm_mask);
       out->status = STM_STATUS_SAFETY_LATCHED;
       memset(out->tau, 0, sizeof(out->tau));
+      memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
       goto finalize_step;
     }
     control_filter_velocities_arm(arm, in->qd + offset, filtered_qd + offset);
     control_get_arm_kinematics_with_offset(arm, in->q + offset,
                                            &arm_kinematics[arm]);
+    control_compute_gravity_torque_arm(arm, in->q + offset,
+                                       out->tau_gravity + offset);
     memcpy(out->ee_pos[arm], arm_kinematics[arm].pos, sizeof(double) * 3);
     memcpy(out->ee_quat[arm], arm_kinematics[arm].quat_wxyz,
            sizeof(double) * 4);
@@ -526,6 +530,7 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
                                         active_arm_mask);
       out->status = STM_STATUS_SAFETY_LATCHED;
       memset(out->tau, 0, sizeof(out->tau));
+      memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
       goto finalize_step;
     }
   }
@@ -561,6 +566,7 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
                                       active_arm_mask);
     out->status = STM_STATUS_SAFETY_LATCHED;
     memset(out->tau, 0, sizeof(out->tau));
+    memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
   }
 
 finalize_step:

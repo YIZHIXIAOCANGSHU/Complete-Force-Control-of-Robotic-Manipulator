@@ -13,7 +13,7 @@ MAGIC = 0xAA55
 MODE_CONTROL = 1
 MODE_FK_ONLY = 2
 INPUT_STRUCT = struct.Struct("<HBBd14d14d3d6d8d")
-OUTPUT_STRUCT = struct.Struct("<Hi14d6d8d12ddi")
+OUTPUT_STRUCT = struct.Struct("<Hi14d14d6d8d12ddi")
 
 
 def _build_packet(mode: int, active_arm_mask: int, *, qd_value: float = 0.0) -> bytes:
@@ -53,32 +53,38 @@ def _exchange(mode: int, active_arm_mask: int, *, qd_value: float = 0.0):
     parsed = OUTPUT_STRUCT.unpack(completed.stdout)
     assert parsed[0] == MAGIC
     tau = np.asarray(parsed[2:16], dtype=np.float64)
-    ee_pos = np.asarray(parsed[16:22], dtype=np.float64).reshape(2, 3)
-    ee_twist = np.asarray(parsed[30:42], dtype=np.float64).reshape(2, 6)
-    return parsed[1], tau, ee_pos, ee_twist
+    tau_gravity = np.asarray(parsed[16:30], dtype=np.float64)
+    ee_pos = np.asarray(parsed[30:36], dtype=np.float64).reshape(2, 3)
+    ee_twist = np.asarray(parsed[44:56], dtype=np.float64).reshape(2, 6)
+    return parsed[1], tau, tau_gravity, ee_pos, ee_twist
 
 
 def test_real_controller_left_mask_zeroes_right_arm_output():
-    status, tau, _, _ = _exchange(MODE_CONTROL, 1 << 0)
+    status, tau, tau_gravity, _, _ = _exchange(MODE_CONTROL, 1 << 0)
 
     assert status == 0
     assert np.any(np.abs(tau[:7]) > 1e-9)
+    assert np.any(np.abs(tau_gravity[:7]) > 1e-9)
     np.testing.assert_allclose(tau[7:], 0.0)
+    np.testing.assert_allclose(tau_gravity[7:], 0.0)
 
 
 def test_real_controller_right_mask_zeroes_left_arm_output():
-    status, tau, _, _ = _exchange(MODE_CONTROL, 1 << 1)
+    status, tau, tau_gravity, _, _ = _exchange(MODE_CONTROL, 1 << 1)
 
     assert status == 0
     np.testing.assert_allclose(tau[:7], 0.0)
+    np.testing.assert_allclose(tau_gravity[:7], 0.0)
     assert np.any(np.abs(tau[7:]) > 1e-9)
+    assert np.any(np.abs(tau_gravity[7:]) > 1e-9)
 
 
 def test_real_controller_fk_only_returns_pose_and_zero_torque():
-    status, tau, ee_pos, ee_twist = _exchange(MODE_FK_ONLY, (1 << 0) | (1 << 1))
+    status, tau, tau_gravity, ee_pos, ee_twist = _exchange(MODE_FK_ONLY, (1 << 0) | (1 << 1))
 
     assert status == 0
     np.testing.assert_allclose(tau, 0.0)
+    np.testing.assert_allclose(tau_gravity, 0.0)
     assert np.all(np.isfinite(ee_pos))
     assert ee_twist.shape == (2, 6)
     assert np.all(np.isfinite(ee_twist))
@@ -88,10 +94,11 @@ def test_real_controller_fk_only_returns_pose_and_zero_torque():
 
 
 def test_real_controller_fk_only_returns_active_arm_twist_and_zeroes_inactive_arm():
-    status, tau, _ee_pos, ee_twist = _exchange(MODE_FK_ONLY, 1 << 0, qd_value=0.25)
+    status, tau, tau_gravity, _ee_pos, ee_twist = _exchange(MODE_FK_ONLY, 1 << 0, qd_value=0.25)
 
     assert status == 0
     np.testing.assert_allclose(tau, 0.0)
+    np.testing.assert_allclose(tau_gravity, 0.0)
     assert np.all(np.isfinite(ee_twist))
     assert np.linalg.norm(ee_twist[0]) > 1e-9
     np.testing.assert_allclose(ee_twist[1], 0.0)

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="420" viewBox="0 0 760 420">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="380.0" y="30" text-anchor="middle" font-size="20" font-family="Arial">Closed-loop torque summary</text>
+<line x1="58" y1="362" x2="702" y2="362" stroke="#334155"/>
+<rect x="110.0" y="165.1" width="78" height="196.9" fill="#1f77b4"/>
+<text x="149.0" y="159.1" text-anchor="middle" font-size="12" font-family="Arial">0.72</text>
+<text x="149.0" y="380" text-anchor="middle" font-size="12" font-family="Arial">left peak</text>
+<rect x="255.0" y="307.9" width="78" height="54.1" fill="#60a5fa"/>
+<text x="294.0" y="301.9" text-anchor="middle" font-size="12" font-family="Arial">0.20</text>
+<text x="294.0" y="380" text-anchor="middle" font-size="12" font-family="Arial">left rms</text>
+<rect x="400.0" y="88.0" width="78" height="274.0" fill="#d9480f"/>
+<text x="439.0" y="82.0" text-anchor="middle" font-size="12" font-family="Arial">1.00</text>
+<text x="439.0" y="380" text-anchor="middle" font-size="12" font-family="Arial">right peak</text>
+<rect x="545.0" y="271.2" width="78" height="90.8" fill="#fb923c"/>
+<text x="584.0" y="265.2" text-anchor="middle" font-size="12" font-family="Arial">0.33</text>
+<text x="584.0" y="380" text-anchor="middle" font-size="12" font-family="Arial">right rms</text>
+<text x="18" y="210.0" transform="rotate(-90 18 210.0)" text-anchor="middle" font-size="14" font-family="Arial">N m</text>
+</svg>

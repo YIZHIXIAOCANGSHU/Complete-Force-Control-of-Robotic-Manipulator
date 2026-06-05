@@ -100,6 +100,10 @@ def _logged_scalar(dummy_rr: DummyRR, path: str) -> float:
     raise AssertionError(f"Missing log for {path}")
 
 
+def _has_log(dummy_rr: DummyRR, path: str) -> bool:
+    return any(logged_path == path for logged_path, _payload, _static in dummy_rr.logs)
+
+
 def _text_logs(dummy_rr: DummyRR) -> list[str]:
     return [
         payload["text"]
@@ -117,9 +121,13 @@ def test_sim_udp_server_passes_step_count_to_rerun_logger():
     payload_block = source[payload_start:payload_end]
 
     assert "SimRerunLogger()" in source
-    assert "rerun_logger.log_step(**rerun_payload)" in source
+    assert "rerun_logger.log_step(" in source
+    assert "**rerun_payload" in source
     assert '"step_count": step_count' in payload_block
-    assert '"ee_twist": env.get_all_ee_twist()' in payload_block
+    assert "include_twist = bool(Config.SIM_RERUN_INCLUDE_TWIST)" in source
+    assert "env.get_state_snapshot(include_twist=include_twist)" in source
+    assert 'rerun_payload["ee_twist"] = twist_values[0]' in source
+    assert '"ee_twist":' not in payload_block
 
 
 def test_setup_realtime_styles_blueprint_does_not_reuse_tile_objects(monkeypatch):
@@ -222,6 +230,48 @@ def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
     assert "Right Arm" not in tab_names
 
 
+def test_setup_realtime_styles_uses_balanced_performance_views_by_default(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+    monkeypatch.setattr(rerun_viz, "rrb", DummyRRB)
+    monkeypatch.setattr(rerun_viz.Config, "RERUN_DETAILED_PERF", False)
+
+    rerun_viz.setup_realtime_styles()
+
+    origins = {
+        node["origin"]
+        for node in _iter_nodes(dummy_rr.blueprint)
+        if node.get("kind") == "TimeSeriesView"
+    }
+    assert "/performance/sim_service_ms" in origins
+    assert "/performance/viewer_sync_ms" in origins
+    assert "/performance/sim_socket_timeout_count" not in origins
+    assert "/performance/viewer_skip_count" not in origins
+    assert not _has_log(dummy_rr, "performance/sim_socket_timeout_count")
+    assert not _has_log(dummy_rr, "performance/viewer_skip_count")
+
+
+def test_setup_realtime_styles_full_profile_includes_detailed_performance_views(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+    monkeypatch.setattr(rerun_viz, "rrb", DummyRRB)
+    monkeypatch.setattr(rerun_viz.Config, "RERUN_DETAILED_PERF", True)
+
+    rerun_viz.setup_realtime_styles()
+
+    origins = {
+        node["origin"]
+        for node in _iter_nodes(dummy_rr.blueprint)
+        if node.get("kind") == "TimeSeriesView"
+    }
+    assert "/performance/sim_socket_timeout_count" in origins
+    assert "/performance/viewer_skip_count" in origins
+    assert _has_log(dummy_rr, "performance/sim_socket_timeout_count")
+    assert _has_log(dummy_rr, "performance/viewer_skip_count")
+
+
 def test_log_realtime_step_logs_position_tracking_in_mm(monkeypatch):
     dummy_rr = DummyRR()
     monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
@@ -313,6 +363,74 @@ def test_log_realtime_step_logs_tcp_speed_and_velocity(monkeypatch):
     assert _logged_scalar(dummy_rr, "arms/right/tcp_velocity/Z/value") == pytest.approx(-0.002)
     assert _logged_scalar(dummy_rr, "arms/right/tcp_speed/linear/value") == pytest.approx(0.002)
     assert _logged_scalar(dummy_rr, "limits/tcp_speed/value") == pytest.approx(0.05)
+
+
+def test_log_realtime_step_logs_balanced_sim_performance_metrics(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+    monkeypatch.setattr(rerun_viz.Config, "RERUN_DETAILED_PERF", False)
+
+    rerun_viz.log_realtime_step(
+        t=0.1,
+        pos_actual=np.zeros((2, 3), dtype=np.float64),
+        pos_desired=np.zeros((2, 3), dtype=np.float64),
+        quat_actual=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        quat_desired=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        tau_total=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        cycle_time=1.25,
+        step_count=0,
+        sim_target_hz=1000.0,
+        sim_service_ms=0.91,
+        sim_mujoco_step_ms=0.62,
+        sim_state_packet_ms=0.04,
+        sim_rerun_overwrite_count=3,
+        sim_rerun_drop_count=1,
+        sim_socket_timeout_count=2,
+        viewer_sync_count=9,
+        viewer_skip_count=4,
+        viewer_sync_ms=0.35,
+        viewer_lock_wait_ms=0.02,
+    )
+
+    assert _logged_scalar(dummy_rr, "performance/sim_target_hz") == pytest.approx(1000.0)
+    assert _logged_scalar(dummy_rr, "performance/sim_service_ms") == pytest.approx(0.91)
+    assert _logged_scalar(dummy_rr, "performance/sim_mujoco_step_ms") == pytest.approx(0.62)
+    assert _logged_scalar(dummy_rr, "performance/sim_state_packet_ms") == pytest.approx(0.04)
+    assert _logged_scalar(dummy_rr, "performance/sim_rerun_overwrite_count") == pytest.approx(3.0)
+    assert _logged_scalar(dummy_rr, "performance/sim_rerun_drop_count") == pytest.approx(1.0)
+    assert _logged_scalar(dummy_rr, "performance/viewer_sync_ms") == pytest.approx(0.35)
+    assert not _has_log(dummy_rr, "performance/sim_socket_timeout_count")
+    assert not _has_log(dummy_rr, "performance/viewer_sync_count")
+    assert not _has_log(dummy_rr, "performance/viewer_skip_count")
+    assert not _has_log(dummy_rr, "performance/viewer_lock_wait_ms")
+
+
+def test_log_realtime_step_logs_full_sim_performance_metrics(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+    monkeypatch.setattr(rerun_viz.Config, "RERUN_DETAILED_PERF", True)
+
+    rerun_viz.log_realtime_step(
+        t=0.1,
+        pos_actual=np.zeros((2, 3), dtype=np.float64),
+        pos_desired=np.zeros((2, 3), dtype=np.float64),
+        quat_actual=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        quat_desired=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        tau_total=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        cycle_time=1.25,
+        step_count=0,
+        sim_socket_timeout_count=2,
+        viewer_sync_count=9,
+        viewer_skip_count=4,
+        viewer_lock_wait_ms=0.02,
+    )
+
+    assert _logged_scalar(dummy_rr, "performance/sim_socket_timeout_count") == pytest.approx(2.0)
+    assert _logged_scalar(dummy_rr, "performance/viewer_sync_count") == pytest.approx(9.0)
+    assert _logged_scalar(dummy_rr, "performance/viewer_skip_count") == pytest.approx(4.0)
+    assert _logged_scalar(dummy_rr, "performance/viewer_lock_wait_ms") == pytest.approx(0.02)
 
 
 def test_log_realtime_step_logs_joint_safety_margins_and_warning(monkeypatch):
