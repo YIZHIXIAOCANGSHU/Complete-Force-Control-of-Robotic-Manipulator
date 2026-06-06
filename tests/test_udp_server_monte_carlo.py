@@ -11,11 +11,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from udp_server import (
+    DEFAULT_MC_MAX_HULL_POINTS,
+    DEFAULT_MC_PROGRESS_INTERVAL,
+    DEFAULT_MC_SAMPLES,
     InternalWorkspaceBox,
     RangeAccumulator,
     RangeSnapshot,
     WorkspaceHull,
     _build_control_target_schedule,
+    _format_dual_monte_carlo_report,
     _format_internal_workspace_box,
     _format_monte_carlo_report,
     _summarize_control_loop_arrays,
@@ -23,6 +27,7 @@ from udp_server import (
     _write_sim_report_assets,
     _workspace_box_edges,
     compute_largest_internal_workspace_box,
+    compute_internal_workspace_box_intersection,
     compute_workspace_hull,
     compute_workspace_bounds,
     ControlLoopResult,
@@ -30,6 +35,12 @@ from udp_server import (
     resolve_sampling_bounds,
     select_visualization_points,
 )
+
+
+def test_mc_defaults_use_high_precision_sampling_profile():
+    assert DEFAULT_MC_SAMPLES == 500000
+    assert DEFAULT_MC_MAX_HULL_POINTS == 50000
+    assert DEFAULT_MC_PROGRESS_INTERVAL == 10000
 
 
 def test_range_accumulator_tracks_min_max_mean_and_last():
@@ -214,6 +225,55 @@ def test_format_internal_workspace_box_reports_safe_pos_ranges():
     assert "3.750000" in report
 
 
+def test_compute_internal_workspace_box_intersection_reports_common_safe_range():
+    boxes = [
+        InternalWorkspaceBox(
+            center=np.array([1.0, 2.0, 3.0]),
+            half_size=np.array([1.0, 2.0, 3.0]),
+            lower=np.array([0.0, 0.0, 0.0]),
+            upper=np.array([2.0, 4.0, 6.0]),
+            volume=48.0,
+        ),
+        InternalWorkspaceBox(
+            center=np.array([1.5, 1.0, 4.0]),
+            half_size=np.array([1.0, 1.0, 2.0]),
+            lower=np.array([0.5, 0.0, 2.0]),
+            upper=np.array([2.5, 2.0, 6.0]),
+            volume=16.0,
+        ),
+    ]
+
+    common = compute_internal_workspace_box_intersection(boxes)
+
+    assert not common.is_empty
+    np.testing.assert_allclose(common.lower, [0.5, 0.0, 2.0])
+    np.testing.assert_allclose(common.upper, [2.0, 2.0, 6.0])
+    np.testing.assert_allclose(common.center, [1.25, 1.0, 4.0])
+    np.testing.assert_allclose(common.half_size, [0.75, 1.0, 2.0])
+    assert common.volume == pytest.approx(12.0)
+
+
+def test_compute_internal_workspace_box_intersection_returns_empty_when_disjoint():
+    boxes = [
+        InternalWorkspaceBox(
+            center=np.array([0.0, 0.0, 0.0]),
+            half_size=np.ones(3),
+            lower=np.array([-1.0, -1.0, -1.0]),
+            upper=np.array([1.0, 1.0, 1.0]),
+            volume=8.0,
+        ),
+        InternalWorkspaceBox(
+            center=np.array([3.0, 0.0, 0.0]),
+            half_size=np.ones(3),
+            lower=np.array([2.0, -1.0, -1.0]),
+            upper=np.array([4.0, 1.0, 1.0]),
+            volume=8.0,
+        ),
+    ]
+
+    assert compute_internal_workspace_box_intersection(boxes).is_empty
+
+
 def test_format_monte_carlo_report_uses_chinese_terminal_labels():
     pos_stats = RangeSnapshot(
         count=2,
@@ -264,6 +324,45 @@ def test_format_monte_carlo_report_uses_chinese_terminal_labels():
     assert "最大内部轴对齐长方体" in report
     assert "末端四元数范围" in report
     assert "最后刷新样本：" in report
+
+
+def test_format_dual_monte_carlo_report_includes_safe_box_summary():
+    snapshots = [
+        RangeSnapshot(2, np.array([0.0, 1.0, 2.0]), np.array([1.0, 2.0, 3.0]), np.array([0.5, 1.5, 2.5]), np.array([1.0, 2.0, 3.0])),
+        RangeSnapshot(2, np.array([0.5, 1.5, 2.5]), np.array([1.5, 2.5, 3.5]), np.array([1.0, 2.0, 3.0]), np.array([1.5, 2.5, 3.5])),
+    ]
+    quat_stats = [
+        RangeSnapshot(2, np.array([1.0, 0.0, 0.0, 0.0]), np.array([1.0, 0.1, 0.2, 0.3]), np.array([1.0, 0.05, 0.1, 0.15]), np.array([1.0, 0.1, 0.2, 0.3])),
+        RangeSnapshot(2, np.array([1.0, -0.3, -0.2, -0.1]), np.array([1.0, 0.0, 0.0, 0.0]), np.array([1.0, -0.15, -0.1, -0.05]), np.array([1.0, 0.0, 0.0, 0.0])),
+    ]
+    quat_norm_stats = [
+        RangeSnapshot(2, np.array([1.0]), np.array([1.1]), np.array([1.05]), np.array([1.1])),
+        RangeSnapshot(2, np.array([1.0]), np.array([1.2]), np.array([1.1]), np.array([1.2])),
+    ]
+    boxes = [
+        InternalWorkspaceBox(np.array([0.5, 1.5, 2.5]), np.array([0.5, 0.5, 0.5]), np.array([0.0, 1.0, 2.0]), np.array([1.0, 2.0, 3.0]), 1.0),
+        InternalWorkspaceBox(np.array([1.0, 2.0, 3.0]), np.array([0.5, 0.5, 0.5]), np.array([0.5, 1.5, 2.5]), np.array([1.5, 2.5, 3.5]), 1.0),
+    ]
+
+    report = _format_dual_monte_carlo_report(
+        samples=2,
+        seed=42,
+        joint_lower=np.array([-1.0, -2.0]),
+        joint_upper=np.array([1.0, 2.0]),
+        pos_stats=snapshots,
+        quat_stats=quat_stats,
+        quat_norm_stats=quat_norm_stats,
+        internal_boxes=boxes,
+        hull_point_count=2,
+        last_qpos=np.array([0.1, 0.2]),
+    )
+
+    assert "安全盒范围汇总(m)" in report
+    assert "左臂" in report
+    assert "右臂" in report
+    assert "公共交集" in report
+    assert "0.500000" in report
+    assert "3.000000" in report
 
 
 def test_workspace_box_edges_returns_twelve_edges():

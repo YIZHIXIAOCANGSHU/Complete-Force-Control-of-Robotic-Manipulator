@@ -31,6 +31,13 @@ _MODE_COLORS = {
     'mujoco': [50, 150, 230],
     'c_engine': [230, 100, 50],
 }
+_ACTUAL_COLOR = [50, 150, 230]
+_TARGET_COLOR = [80, 200, 90]
+_REFERENCE_COLOR = [240, 150, 40]
+_ERROR_COLOR = [220, 70, 70]
+_LIMIT_COLOR = [130, 130, 130]
+_LEFT_ARM_COLOR = [50, 150, 230]
+_RIGHT_ARM_COLOR = [230, 120, 50]
 
 _JOINT_COLORS = [
     [230, 50, 50],
@@ -71,14 +78,14 @@ _ESSENTIAL_PERFORMANCE_PATHS = {
     "performance/sim_rerun_overwrite_count",
     "performance/sim_rerun_drop_count",
     "performance/viewer_sync_ms",
+    "performance/tx_overwrite_count",
+    "performance/can_backpressure_count",
 }
 _DETAILED_PERFORMANCE_PATHS = {
     "performance/link_transfer_kbps",
     "performance/stm32_calc_time",
     "performance/stm32_calc_hz",
     "performance/feedback_wait_ms",
-    "performance/tx_overwrite_count",
-    "performance/can_backpressure_count",
     "performance/control_target_hz",
     "performance/sim_socket_timeout_count",
     "performance/viewer_sync_count",
@@ -112,6 +119,13 @@ def _as_arm_array(values: np.ndarray, width: int) -> np.ndarray:
     if array.shape == (Config.NUM_ARMS, width):
         return array
     raise ValueError(f"expected shape ({width},) or ({Config.NUM_ARMS}, {width}), got {array.shape}")
+
+
+def _torque_utilization(tau_values: np.ndarray, torque_limits: np.ndarray) -> float:
+    limits = np.asarray(torque_limits, dtype=np.float64)
+    safe_limits = np.where(np.abs(limits) > 1e-12, np.abs(limits), 1.0)
+    ratios = np.abs(np.asarray(tau_values, dtype=np.float64)) / safe_limits
+    return float(np.max(ratios)) if ratios.size else 0.0
 
 def _safe_pose_name(name: str) -> str:
     """将中文姿态名转为 ASCII 安全名称"""
@@ -322,16 +336,20 @@ def _setup_arm_realtime_styles() -> None:
             rr.log(
                 f"arms/{arm_label}/position/{axis}",
                 rr.SeriesLines(
-                    colors=[_AXIS_COLORS[axis], _AXIS_COLORS[axis]],
-                    names=[f"{arm_name} {axis} Actual", f"{arm_name} {axis} Target"],
-                    widths=[2.0, 1.2],
+                    colors=[_ACTUAL_COLOR, _TARGET_COLOR, _REFERENCE_COLOR],
+                    names=[
+                        f"{arm_name} {axis} Actual",
+                        f"{arm_name} {axis} Target",
+                        f"{arm_name} {axis} Reference",
+                    ],
+                    widths=[2.0, 1.2, 1.5],
                 ),
                 static=True,
             )
             rr.log(
                 f"arms/{arm_label}/position_error/{axis}",
                 rr.SeriesLines(
-                    colors=[_AXIS_COLORS[axis]],
+                    colors=[_ERROR_COLOR],
                     names=[f"{arm_name} {axis} Error"],
                     widths=[2.0],
                 ),
@@ -349,7 +367,7 @@ def _setup_arm_realtime_styles() -> None:
         rr.log(
             f"arms/{arm_label}/tcp_speed/linear",
             rr.SeriesLines(
-                colors=[[230, 80, 80]],
+                colors=[_ACTUAL_COLOR],
                 names=[f"{arm_name} TCP Linear Speed"],
                 widths=[2.0],
             ),
@@ -359,16 +377,20 @@ def _setup_arm_realtime_styles() -> None:
             rr.log(
                 f"arms/{arm_label}/rotation/{axis}",
                 rr.SeriesLines(
-                    colors=[_AXIS_COLORS[axis], _AXIS_COLORS[axis]],
-                    names=[f"{arm_name} {axis} Actual", f"{arm_name} {axis} Target"],
-                    widths=[2.0, 1.2],
+                    colors=[_ACTUAL_COLOR, _TARGET_COLOR, _REFERENCE_COLOR],
+                    names=[
+                        f"{arm_name} {axis} Actual",
+                        f"{arm_name} {axis} Target",
+                        f"{arm_name} {axis} Reference",
+                    ],
+                    widths=[2.0, 1.2, 1.5],
                 ),
                 static=True,
             )
             rr.log(
                 f"arms/{arm_label}/rotation_error/{axis}",
                 rr.SeriesLines(
-                    colors=[_AXIS_COLORS[axis]],
+                    colors=[_ERROR_COLOR],
                     names=[f"{arm_name} {axis} Error"],
                     widths=[2.0],
                 ),
@@ -393,13 +415,18 @@ def _setup_arm_realtime_styles() -> None:
                 static=True,
             )
             rr.log(
+                f"arms/{arm_label}/torque_raw/{joint}",
+                rr.SeriesLines(colors=[_LIMIT_COLOR], names=[f"{arm_name} {joint} Raw Tau"], widths=[1.5]),
+                static=True,
+            )
+            rr.log(
                 f"arms/{arm_label}/torque_actual/{joint}",
                 rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} Actual Tau"], widths=[1.5]),
                 static=True,
             )
             rr.log(
                 f"arms/{arm_label}/torque_gap/{joint}",
-                rr.SeriesLines(colors=[color], names=[f"{arm_name} {joint} Tau Gap"], widths=[2.0]),
+                rr.SeriesLines(colors=[_ERROR_COLOR], names=[f"{arm_name} {joint} Tau Gap"], widths=[2.0]),
                 static=True,
             )
             rr.log(
@@ -418,34 +445,211 @@ def _setup_arm_realtime_styles() -> None:
                 static=True,
             )
 
+
+def _setup_fast_status_styles() -> None:
+    """写入第一屏快速状态曲线的 SeriesLines 样式。"""
+    for arm_label, arm_name in zip(_ARM_LABELS, _ARM_DISPLAY_NAMES):
+        rr.log(
+            f"arms/{arm_label}/fast_status/position_error_norm_mm",
+            rr.SeriesLines(
+                colors=[_ERROR_COLOR],
+                names=[f"{arm_name} Position Error Norm"],
+                widths=[2.5],
+            ),
+            static=True,
+        )
+        rr.log(
+            f"arms/{arm_label}/fast_status/reference_error_norm_mm",
+            rr.SeriesLines(
+                colors=[_REFERENCE_COLOR],
+                names=[f"{arm_name} Reference Error Norm"],
+                widths=[2.5],
+            ),
+            static=True,
+        )
+        rr.log(
+            f"arms/{arm_label}/fast_status/rotation_error_norm_deg",
+            rr.SeriesLines(
+                colors=[_ERROR_COLOR],
+                names=[f"{arm_name} Rotation Error Norm"],
+                widths=[2.5],
+            ),
+            static=True,
+        )
+        rr.log(
+            f"arms/{arm_label}/fast_status/tcp_speed_mps",
+            rr.SeriesLines(
+                colors=[_ACTUAL_COLOR, _LIMIT_COLOR],
+                names=[f"{arm_name} TCP Speed", "TCP Speed Limit"],
+                widths=[2.5, 1.5],
+            ),
+            static=True,
+        )
+        rr.log(
+            f"arms/{arm_label}/fast_status/torque_utilization",
+            rr.SeriesLines(
+                colors=[_ERROR_COLOR, _ACTUAL_COLOR, _LIMIT_COLOR],
+                names=[
+                    f"{arm_name} Command Utilization",
+                    f"{arm_name} Actual Utilization",
+                    f"{arm_name} Raw Utilization",
+                ],
+                widths=[2.5, 1.8, 1.4],
+            ),
+            static=True,
+        )
+        rr.log(
+            f"arms/{arm_label}/fast_status/min_joint_limit_margin_rad",
+            rr.SeriesLines(
+                colors=[_LIMIT_COLOR, _ERROR_COLOR],
+                names=[f"{arm_name} Min Joint Limit Margin", "Warning Threshold"],
+                widths=[2.5, 1.4],
+            ),
+            static=True,
+        )
+        rr.log(
+            f"arms/{arm_label}/fast_status/min_velocity_margin_rad_s",
+            rr.SeriesLines(
+                colors=[_LIMIT_COLOR, _ERROR_COLOR],
+                names=[f"{arm_name} Min Velocity Margin", "Warning Threshold"],
+                widths=[2.5, 1.4],
+            ),
+            static=True,
+        )
+
+
+def _setup_dashboard_styles() -> None:
+    """写入小屏 Status 页使用的左右臂合并曲线样式。"""
+    rr.log(
+        "dashboard/position_error_norm_mm",
+        rr.SeriesLines(
+            colors=[_LEFT_ARM_COLOR, _RIGHT_ARM_COLOR],
+            names=["Left Position Error Norm", "Right Position Error Norm"],
+            widths=[2.5, 2.5],
+        ),
+        static=True,
+    )
+    rr.log(
+        "dashboard/reference_error_norm_mm",
+        rr.SeriesLines(
+            colors=[_LEFT_ARM_COLOR, _RIGHT_ARM_COLOR],
+            names=["Left Reference Error Norm", "Right Reference Error Norm"],
+            widths=[2.5, 2.5],
+        ),
+        static=True,
+    )
+    rr.log(
+        "dashboard/rotation_error_norm_deg",
+        rr.SeriesLines(
+            colors=[_LEFT_ARM_COLOR, _RIGHT_ARM_COLOR],
+            names=["Left Rotation Error Norm", "Right Rotation Error Norm"],
+            widths=[2.5, 2.5],
+        ),
+        static=True,
+    )
+    rr.log(
+        "dashboard/tcp_speed_mps",
+        rr.SeriesLines(
+            colors=[_LEFT_ARM_COLOR, _RIGHT_ARM_COLOR, _LIMIT_COLOR],
+            names=["Left TCP Speed", "Right TCP Speed", "TCP Speed Limit"],
+            widths=[2.5, 2.5, 1.5],
+        ),
+        static=True,
+    )
+    rr.log(
+        "dashboard/torque_utilization",
+        rr.SeriesLines(
+            colors=[_LEFT_ARM_COLOR, _RIGHT_ARM_COLOR],
+            names=["Left Command Utilization", "Right Command Utilization"],
+            widths=[2.5, 2.5],
+        ),
+        static=True,
+    )
+    rr.log(
+        "dashboard/min_joint_limit_margin_rad",
+        rr.SeriesLines(
+            colors=[_LEFT_ARM_COLOR, _RIGHT_ARM_COLOR, _ERROR_COLOR],
+            names=["Left Min Limit Margin", "Right Min Limit Margin", "Warning Threshold"],
+            widths=[2.5, 2.5, 1.5],
+        ),
+        static=True,
+    )
+    rr.log(
+        "dashboard/min_velocity_margin_rad_s",
+        rr.SeriesLines(
+            colors=[_LEFT_ARM_COLOR, _RIGHT_ARM_COLOR, _ERROR_COLOR],
+            names=["Left Min Velocity Margin", "Right Min Velocity Margin", "Warning Threshold"],
+            widths=[2.5, 2.5, 1.5],
+        ),
+        static=True,
+    )
+
+
 def setup_realtime_styles():
     """设置交互式 Rerun 的曲线样式和试图蓝图，在仿真启动前调用"""
     if not RERUN_AVAILABLE: return
     _setup_trajectory_styles()
     _setup_arm_realtime_styles()
+    _setup_fast_status_styles()
+    _setup_dashboard_styles()
 
     rr.set_time_seconds("time", 0.0)
     for arm_label in _ARM_LABELS:
         for axis in ("X", "Y", "Z"):
             rr.log(f"arms/{arm_label}/position/{axis}/actual", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/position/{axis}/target", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/position/{axis}/reference", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/position_error/{axis}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/tcp_velocity/{axis}/value", rr.Scalars(0.0))
         rr.log(f"arms/{arm_label}/tcp_speed/linear/value", rr.Scalars(0.0))
+        rr.log(f"arms/{arm_label}/fast_status/position_error_norm_mm/value", rr.Scalars(0.0))
+        rr.log(f"arms/{arm_label}/fast_status/reference_error_norm_mm/value", rr.Scalars(0.0))
+        rr.log(f"arms/{arm_label}/fast_status/rotation_error_norm_deg/value", rr.Scalars(0.0))
+        rr.log(f"arms/{arm_label}/fast_status/tcp_speed_mps/value", rr.Scalars(0.0))
+        rr.log(
+            f"arms/{arm_label}/fast_status/tcp_speed_mps/limit",
+            rr.Scalars(float(Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS)),
+        )
+        rr.log(f"arms/{arm_label}/fast_status/torque_utilization/command", rr.Scalars(0.0))
+        rr.log(f"arms/{arm_label}/fast_status/torque_utilization/actual", rr.Scalars(0.0))
+        rr.log(f"arms/{arm_label}/fast_status/torque_utilization/raw", rr.Scalars(0.0))
+        rr.log(f"arms/{arm_label}/fast_status/min_joint_limit_margin_rad/value", rr.Scalars(0.0))
+        rr.log(
+            f"arms/{arm_label}/fast_status/min_joint_limit_margin_rad/warning_threshold",
+            rr.Scalars(float(_SAFETY_LOG_MARGIN_RAD)),
+        )
+        rr.log(f"arms/{arm_label}/fast_status/min_velocity_margin_rad_s/value", rr.Scalars(0.0))
+        rr.log(
+            f"arms/{arm_label}/fast_status/min_velocity_margin_rad_s/warning_threshold",
+            rr.Scalars(float(_SAFETY_LOG_MARGIN_RAD_S)),
+        )
         for axis in ("Roll", "Pitch", "Yaw"):
             rr.log(f"arms/{arm_label}/rotation/{axis}/actual", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/rotation/{axis}/target", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/rotation/{axis}/reference", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/rotation_error/{axis}/value", rr.Scalars(0.0))
         for i in range(Config.ARM_JOINTS):
             joint = f"J{i + 1}"
             rr.log(f"arms/{arm_label}/joint_q/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/joint_qd/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/torque/{joint}/command", rr.Scalars(0.0))
+            rr.log(f"arms/{arm_label}/torque_raw/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/torque_actual/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/torque_gap/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/velocity_margin/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/limit_margin_low/{joint}/value", rr.Scalars(0.0))
             rr.log(f"arms/{arm_label}/limit_margin_high/{joint}/value", rr.Scalars(0.0))
+    for suffix in ("left", "right"):
+        rr.log(f"dashboard/position_error_norm_mm/{suffix}", rr.Scalars(0.0))
+        rr.log(f"dashboard/reference_error_norm_mm/{suffix}", rr.Scalars(0.0))
+        rr.log(f"dashboard/rotation_error_norm_deg/{suffix}", rr.Scalars(0.0))
+        rr.log(f"dashboard/tcp_speed_mps/{suffix}", rr.Scalars(0.0))
+        rr.log(f"dashboard/torque_utilization/{suffix}", rr.Scalars(0.0))
+        rr.log(f"dashboard/min_joint_limit_margin_rad/{suffix}", rr.Scalars(0.0))
+        rr.log(f"dashboard/min_velocity_margin_rad_s/{suffix}", rr.Scalars(0.0))
+    rr.log("dashboard/tcp_speed_mps/limit", rr.Scalars(float(Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS)))
+    rr.log("dashboard/min_joint_limit_margin_rad/warning_threshold", rr.Scalars(float(_SAFETY_LOG_MARGIN_RAD)))
+    rr.log("dashboard/min_velocity_margin_rad_s/warning_threshold", rr.Scalars(float(_SAFETY_LOG_MARGIN_RAD_S)))
     for path in sorted(_ESSENTIAL_PERFORMANCE_PATHS | _DETAILED_PERFORMANCE_PATHS):
         if _rerun_should_log_perf(path):
             rr.log(path, rr.Scalars(0.0))
@@ -460,8 +664,6 @@ def setup_realtime_styles():
         return rrb.TimeSeriesView(
             name="Control Link Period (ms)", origin="/performance/link_latency",
         )
-
-    link_log_view = rrb.TextLogView(name="Control Link Log", origin="/control_link_log")
 
     def performance_view(name: str, path: str):
         if not _rerun_should_log_perf(path):
@@ -495,18 +697,9 @@ def setup_realtime_styles():
 
     def control_link_view():
         return rrb.Vertical(
-            link_log_view,
+            rrb.TextLogView(name="Control Link Log", origin="/control_link_log"),
             link_latency_view(),
             name="Control Link",
-        )
-
-    def arm_view(arm_label: str, arm_name: str, key: str, title: str, unit: str):
-        return rrb.Vertical(
-            rrb.TimeSeriesView(
-                name=f"{arm_name} {title} ({unit})",
-                origin=f"/arms/{arm_label}/{key}",
-            ),
-            name=f"{arm_name} {title}",
         )
 
     def arm_axis_view(
@@ -538,6 +731,53 @@ def setup_realtime_styles():
             unit,
         )
 
+    def control_health_view():
+        views = [
+            performance_view("Python Control Step Time (ms)", "performance/c_engine_time"),
+            performance_view("Control Link Period (ms)", "performance/link_latency"),
+            performance_view("Control Link Rate (Hz)", "performance/link_cycle_hz"),
+            performance_view("TX Pending Overwrites", "performance/tx_overwrite_count"),
+            performance_view("CAN Backpressure Count", "performance/can_backpressure_count"),
+        ]
+        return rrb.Vertical(
+            *[view for view in views if view is not None],
+            rrb.TextLogView(name="Control Link Log", origin="/control_link_log"),
+            name="Link",
+        )
+
+    def fast_status_detail_view(arm_label: str, arm_name: str):
+        return rrb.Vertical(
+            rrb.TimeSeriesView(
+                name=f"{arm_name} Position Error Norm (mm)",
+                origin=f"/arms/{arm_label}/fast_status/position_error_norm_mm",
+            ),
+            rrb.TimeSeriesView(
+                name=f"{arm_name} Reference Error Norm (mm)",
+                origin=f"/arms/{arm_label}/fast_status/reference_error_norm_mm",
+            ),
+            rrb.TimeSeriesView(
+                name=f"{arm_name} Rotation Error Norm (deg)",
+                origin=f"/arms/{arm_label}/fast_status/rotation_error_norm_deg",
+            ),
+            rrb.TimeSeriesView(
+                name=f"{arm_name} TCP Speed (m/s)",
+                origin=f"/arms/{arm_label}/fast_status/tcp_speed_mps",
+            ),
+            rrb.TimeSeriesView(
+                name=f"{arm_name} Torque Utilization",
+                origin=f"/arms/{arm_label}/fast_status/torque_utilization",
+            ),
+            rrb.TimeSeriesView(
+                name=f"{arm_name} Min Joint Limit Margin (rad)",
+                origin=f"/arms/{arm_label}/fast_status/min_joint_limit_margin_rad",
+            ),
+            rrb.TimeSeriesView(
+                name=f"{arm_name} Min Velocity Margin (rad/s)",
+                origin=f"/arms/{arm_label}/fast_status/min_velocity_margin_rad_s",
+            ),
+            name=f"{arm_name} Fast Status",
+        )
+
     def tcp_speed_view():
         return rrb.Vertical(
             rrb.TimeSeriesView(name="TCP Speed Limit (m/s)", origin="/limits/tcp_speed"),
@@ -548,32 +788,164 @@ def setup_realtime_styles():
             name="TCP Speed",
         )
 
+    def status_view():
+        return rrb.Tabs(
+            rrb.Vertical(
+                rrb.TimeSeriesView(name="Position Error Norm (mm)", origin="/dashboard/position_error_norm_mm"),
+                rrb.TimeSeriesView(name="Reference Error Norm (mm)", origin="/dashboard/reference_error_norm_mm"),
+                rrb.TimeSeriesView(name="Rotation Error Norm (deg)", origin="/dashboard/rotation_error_norm_deg"),
+                rrb.TimeSeriesView(name="TCP Speed (m/s)", origin="/dashboard/tcp_speed_mps"),
+                name="Tracking",
+            ),
+            rrb.Vertical(
+                rrb.TimeSeriesView(name="Command Torque Utilization", origin="/dashboard/torque_utilization"),
+                name="Torque",
+            ),
+            rrb.Vertical(
+                rrb.TimeSeriesView(name="Min Joint Limit Margin (rad)", origin="/dashboard/min_joint_limit_margin_rad"),
+                rrb.TimeSeriesView(name="Min Velocity Margin (rad/s)", origin="/dashboard/min_velocity_margin_rad_s"),
+                name="Safety",
+            ),
+            control_health_view(),
+            name="Status",
+        )
+
+    def fast_status_detail_tab():
+        return rrb.Horizontal(
+            fast_status_detail_view("left", "Left"),
+            fast_status_detail_view("right", "Right"),
+            name="Fast Status Detail",
+        )
+
+    def tracking_detail_view():
+        return rrb.Vertical(
+            fast_status_detail_tab(),
+            rrb.Horizontal(
+                arm_axis_view("left", "Left", "position", "Position", ("X", "Y", "Z"), _POSITION_DISPLAY_UNIT),
+                arm_axis_view("right", "Right", "position", "Position", ("X", "Y", "Z"), _POSITION_DISPLAY_UNIT),
+                name="Position Detail",
+            ),
+            rrb.Horizontal(
+                arm_axis_view("left", "Left", "rotation", "Rotation", ("Roll", "Pitch", "Yaw"), "deg"),
+                arm_axis_view("right", "Right", "rotation", "Rotation", ("Roll", "Pitch", "Yaw"), "deg"),
+                name="Rotation Detail",
+            ),
+            rrb.Horizontal(
+                arm_axis_view("left", "Left", "position_error", "Position Error", ("X", "Y", "Z"), "mm"),
+                arm_axis_view("right", "Right", "position_error", "Position Error", ("X", "Y", "Z"), "mm"),
+                name="Position Error Detail",
+            ),
+            rrb.Horizontal(
+                arm_axis_view("left", "Left", "rotation_error", "Rotation Error", ("Roll", "Pitch", "Yaw"), "deg"),
+                arm_axis_view("right", "Right", "rotation_error", "Rotation Error", ("Roll", "Pitch", "Yaw"), "deg"),
+                name="Rotation Error Detail",
+            ),
+            tcp_speed_view(),
+            name="Tracking Detail",
+        )
+
+    def joint_detail_view():
+        return rrb.Vertical(
+            rrb.Horizontal(
+                arm_joint_axis_view("left", "Left", "joint_q", "Joint Q", "rad"),
+                arm_joint_axis_view("right", "Right", "joint_q", "Joint Q", "rad"),
+                name="Joint Position",
+            ),
+            rrb.Horizontal(
+                arm_joint_axis_view("left", "Left", "joint_qd", "Joint QD", "rad/s"),
+                arm_joint_axis_view("right", "Right", "joint_qd", "Joint QD", "rad/s"),
+                name="Joint Velocity",
+            ),
+            name="Joint Detail",
+        )
+
+    def torque_detail_view():
+        return rrb.Vertical(
+            rrb.Horizontal(
+                arm_joint_axis_view("left", "Left", "torque", "Torque", "N*m"),
+                arm_joint_axis_view("right", "Right", "torque", "Torque", "N*m"),
+                name="Command Torque",
+            ),
+            rrb.Horizontal(
+                arm_joint_axis_view("left", "Left", "torque_raw", "Raw Torque", "N*m"),
+                arm_joint_axis_view("right", "Right", "torque_raw", "Raw Torque", "N*m"),
+                name="Raw Torque",
+            ),
+            rrb.Horizontal(
+                arm_joint_axis_view("left", "Left", "torque_actual", "Actual Torque", "N*m"),
+                arm_joint_axis_view("right", "Right", "torque_actual", "Actual Torque", "N*m"),
+                name="Actual Torque",
+            ),
+            rrb.Horizontal(
+                arm_joint_axis_view("left", "Left", "torque_gap", "Torque Gap", "N*m"),
+                arm_joint_axis_view("right", "Right", "torque_gap", "Torque Gap", "N*m"),
+                name="Torque Gap",
+            ),
+            rrb.Horizontal(
+                rrb.TimeSeriesView(
+                    name="Left Torque Utilization",
+                    origin="/arms/left/fast_status/torque_utilization",
+                ),
+                rrb.TimeSeriesView(
+                    name="Right Torque Utilization",
+                    origin="/arms/right/fast_status/torque_utilization",
+                ),
+                name="Torque Utilization",
+            ),
+            name="Torque Detail",
+        )
+
+    def safety_view():
+        return rrb.Vertical(
+            rrb.Horizontal(
+                arm_joint_axis_view("left", "Left", "velocity_margin", "Velocity Safety Margin", "rad/s"),
+                arm_joint_axis_view("right", "Right", "velocity_margin", "Velocity Safety Margin", "rad/s"),
+                name="Velocity Margin",
+            ),
+            rrb.Horizontal(
+                arm_joint_axis_view("left", "Left", "limit_margin_low", "Low Limit Margin", "rad"),
+                arm_joint_axis_view("right", "Right", "limit_margin_low", "Low Limit Margin", "rad"),
+                name="Low Limit Margin",
+            ),
+            rrb.Horizontal(
+                arm_joint_axis_view("left", "Left", "limit_margin_high", "High Limit Margin", "rad"),
+                arm_joint_axis_view("right", "Right", "limit_margin_high", "High Limit Margin", "rad"),
+                name="High Limit Margin",
+            ),
+            rrb.Horizontal(
+                rrb.TimeSeriesView(
+                    name="Left Min Joint Limit Margin (rad)",
+                    origin="/arms/left/fast_status/min_joint_limit_margin_rad",
+                ),
+                rrb.TimeSeriesView(
+                    name="Right Min Joint Limit Margin (rad)",
+                    origin="/arms/right/fast_status/min_joint_limit_margin_rad",
+                ),
+                name="Limit Margin Summary",
+            ),
+            rrb.Horizontal(
+                rrb.TimeSeriesView(
+                    name="Left Min Velocity Margin (rad/s)",
+                    origin="/arms/left/fast_status/min_velocity_margin_rad_s",
+                ),
+                rrb.TimeSeriesView(
+                    name="Right Min Velocity Margin (rad/s)",
+                    origin="/arms/right/fast_status/min_velocity_margin_rad_s",
+                ),
+                name="Velocity Margin Summary",
+            ),
+            rrb.TextLogView(name="Safety Warnings", origin="/control_link_log"),
+            name="Safety",
+        )
+
     blueprint = rrb.Blueprint(
         rrb.Tabs(
+            status_view(),
             rrb.Spatial3DView(name="3D", origin="/trajectory_3d"),
-            arm_axis_view("left", "Left", "position", "Position", ("X", "Y", "Z"), _POSITION_DISPLAY_UNIT),
-            arm_axis_view("right", "Right", "position", "Position", ("X", "Y", "Z"), _POSITION_DISPLAY_UNIT),
-            arm_axis_view("left", "Left", "rotation", "Rotation", ("Roll", "Pitch", "Yaw"), "deg"),
-            arm_axis_view("right", "Right", "rotation", "Rotation", ("Roll", "Pitch", "Yaw"), "deg"),
-            arm_axis_view("left", "Left", "position_error", "Position Error", ("X", "Y", "Z"), "mm"),
-            arm_axis_view("right", "Right", "position_error", "Position Error", ("X", "Y", "Z"), "mm"),
-            arm_axis_view("left", "Left", "rotation_error", "Rotation Error", ("Roll", "Pitch", "Yaw"), "deg"),
-            arm_axis_view("right", "Right", "rotation_error", "Rotation Error", ("Roll", "Pitch", "Yaw"), "deg"),
-            arm_joint_axis_view("left", "Left", "joint_q", "Joint Q", "rad"),
-            arm_joint_axis_view("right", "Right", "joint_q", "Joint Q", "rad"),
-            arm_joint_axis_view("left", "Left", "joint_qd", "Joint QD", "rad/s"),
-            arm_joint_axis_view("right", "Right", "joint_qd", "Joint QD", "rad/s"),
-            tcp_speed_view(),
-            arm_joint_axis_view("left", "Left", "torque", "Torque", "N*m"),
-            arm_joint_axis_view("right", "Right", "torque", "Torque", "N*m"),
-            arm_joint_axis_view("left", "Left", "torque_gap", "Torque Gap", "N*m"),
-            arm_joint_axis_view("right", "Right", "torque_gap", "Torque Gap", "N*m"),
-            arm_joint_axis_view("left", "Left", "velocity_margin", "Velocity Safety Margin", "rad/s"),
-            arm_joint_axis_view("right", "Right", "velocity_margin", "Velocity Safety Margin", "rad/s"),
-            arm_joint_axis_view("left", "Left", "limit_margin_low", "Low Limit Margin", "rad"),
-            arm_joint_axis_view("right", "Right", "limit_margin_low", "Low Limit Margin", "rad"),
-            arm_joint_axis_view("left", "Left", "limit_margin_high", "High Limit Margin", "rad"),
-            arm_joint_axis_view("right", "Right", "limit_margin_high", "High Limit Margin", "rad"),
+            tracking_detail_view(),
+            joint_detail_view(),
+            torque_detail_view(),
+            safety_view(),
             rrb.Vertical(
                 *performance_views,
                 name="Performance",
@@ -592,6 +964,8 @@ def log_realtime_step(
     quat_desired: np.ndarray,
     tau_total: np.ndarray,
     cycle_time: float,
+    pos_reference: np.ndarray = None,
+    quat_reference: np.ndarray = None,
     q: np.ndarray = None,
     qd: np.ndarray = None,
     ee_twist: np.ndarray = None,
@@ -634,25 +1008,65 @@ def log_realtime_step(
     pos_desired_by_arm = _as_arm_array(pos_desired, 3)
     quat_actual_by_arm = _as_arm_array(quat_actual, 4)
     quat_desired_by_arm = _as_arm_array(quat_desired, 4)
-    
+    pos_reference_by_arm = None if pos_reference is None else _as_arm_array(pos_reference, 3)
+    quat_reference_by_arm = None if quat_reference is None else _as_arm_array(quat_reference, 4)
+    reference_valid = None
+    if pos_reference_by_arm is not None:
+        reference_valid = np.all(np.isfinite(pos_reference_by_arm), axis=1)
+        if quat_reference_by_arm is not None:
+            reference_valid &= np.all(np.isfinite(quat_reference_by_arm), axis=1)
+            reference_valid &= np.linalg.norm(quat_reference_by_arm, axis=1) > 1e-12
+
     for arm, arm_label in enumerate(_ARM_LABELS[: len(pos_actual_by_arm)]):
         pos_actual_display = _position_to_display_units(pos_actual_by_arm[arm])
         pos_desired_display = _position_to_display_units(pos_desired_by_arm[arm])
+        has_reference = (
+            pos_reference_by_arm is not None
+            and arm < len(pos_reference_by_arm)
+            and bool(reference_valid[arm])
+        )
+        if has_reference:
+            pos_reference_display = _position_to_display_units(pos_reference_by_arm[arm])
         for i, axis in enumerate(('X', 'Y', 'Z')):
             rr.log(f"arms/{arm_label}/position/{axis}/actual", rr.Scalars(float(pos_actual_display[i])))
             rr.log(f"arms/{arm_label}/position/{axis}/target", rr.Scalars(float(pos_desired_display[i])))
+            if has_reference:
+                rr.log(f"arms/{arm_label}/position/{axis}/reference", rr.Scalars(float(pos_reference_display[i])))
             rr.log(f"arms/{arm_label}/position_error/{axis}/value", rr.Scalars(float(pos_actual_display[i] - pos_desired_display[i])))
+        position_error_norm_mm = float(np.linalg.norm(pos_actual_display - pos_desired_display))
+        rr.log(
+            f"arms/{arm_label}/fast_status/position_error_norm_mm/value",
+            rr.Scalars(position_error_norm_mm),
+        )
+        rr.log(f"dashboard/position_error_norm_mm/{arm_label}", rr.Scalars(position_error_norm_mm))
+        if has_reference:
+            reference_error_norm_mm = float(np.linalg.norm(pos_actual_display - pos_reference_display))
+            rr.log(
+                f"arms/{arm_label}/fast_status/reference_error_norm_mm/value",
+                rr.Scalars(reference_error_norm_mm),
+            )
+            rr.log(f"dashboard/reference_error_norm_mm/{arm_label}", rr.Scalars(reference_error_norm_mm))
 
         rot_actual = quat_to_euler(quat_actual_by_arm[arm])
         rot_desired = quat_to_euler(quat_desired_by_arm[arm])
         rot_err = compute_rotation_error_single(quat_actual_by_arm[arm], quat_desired_by_arm[arm])
         rot_actual_deg = np.rad2deg(rot_actual)
         rot_desired_deg = np.rad2deg(rot_desired)
+        if has_reference and quat_reference_by_arm is not None:
+            rot_reference_deg = np.rad2deg(quat_to_euler(quat_reference_by_arm[arm]))
 
         for i, axis in enumerate(('Roll', 'Pitch', 'Yaw')):
             rr.log(f"arms/{arm_label}/rotation/{axis}/actual", rr.Scalars(float(rot_actual_deg[i])))
             rr.log(f"arms/{arm_label}/rotation/{axis}/target", rr.Scalars(float(rot_desired_deg[i])))
+            if has_reference and quat_reference_by_arm is not None:
+                rr.log(f"arms/{arm_label}/rotation/{axis}/reference", rr.Scalars(float(rot_reference_deg[i])))
             rr.log(f"arms/{arm_label}/rotation_error/{axis}/value", rr.Scalars(float(rot_err[i])))
+        rotation_error_norm_deg = float(np.linalg.norm(rot_err))
+        rr.log(
+            f"arms/{arm_label}/fast_status/rotation_error_norm_deg/value",
+            rr.Scalars(rotation_error_norm_deg),
+        )
+        rr.log(f"dashboard/rotation_error_norm_deg/{arm_label}", rr.Scalars(rotation_error_norm_deg))
 
     if q is not None:
         q_by_arm = _as_arm_array(q, Config.ARM_JOINTS)
@@ -676,11 +1090,19 @@ def log_realtime_step(
                     rr.Scalars(float(linear_velocity[i])),
                 )
             rr.log(f"arms/{arm_label}/tcp_speed/linear/value", rr.Scalars(linear_speed))
+            rr.log(f"arms/{arm_label}/fast_status/tcp_speed_mps/value", rr.Scalars(linear_speed))
+            rr.log(f"dashboard/tcp_speed_mps/{arm_label}", rr.Scalars(linear_speed))
+            rr.log(
+                f"arms/{arm_label}/fast_status/tcp_speed_mps/limit",
+                rr.Scalars(float(Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS)),
+            )
         rr.log("limits/tcp_speed/value", rr.Scalars(float(Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS)))
+        rr.log("dashboard/tcp_speed_mps/limit", rr.Scalars(float(Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS)))
         
     tau_by_arm = _as_arm_array(tau_total, Config.ARM_JOINTS)
     tau_raw_by_arm = None if tau_raw is None else _as_arm_array(tau_raw, Config.ARM_JOINTS)
     tau_actual_by_arm = None if tau_actual is None else _as_arm_array(tau_actual, Config.ARM_JOINTS)
+    torque_limits_by_arm = _as_arm_array(Config.TORQUE_LIMITS, Config.ARM_JOINTS)
     for arm, arm_label in enumerate(_ARM_LABELS[: len(tau_by_arm)]):
         for i, value in enumerate(tau_by_arm[arm]):
             rr.log(f"arms/{arm_label}/torque/J{i+1}/command", rr.Scalars(float(value)))
@@ -692,6 +1114,22 @@ def log_realtime_step(
                     f"arms/{arm_label}/torque_gap/J{i+1}/value",
                     rr.Scalars(float(value - tau_actual_by_arm[arm, i])),
                 )
+        command_torque_utilization = _torque_utilization(tau_by_arm[arm], torque_limits_by_arm[arm])
+        rr.log(
+            f"arms/{arm_label}/fast_status/torque_utilization/command",
+            rr.Scalars(command_torque_utilization),
+        )
+        rr.log(f"dashboard/torque_utilization/{arm_label}", rr.Scalars(command_torque_utilization))
+        if tau_actual_by_arm is not None:
+            rr.log(
+                f"arms/{arm_label}/fast_status/torque_utilization/actual",
+                rr.Scalars(_torque_utilization(tau_actual_by_arm[arm], torque_limits_by_arm[arm])),
+            )
+        if tau_raw_by_arm is not None:
+            rr.log(
+                f"arms/{arm_label}/fast_status/torque_utilization/raw",
+                rr.Scalars(_torque_utilization(tau_raw_by_arm[arm], torque_limits_by_arm[arm])),
+            )
 
     q_margin_low, q_margin_high, vel_margin = _joint_safety_margins(q, qd)
     if vel_margin is not None:
@@ -699,6 +1137,20 @@ def log_realtime_step(
         for arm, arm_label in enumerate(_ARM_LABELS[: len(vel_margin_by_arm)]):
             for i, value in enumerate(vel_margin_by_arm[arm]):
                 rr.log(f"arms/{arm_label}/velocity_margin/J{i+1}/value", rr.Scalars(float(value)))
+            min_velocity_margin = float(np.min(vel_margin_by_arm[arm]))
+            rr.log(
+                f"arms/{arm_label}/fast_status/min_velocity_margin_rad_s/value",
+                rr.Scalars(min_velocity_margin),
+            )
+            rr.log(f"dashboard/min_velocity_margin_rad_s/{arm_label}", rr.Scalars(min_velocity_margin))
+            rr.log(
+                f"arms/{arm_label}/fast_status/min_velocity_margin_rad_s/warning_threshold",
+                rr.Scalars(float(_SAFETY_LOG_MARGIN_RAD_S)),
+            )
+            rr.log(
+                "dashboard/min_velocity_margin_rad_s/warning_threshold",
+                rr.Scalars(float(_SAFETY_LOG_MARGIN_RAD_S)),
+            )
     if q_margin_low is not None and q_margin_high is not None:
         low_by_arm = _as_arm_array(q_margin_low, Config.ARM_JOINTS)
         high_by_arm = _as_arm_array(q_margin_high, Config.ARM_JOINTS)
@@ -706,6 +1158,21 @@ def log_realtime_step(
             for i, value in enumerate(low_by_arm[arm]):
                 rr.log(f"arms/{arm_label}/limit_margin_low/J{i+1}/value", rr.Scalars(float(value)))
                 rr.log(f"arms/{arm_label}/limit_margin_high/J{i+1}/value", rr.Scalars(float(high_by_arm[arm, i])))
+            min_limit_margin = np.minimum(low_by_arm[arm], high_by_arm[arm])
+            min_joint_limit_margin = float(np.min(min_limit_margin))
+            rr.log(
+                f"arms/{arm_label}/fast_status/min_joint_limit_margin_rad/value",
+                rr.Scalars(min_joint_limit_margin),
+            )
+            rr.log(f"dashboard/min_joint_limit_margin_rad/{arm_label}", rr.Scalars(min_joint_limit_margin))
+            rr.log(
+                f"arms/{arm_label}/fast_status/min_joint_limit_margin_rad/warning_threshold",
+                rr.Scalars(float(_SAFETY_LOG_MARGIN_RAD)),
+            )
+            rr.log(
+                "dashboard/min_joint_limit_margin_rad/warning_threshold",
+                rr.Scalars(float(_SAFETY_LOG_MARGIN_RAD)),
+            )
 
     safety_warning = _format_safety_warnings(q_margin_low, q_margin_high, vel_margin)
     if safety_warning and _should_log_safety_warning(safety_warning, step_count):
@@ -758,6 +1225,26 @@ def log_realtime_step(
            rr.Points3D(pos_actual_by_arm, colors=actual_colors, radii=0.015, labels=labels_actual))
     rr.log("trajectory_3d/target_goal",
            rr.Points3D(pos_desired_by_arm, colors=target_colors, radii=0.015, labels=labels_target))
+    if pos_reference_by_arm is not None and reference_valid is not None:
+        reference_indices = [
+            arm
+            for arm in range(min(len(pos_actual_by_arm), len(pos_reference_by_arm)))
+            if bool(reference_valid[arm])
+        ]
+        if reference_indices:
+            reference_points = pos_reference_by_arm[reference_indices]
+            labels_reference = [
+                f"{_ARM_DISPLAY_NAMES[arm]} Reference" for arm in reference_indices
+            ]
+            rr.log(
+                "trajectory_3d/reference_point",
+                rr.Points3D(
+                    reference_points,
+                    colors=[_REFERENCE_COLOR] * len(reference_indices),
+                    radii=0.012,
+                    labels=labels_reference,
+                ),
+            )
 
     error_lines = [
         [pos_actual_by_arm[arm], pos_desired_by_arm[arm]]
@@ -765,6 +1252,17 @@ def log_realtime_step(
     ]
     rr.log("trajectory_3d/error_line",
            rr.LineStrips3D(error_lines, colors=[[255, 0, 0]], radii=0.002))
+    if pos_reference_by_arm is not None and reference_valid is not None:
+        reference_error_lines = [
+            [pos_actual_by_arm[arm], pos_reference_by_arm[arm]]
+            for arm in range(min(len(pos_actual_by_arm), len(pos_reference_by_arm)))
+            if bool(reference_valid[arm])
+        ]
+        if reference_error_lines:
+            rr.log(
+                "trajectory_3d/reference_error_line",
+                rr.LineStrips3D(reference_error_lines, colors=[_REFERENCE_COLOR], radii=0.002),
+            )
 
 
 

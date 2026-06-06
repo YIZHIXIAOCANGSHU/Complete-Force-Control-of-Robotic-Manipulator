@@ -154,16 +154,26 @@ def test_c_fk_matches_mujoco_tcp_pose_in_body0422_frame(tmp_path: Path):
 def test_python_to_c_control_packet_contains_feedback_and_target_without_dt():
     from state_packets import (
         BODY_Q_OFFSET,
+        CONTROL_OUTPUT_PACKET_SIZE,
         CONTROL_INPUT_PACKET_SIZE,
         LEFT_TARGET_POS_OFFSET,
         LEFT_TARGET_QUAT_OFFSET,
+        OUTPUT_REF_POS_OFFSET,
+        OUTPUT_REF_QUAT_OFFSET,
+        OUTPUT_TAU_OFFSET,
         QD_OFFSET,
         RIGHT_TARGET_POS_OFFSET,
         RIGHT_TARGET_QUAT_OFFSET,
+        TORQUE_OUTPUT_PACKET_SIZE,
         fill_control_input_packet,
     )
 
     assert CONTROL_INPUT_PACKET_SIZE == 45
+    assert OUTPUT_TAU_OFFSET == 0
+    assert OUTPUT_REF_POS_OFFSET == 14
+    assert OUTPUT_REF_QUAT_OFFSET == 20
+    assert CONTROL_OUTPUT_PACKET_SIZE == 28
+    assert TORQUE_OUTPUT_PACKET_SIZE == CONTROL_OUTPUT_PACKET_SIZE
 
     packet = np.empty(CONTROL_INPUT_PACKET_SIZE, dtype=np.float64)
     fill_control_input_packet(
@@ -299,6 +309,43 @@ def test_control_compute_gravity_torque_arm_matches_rbdl_gravity(tmp_path: Path)
           control_compute_gravity_torque_arm(ARM_RIGHT, q, tau_helper);
           build_am_d02_arm_model(ARM_RIGHT, &model);
           rbdl_calc_gravity(&model, q, tau_expected);
+
+          for (int i = 0; i < 7; ++i) {
+            double diff = fabs(tau_helper[i] - tau_expected[i]);
+            if (diff > max_diff) {
+              max_diff = diff;
+            }
+          }
+          printf("%.12f\\n", max_diff);
+          return 0;
+        }
+        """
+    )
+    probe = _compile_c_probe(tmp_path, source)
+    max_diff = float(subprocess.check_output([str(probe)], text=True).strip())
+
+    assert max_diff < 1e-9
+
+
+def test_control_compute_gc_torque_arm_matches_rbdl_gc(tmp_path: Path):
+    source = textwrap.dedent(
+        """
+        #include "control_logic.h"
+        #include <math.h>
+        #include <stdio.h>
+
+        int main(void) {
+          double q[7] = {0.2, -0.1, 0.3, 1.1, -0.2, 0.4, -0.15};
+          double qd[7] = {0.7, -0.3, 0.2, -0.1, 0.05, -0.4, 0.6};
+          double tau_helper[7];
+          double tau_expected[7];
+          double max_diff = 0.0;
+          RBDLModel model;
+
+          control_init();
+          control_compute_gc_torque_arm(ARM_RIGHT, q, qd, tau_helper);
+          build_am_d02_arm_model(ARM_RIGHT, &model);
+          rbdl_calc_gc(&model, q, qd, tau_expected);
 
           for (int i = 0; i < 7; ++i) {
             double diff = fabs(tau_helper[i] - tau_expected[i]);
@@ -721,12 +768,33 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_recovers(
           return sum;
         }
 
+        static double tau_gc_abs_sum(const stm_output_t *out) {
+          double sum = 0.0;
+          for (int i = 0; i < NUM_JOINTS; ++i) {
+            sum += fabs(out->tau_gc[i]);
+          }
+          return sum;
+        }
+
+        static double ref_abs_sum(const stm_output_t *out) {
+          double sum = 0.0;
+          for (int arm = 0; arm < NUM_ARMS; ++arm) {
+            for (int i = 0; i < 3; ++i) {
+              sum += fabs(out->ref_pos[arm][i]);
+            }
+            for (int i = 0; i < 4; ++i) {
+              sum += fabs(out->ref_quat[arm][i]);
+            }
+          }
+          return sum;
+        }
+
         static void step_and_print(const char *label, stm_input_t *in,
                                    stm_output_t *out, double elapsed_s) {
           stm_controller_step_elapsed(in, out, elapsed_s);
-          printf("%s %d %.12f %d %.6f\\n", label, out->status,
-                 tau_abs_sum(out), g_controller.safety_latched,
-                 out->traj_t);
+          printf("%s %d %.12f %.12f %.12f %d %.6f\\n", label, out->status,
+                 tau_abs_sum(out), tau_gc_abs_sum(out),
+                 ref_abs_sum(out), g_controller.safety_latched, out->traj_t);
         }
 
         int main(void) {
@@ -770,12 +838,16 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_recovers(
             label,
             status,
             tau_sum,
+            tau_gc_sum,
+            ref_sum,
             latched,
             traj_t,
         ) = line.split()
         rows[label] = {
             "status": int(status),
             "tau_sum": float(tau_sum),
+            "tau_gc_sum": float(tau_gc_sum),
+            "ref_sum": float(ref_sum),
             "latched": int(latched),
             "traj_t": float(traj_t),
         }
@@ -784,10 +856,14 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_recovers(
 
     assert rows["pos_limit"]["status"] == -1
     assert rows["pos_limit"]["tau_sum"] == pytest.approx(0.0)
+    assert rows["pos_limit"]["tau_gc_sum"] == pytest.approx(0.0)
+    assert rows["pos_limit"]["ref_sum"] == pytest.approx(0.0)
     assert rows["pos_limit"]["latched"] == 1
 
     assert rows["not_zero_qd"]["status"] == -2
     assert rows["not_zero_qd"]["tau_sum"] == pytest.approx(0.0)
+    assert rows["not_zero_qd"]["tau_gc_sum"] == pytest.approx(0.0)
+    assert rows["not_zero_qd"]["ref_sum"] == pytest.approx(0.0)
     assert rows["not_zero_qd"]["latched"] == 1
 
     assert rows["hold_02"]["status"] == -2
@@ -802,6 +878,8 @@ def test_stm_controller_safety_latch_outputs_zero_until_zero_hold_then_recovers(
     assert rows["hold_10"]["status"] == -2
     assert rows["hold_10"]["latched"] == 0
     assert rows["hold_10"]["tau_sum"] == pytest.approx(0.0)
+    assert rows["hold_10"]["tau_gc_sum"] == pytest.approx(0.0)
+    assert rows["hold_10"]["ref_sum"] == pytest.approx(0.0)
 
     assert rows["recovered"]["status"] == 0
     assert rows["recovered"]["latched"] == 0
@@ -941,6 +1019,17 @@ def test_stm_controller_active_arm_mask_controls_only_selected_arm(tmp_path: Pat
           return sum;
         }
 
+        static double arm_ref_abs_sum(const stm_output_t *out, int arm) {
+          double sum = 0.0;
+          for (int i = 0; i < 3; ++i) {
+            sum += fabs(out->ref_pos[arm][i]);
+          }
+          for (int i = 0; i < 4; ++i) {
+            sum += fabs(out->ref_quat[arm][i]);
+          }
+          return sum;
+        }
+
         int main(void) {
           stm_input_t in;
           stm_output_t out;
@@ -953,9 +1042,13 @@ def test_stm_controller_active_arm_mask_controls_only_selected_arm(tmp_path: Pat
           in.qd[ARM_RIGHT * ARM_JOINTS] = NAN;
           stm_controller_reset();
           stm_controller_step_elapsed(&in, &out, 0.001);
-          printf("left %d %.12f %.12f\\n", out.status,
+          printf("left %d %.12f %.12f %.12f %.12f %.12f %.12f\\n", out.status,
                  abs_sum(out.tau, 0, ARM_JOINTS),
-                 abs_sum(out.tau, ARM_JOINTS, ARM_JOINTS));
+                 abs_sum(out.tau, ARM_JOINTS, ARM_JOINTS),
+                 abs_sum(out.tau_gc, 0, ARM_JOINTS),
+                 abs_sum(out.tau_gc, ARM_JOINTS, ARM_JOINTS),
+                 arm_ref_abs_sum(&out, ARM_LEFT),
+                 arm_ref_abs_sum(&out, ARM_RIGHT));
 
           fill_input(&in);
           in.active_arm_mask = STM_ARM_MASK_RIGHT;
@@ -963,17 +1056,25 @@ def test_stm_controller_active_arm_mask_controls_only_selected_arm(tmp_path: Pat
           in.qd[0] = NAN;
           stm_controller_reset();
           stm_controller_step_elapsed(&in, &out, 0.001);
-          printf("right %d %.12f %.12f\\n", out.status,
+          printf("right %d %.12f %.12f %.12f %.12f %.12f %.12f\\n", out.status,
                  abs_sum(out.tau, 0, ARM_JOINTS),
-                 abs_sum(out.tau, ARM_JOINTS, ARM_JOINTS));
+                 abs_sum(out.tau, ARM_JOINTS, ARM_JOINTS),
+                 abs_sum(out.tau_gc, 0, ARM_JOINTS),
+                 abs_sum(out.tau_gc, ARM_JOINTS, ARM_JOINTS),
+                 arm_ref_abs_sum(&out, ARM_LEFT),
+                 arm_ref_abs_sum(&out, ARM_RIGHT));
 
           fill_input(&in);
           in.active_arm_mask = 0;
           stm_controller_reset();
           stm_controller_step_elapsed(&in, &out, 0.001);
-          printf("default %d %.12f %.12f\\n", out.status,
+          printf("default %d %.12f %.12f %.12f %.12f %.12f %.12f\\n", out.status,
                  abs_sum(out.tau, 0, ARM_JOINTS),
-                 abs_sum(out.tau, ARM_JOINTS, ARM_JOINTS));
+                 abs_sum(out.tau, ARM_JOINTS, ARM_JOINTS),
+                 abs_sum(out.tau_gc, 0, ARM_JOINTS),
+                 abs_sum(out.tau_gc, ARM_JOINTS, ARM_JOINTS),
+                 arm_ref_abs_sum(&out, ARM_LEFT),
+                 arm_ref_abs_sum(&out, ARM_RIGHT));
           return 0;
         }
         """
@@ -981,22 +1082,38 @@ def test_stm_controller_active_arm_mask_controls_only_selected_arm(tmp_path: Pat
     probe = _compile_c_probe(tmp_path, source)
     rows = {}
     for line in subprocess.check_output([str(probe)], text=True).splitlines():
-        label, status, left_sum, right_sum = line.split()
+        label, status, left_sum, right_sum, left_gc_sum, right_gc_sum, left_ref_sum, right_ref_sum = line.split()
         rows[label] = {
             "status": int(status),
             "left_sum": float(left_sum),
             "right_sum": float(right_sum),
+            "left_gc_sum": float(left_gc_sum),
+            "right_gc_sum": float(right_gc_sum),
+            "left_ref_sum": float(left_ref_sum),
+            "right_ref_sum": float(right_ref_sum),
         }
 
     assert rows["left"]["status"] == 0
     assert rows["left"]["left_sum"] > 0.0
     assert rows["left"]["right_sum"] == pytest.approx(0.0)
+    assert rows["left"]["left_gc_sum"] > 0.0
+    assert rows["left"]["right_gc_sum"] == pytest.approx(0.0)
+    assert rows["left"]["left_ref_sum"] > 0.0
+    assert rows["left"]["right_ref_sum"] == pytest.approx(0.0)
     assert rows["right"]["status"] == 0
     assert rows["right"]["left_sum"] == pytest.approx(0.0)
     assert rows["right"]["right_sum"] > 0.0
+    assert rows["right"]["left_gc_sum"] == pytest.approx(0.0)
+    assert rows["right"]["right_gc_sum"] > 0.0
+    assert rows["right"]["left_ref_sum"] == pytest.approx(0.0)
+    assert rows["right"]["right_ref_sum"] > 0.0
     assert rows["default"]["status"] == 0
     assert rows["default"]["left_sum"] > 0.0
     assert rows["default"]["right_sum"] > 0.0
+    assert rows["default"]["left_gc_sum"] > 0.0
+    assert rows["default"]["right_gc_sum"] > 0.0
+    assert rows["default"]["left_ref_sum"] > 0.0
+    assert rows["default"]["right_ref_sum"] > 0.0
 
 
 def test_stm_controller_single_arm_safety_recovery_uses_selected_arm_velocity_only(
@@ -1508,7 +1625,7 @@ def test_c_sim_main_keeps_running_during_safety_recovery():
     assert "STM_STATUS_SAFETY_LATCHED" in main_source
     assert "STM_STATUS_WAITING_ZERO" in main_source
     assert main_source.index("if (stm_out.status != last_status)") < main_source.index(
-        "sim_apply_torque(stm_out.tau)"
+        "sim_apply_control_output(stm_out.tau, stm_out.ref_pos,"
     )
 
 
@@ -1638,7 +1755,7 @@ def test_stm_controller_elapsed_advances_internal_endpoint_reference(tmp_path: P
     ]
 
     assert path_length == pytest.approx(0.04)
-    assert duration == pytest.approx(1.875 * 0.04 / 0.05)
+    assert duration == pytest.approx(1.875 * 0.04 / 0.01)
     assert path_time == pytest.approx(0.02)
     assert progress == pytest.approx(expected_progress)
     assert 0.0 < progress < linear_step
@@ -1691,9 +1808,9 @@ def test_quintic_path_reference_velocity_starts_zero_peaks_and_stops(tmp_path: P
         float(value) for value in subprocess.check_output([str(probe)], text=True).split()
     ]
 
-    assert duration == pytest.approx(1.875 * 0.04 / 0.05)
+    assert duration == pytest.approx(1.875 * 0.04 / 0.01)
     assert twist_start == pytest.approx(0.0)
-    assert twist_mid == pytest.approx(0.05)
+    assert twist_mid == pytest.approx(0.01)
     assert twist_end == pytest.approx(0.0)
     assert progress_mid == pytest.approx(0.02)
     assert progress_end == pytest.approx(0.04)
@@ -1751,7 +1868,7 @@ def test_cartesian_reference_velocity_feedback_tracks_tcp_speed_from_qd(tmp_path
         float(value) for value in subprocess.check_output([str(probe)], text=True).split()
     ]
 
-    assert speed == pytest.approx(0.05)
+    assert speed == pytest.approx(0.01)
     assert tau_slow > 0.0
     assert tau_slow - tau_fast == pytest.approx(0.5 * Config.KD_CART_X * speed)
     assert tau_fast < tau_slow
@@ -1807,7 +1924,7 @@ def test_cartesian_real_tcp_speed_limit_brakes_along_current_velocity(tmp_path: 
         float(value) for value in subprocess.check_output([str(probe)], text=True).split()
     ]
 
-    assert limit == pytest.approx(0.05)
+    assert limit == pytest.approx(0.02)
     assert tau_at_rest > 0.0
     assert tau_over_limit < 0.0
 
@@ -1939,7 +2056,7 @@ def test_endpoint_velocity_defaults_are_real_safe_tuned(tmp_path: Path):
     values = [float(value) for value in subprocess.check_output([str(probe)], text=True).split()]
 
     assert values == pytest.approx(
-        [0.05, 0.05, 0.0025, 0.005, 0.02, 0.0001, 0.0005, 5.0, 0.01]
+        [0.01, 0.02, 0.0025, 0.005, 0.02, 0.0001, 0.0005, 5.0, 0.01]
     )
     config_text = (PROJECT_ROOT / "stm32_code" / "config.h").read_text(encoding="utf-8")
     assert "WAYPOINT_" not in config_text
@@ -1977,25 +2094,25 @@ def test_c_control_core_has_no_nullspace_output_chain():
 def test_python_config_mirrors_c_endpoint_control_defaults():
     from config import Config
 
-    assert Config.END_EFFECTOR_LINEAR_SPEED_MPS == pytest.approx(0.05)
-    assert Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS == pytest.approx(0.05)
+    assert Config.END_EFFECTOR_LINEAR_SPEED_MPS == pytest.approx(0.01)
+    assert Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS == pytest.approx(0.02)
     assert Config.JOINT_VEL_LIMIT == pytest.approx(5.0)
     assert [Config.KP_CART_X, Config.KP_CART_Y, Config.KP_CART_Z] == pytest.approx(
-        [300.0, 300.0, 300.0]
+        [10.0, 10.0, 10.0]
     )
     assert [
         Config.KP_CART_ROLL,
         Config.KP_CART_PITCH,
         Config.KP_CART_YAW,
-    ] == pytest.approx([8.0, 8.0, 8.0])
+    ] == pytest.approx([0.5, 0.5, 0.5])
     assert [Config.KD_CART_X, Config.KD_CART_Y, Config.KD_CART_Z] == pytest.approx(
-        [90.0, 90.0, 90.0]
+        [2.0, 2.0, 2.0]
     )
     assert [
         Config.KD_CART_ROLL,
         Config.KD_CART_PITCH,
         Config.KD_CART_YAW,
-    ] == pytest.approx([4.0, 4.0, 4.0])
+    ] == pytest.approx([0.2, 0.2, 0.2])
 
 
 def test_stm_controller_step_elapsed_hot_path_benchmark_probe(tmp_path: Path):

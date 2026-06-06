@@ -27,8 +27,11 @@ typedef struct {
   int32_t status;
   double tau[NUM_JOINTS];
   double tau_gravity[NUM_JOINTS];
+  double tau_gc[NUM_JOINTS];
   double ee_pos[NUM_ARMS][3];
   double ee_quat[NUM_ARMS][4];
+  double ref_pos[NUM_ARMS][3];
+  double ref_quat[NUM_ARMS][4];
   double ee_twist[NUM_ARMS][6];
   double traj_t;
   int32_t step_count;
@@ -46,6 +49,7 @@ static void run_fk_only(const real_input_t *in, real_output_t *out) {
 
   memset(out->tau, 0, sizeof(out->tau));
   memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
+  memset(out->tau_gc, 0, sizeof(out->tau_gc));
   out->status = STM_STATUS_OK;
 
   if (in->body_q[0] == in->body_q[0] && in->body_q[1] == in->body_q[1] &&
@@ -105,8 +109,11 @@ int main(void) {
       out.status = (int32_t)stm_out.status;
       memcpy(out.tau, stm_out.tau, sizeof(out.tau));
       memcpy(out.tau_gravity, stm_out.tau_gravity, sizeof(out.tau_gravity));
+      memcpy(out.tau_gc, stm_out.tau_gc, sizeof(out.tau_gc));
       memcpy(out.ee_pos, stm_out.ee_pos, sizeof(out.ee_pos));
       memcpy(out.ee_quat, stm_out.ee_quat, sizeof(out.ee_quat));
+      memcpy(out.ref_pos, stm_out.ref_pos, sizeof(out.ref_pos));
+      memcpy(out.ref_quat, stm_out.ref_quat, sizeof(out.ref_quat));
       memcpy(out.ee_twist, stm_out.ee_twist, sizeof(out.ee_twist));
       out.traj_t = stm_out.traj_t;
       out.step_count = (int32_t)stm_out.step_count;

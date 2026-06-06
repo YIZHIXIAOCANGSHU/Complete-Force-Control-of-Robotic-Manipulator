@@ -266,6 +266,15 @@ def _augment_scene(
     )
     _add_mocap_marker(
         worldbody,
+        body_name="reference_pose_left",
+        box_size=0.012,
+        box_rgba="1.0 0.62 0.0 0.45",
+        axis_radius=0.0015,
+        axis_half_length=0.04,
+        axis_alpha_suffix="0.65",
+    )
+    _add_mocap_marker(
+        worldbody,
         body_name="target_pose_right",
         box_size=0.015,
         box_rgba="0.2 0.8 0.2 0.3",
@@ -281,6 +290,15 @@ def _augment_scene(
         axis_radius=0.0015,
         axis_half_length=0.04,
         axis_alpha_suffix="0.5",
+    )
+    _add_mocap_marker(
+        worldbody,
+        body_name="reference_pose_right",
+        box_size=0.012,
+        box_rgba="1.0 0.62 0.0 0.45",
+        axis_radius=0.0015,
+        axis_half_length=0.04,
+        axis_alpha_suffix="0.65",
     )
     _add_axis_marker_body(
         worldbody,

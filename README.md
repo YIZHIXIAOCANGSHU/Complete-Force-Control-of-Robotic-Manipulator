@@ -65,6 +65,10 @@
 - `control_summary.json`：闭环误差、力矩、状态计数和目标段信息。
 - `report.md` 与若干 `.svg`：中文报告摘要和可直接引用的工作空间/闭环曲线图。
 
+`mc` 默认使用 `500000` 个随机关节样本，并最多取 `50000` 个末端点参与凸包和内部安全盒计算。
+终端报告会分别输出左臂、右臂的内部轴对齐安全盒，以及左右都可到达的公共交集安全盒；
+这些范围是基于 MuJoCo FK 采样工作空间估计出的 `x/y/z pos` 输入范围。
+
 注意：`sim-report` 输出只代表 MuJoCo 仿真和 C 控制核心证据，不能替代真机验证。
 
 ## 仓库结构
@@ -121,7 +125,7 @@ MuJoCo 里的目标方块会按该相对位姿随 Body0422 一起平移和旋转
 C 端内部从当前 TCP 到最终目标生成五次 S 曲线参考点；host wrapper 传入的 elapsed time
 用于推进该曲线时间，同时累计 `traj_t` 和安全恢复计时。sim UDP 保持一收一发：每收到一帧
 MuJoCo 状态，C 端计算一次力矩并立即发送一次 `tau[14]`。TCP 平移速度由电机回传 `qd`
-经 Jacobian 映射得到的实际末端速度闭环控制，默认 S 曲线峰值线速度为 `0.05 m/s`。
+经 Jacobian 映射得到的实际末端速度闭环控制，默认 S 曲线峰值线速度为 `0.01 m/s`。
 C 侧不再保留默认左臂 7 轴闭环入口；公开控制链路统一使用
 `stm_controller_step_elapsed()`，并可通过 `stm_input_t.active_arm_mask`
 选择左臂、右臂或双臂。本仓库的 UDP 仿真默认填 `STM_ARM_MASK_BOTH`。
@@ -179,7 +183,7 @@ tau = saturate(tau_task + tau_gc, JOINT_TORQUE_LIMIT)
 
 相关参数在 `stm32_code/config.h`：
 
-- `KP_CART_X/Y/Z`、`KD_CART_X/Y/Z`：平移方向刚度和阻尼；当前调参倾向是强终点跟踪。
+- `KP_CART_X/Y/Z`、`KD_CART_X/Y/Z`：平移方向刚度和阻尼；当前默认是真机验证档，优先确认稳定性和方向。
 - `KP_CART_ROLL/PITCH/YAW`、`KD_CART_ROLL/PITCH/YAW`：姿态轴角误差的刚度和阻尼。
 - `KALMAN_Q_VEL`、`KALMAN_R_VEL`：先滤 `qd`，再用于 `v_tcp = J(q) * qd_filtered`、阻尼项和速度安全检查。
 - `JOINT_TORQUE_LIMIT_1..7`：最终输出力矩饱和；调大前要确认驱动器、减速器和机械结构余量。
@@ -464,6 +468,7 @@ both  -> can0 + can1，同时控制 14 轴
 ./run.sh real both
 ./run.sh real both --no-send
 ./run.sh real both --gravity-only
+./run.sh real both --gc-only
 ./run.sh real left --send
 ```
 
@@ -472,11 +477,12 @@ both  -> can0 + can1，同时控制 14 轴
 - `send control`：默认真机闭环模式。C 控制器计算 `tau` 后，TX worker 按 CAN 接口下发 MIT torque。
 - `no-send/observe`：仍读取 CAN 反馈、调用 C 控制器并把计算力矩显示到 Rerun，但实际 CAN 只持续下发全 0 MIT torque。Rerun 中 `tau_raw/tau_total` 用于观察计算结果，`tx_label/tx_str` 标明实际下发为 0。
 - `gravity-only`：仍计算完整控制量并显示到 Rerun，但实际 CAN 只下发纯 `G(q)` 重力补偿，不包含 Coriolis/centrifugal 或笛卡尔 PD 任务力矩。
+- `gc-only`：仍计算完整控制量并显示到 Rerun，但实际 CAN 只下发限幅后的 `G+C` 补偿，也就是 `rbdl_calc_gc(q, qd_filtered, qdd=0)`，不包含笛卡尔 PD 任务力矩。
 - `AM_D02_REAL_FEEDBACK_ONLY=1`：诊断模式。不调用 C 控制器，只镜像反馈并发送 0 keepalive；它和 `--no-send` 不同，不能用于观察控制器计算力矩。
 
-`gravity-only` 不是 C 端单独闭环模式，而是 Python 真机发送层的力矩选择模式：`RealControllerBridge`
-每周期仍调用 C 控制核心，返回完整 `tau` 和单独的 `tau_gravity`；Rerun 继续记录完整 `tau`，
-TX worker 只把当前激活臂的 `tau_gravity = G(q)` 复制到 CAN 下发缓冲，未激活臂保持 0。该模式适合真机上单独验证重力补偿方向、量级和关节符号，不会加入 `G+C` 中的速度相关项，也不会加入 TCP 笛卡尔 PD 任务力矩。
+`gravity-only` 和 `gc-only` 都不是 C 端单独闭环模式，而是 Python 真机发送层的力矩选择模式：`RealControllerBridge`
+每周期仍调用 C 控制核心，返回完整 `tau`、单独的 `tau_gravity = G(q)` 和 `tau_gc = G(q)+C(q, qd)`；Rerun 继续记录完整 `tau`。
+TX worker 在 `gravity-only` 下只复制当前激活臂 `tau_gravity`，在 `gc-only` 下只复制当前激活臂 `tau_gc`，未激活臂保持 0。`gravity-only` 适合单独验证重力补偿方向、量级和关节符号；`gc-only` 适合在不加入 TCP 笛卡尔 PD 任务力矩的情况下验证速度相关动力学补偿。
 
 默认接口可用环境变量覆盖：
 
@@ -488,6 +494,10 @@ AM_D02_CAN_DATA_BITRATE=5000000
 AM_D02_CAN_FORCE_FD=1
 AM_D02_CAN_CONFIGURE_INTERFACE=0
 AM_D02_CAN_FEEDBACK_TIMEOUT_S=0.10
+AM_D02_CAN_RX_BUFFER_BYTES=1048576
+AM_D02_CAN_FILTER_FEEDBACK=1
+AM_D02_REAL_FEEDBACK_BATCH_RX=1
+AM_D02_REAL_FEEDBACK_WAIT_FOR_CONSUME=0
 AM_D02_REAL_CONTROL_TARGET_HZ=1000
 AM_D02_REAL_C_BRIDGE_TIMEOUT_S=0.005
 AM_D02_REAL_STATS_INTERVAL_S=1.0
@@ -497,6 +507,7 @@ AM_D02_REAL_THREAD_JOIN_TIMEOUT_S=2.0
 真机模式启动后会拉起一个 MuJoCo viewer 做镜像对照和目标输入界面：
 
 - CAN 链路内部使用多线程流水线：feedback worker 持续收真实电机反馈，控制线程只消费最新完整 active-arm 快照并调用 `c_interface/real/real_controller`，每个 CAN 接口各有 TX worker 下发 MIT torque。
+- 默认启用 SocketCAN feedback raw filter、1 MiB RX buffer 和 batch RX；hub 使用 latest-only mailbox，积压旧反馈不会逐周期补算，只保留最新完整状态。调试兼容旧路径时可设 `AM_D02_REAL_FEEDBACK_BATCH_RX=0` 或 `AM_D02_REAL_FEEDBACK_WAIT_FOR_CONSUME=1`。
 - 控制链以 1 kHz 为目标预算：feedback worker 有帧时会连续 drain，TX worker 忙时覆盖旧 pending 命令只保留最新力矩，Rerun 和 MuJoCo viewer 不进入 CAN/C 热路径。
 - 主线程负责 MuJoCo viewer，把真实 `q[14] / qd[14]` 镜像到模型中，并读取左右目标块拖拽后的目标位姿。
 - MuJoCo 在 real 模式下不跑真实动力学，也不把 `tau` 施加到物理仿真；它只显示真机反馈姿态、当前 TCP 和目标块。
@@ -531,11 +542,11 @@ AM_D02_SIM_RERUN_QUEUE_SIZE=512
 AM_D02_SIM_UDP_TIMEOUT_S=0.002
 AM_D02_FIX_UNCONTROLLED_JOINTS=1
 AM_D02_ENABLE_BODY_GUI=1
-AM_D02_MC_SAMPLES=50000
+AM_D02_MC_SAMPLES=500000
 AM_D02_MC_SEED=42
-AM_D02_MC_PROGRESS_INTERVAL=200
+AM_D02_MC_PROGRESS_INTERVAL=10000
 AM_D02_MC_MAX_VIS_POINTS=3000
-AM_D02_MC_MAX_HULL_POINTS=12000
+AM_D02_MC_MAX_HULL_POINTS=50000
 ```
 
 `AM_D02_VISUAL_PROFILE=balanced` 是默认档位：保留 MuJoCo viewer 完整交互，但把 Rerun 默认降到 15 Hz / stride 20，并只记录关键性能曲线。需要完整诊断时用 `AM_D02_VISUAL_PROFILE=full`，会恢复 60 FPS viewer、30 Hz Rerun、stride 10、详细 performance 曲线和 sim TCP twist 采样；只追速度时可用 `AM_D02_VISUAL_PROFILE=fast`。

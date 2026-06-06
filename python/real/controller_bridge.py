@@ -43,8 +43,11 @@ class RealControllerOutput:
     status: int
     tau: np.ndarray
     tau_gravity: np.ndarray
+    tau_gc: np.ndarray
     ee_pos: np.ndarray
     ee_quat: np.ndarray
+    ref_pos: np.ndarray
+    ref_quat: np.ndarray
     ee_twist: np.ndarray
     traj_t: float
     step_count: int
@@ -54,7 +57,7 @@ class RealControllerBridge:
     """Low-overhead stdin/stdout bridge for the C real controller."""
 
     _input_struct = struct.Struct("<HBBd14d14d3d6d8d")
-    _output_struct = struct.Struct("<Hi14d14d6d8d12ddi")
+    _output_struct = struct.Struct("<Hi14d14d14d6d8d6d8d12ddi")
 
     def __init__(
         self,
@@ -146,11 +149,14 @@ class RealControllerBridge:
             status=int(parsed[1]),
             tau=np.asarray(parsed[2:16], dtype=np.float64),
             tau_gravity=np.asarray(parsed[16:30], dtype=np.float64),
-            ee_pos=np.asarray(parsed[30:36], dtype=np.float64).reshape(NUM_ARMS, 3),
-            ee_quat=np.asarray(parsed[36:44], dtype=np.float64).reshape(NUM_ARMS, 4),
-            ee_twist=np.asarray(parsed[44:56], dtype=np.float64).reshape(NUM_ARMS, 6),
-            traj_t=float(parsed[56]),
-            step_count=int(parsed[57]),
+            tau_gc=np.asarray(parsed[30:44], dtype=np.float64),
+            ee_pos=np.asarray(parsed[44:50], dtype=np.float64).reshape(NUM_ARMS, 3),
+            ee_quat=np.asarray(parsed[50:58], dtype=np.float64).reshape(NUM_ARMS, 4),
+            ref_pos=np.asarray(parsed[58:64], dtype=np.float64).reshape(NUM_ARMS, 3),
+            ref_quat=np.asarray(parsed[64:72], dtype=np.float64).reshape(NUM_ARMS, 4),
+            ee_twist=np.asarray(parsed[72:84], dtype=np.float64).reshape(NUM_ARMS, 6),
+            traj_t=float(parsed[84]),
+            step_count=int(parsed[85]),
         )
 
     def compute(

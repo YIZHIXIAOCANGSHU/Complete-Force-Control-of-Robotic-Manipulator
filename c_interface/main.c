@@ -5,7 +5,7 @@
  * This file handles simulation-specific tasks:
  * 1. Connecting to the MuJoCo server.
  * 2. Forwarding MuJoCo feedback/target packets to the C closed loop.
- * 3. Applying the fourteen joint torques returned by main_stm.
+ * 3. Applying the control output returned by main_stm.
  */
 
 #include "main_stm.h"
@@ -78,8 +78,9 @@ int main(void) {
       last_status = stm_out.status;
     }
 
-    /* -- 3e. 发送力矩，步进仿真 -- */
-    if (sim_apply_torque(stm_out.tau) < 0) {
+    /* -- 3e. 发送控制输出，步进仿真 -- */
+    if (sim_apply_control_output(stm_out.tau, stm_out.ref_pos,
+                                 stm_out.ref_quat) < 0) {
       printf("[ERROR] Connection lost or simulation closed.\n");
       break;
     }

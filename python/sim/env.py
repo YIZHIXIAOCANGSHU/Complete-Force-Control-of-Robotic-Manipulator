@@ -64,8 +64,13 @@ class MujocoSimEnv:
             [self._get_mocap_id("reported_pose_left"), self._get_mocap_id("reported_pose_right")],
             dtype=np.int32,
         )
+        self.reference_mocap_ids = np.array(
+            [self._get_mocap_id("reference_pose_left"), self._get_mocap_id("reference_pose_right")],
+            dtype=np.int32,
+        )
         self.target_mocap_id = int(self.target_mocap_ids[Config.LEFT_ARM])
         self.reported_mocap_id = int(self.reported_mocap_ids[Config.LEFT_ARM])
+        self.reference_mocap_id = int(self.reference_mocap_ids[Config.LEFT_ARM])
         self.target_frame_body_id = mujoco.mj_name2id(
             self.model,
             mujoco.mjtObj.mjOBJ_BODY,
@@ -85,6 +90,8 @@ class MujocoSimEnv:
         self._unit_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._target_pos_body = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
         self._target_quat = np.tile(self._unit_quat, (Config.NUM_ARMS, 1))
+        self._reference_pos_body = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
+        self._reference_quat = np.zeros((Config.NUM_ARMS, 4), dtype=np.float64)
         self._last_synced_target_mocap_pos = np.full(
             (Config.NUM_ARMS, 3),
             np.nan,
@@ -493,6 +500,60 @@ class MujocoSimEnv:
             arm_quat = None if quat is None else quat[arm]
             self.set_target_pose_base(pos[arm], arm_quat, arm=arm)
 
+    def set_reference_pose(
+        self,
+        pos: np.ndarray,
+        quat: np.ndarray | None = None,
+        arm: int = Config.LEFT_ARM,
+    ) -> None:
+        """设置控制器参考点显示；位置使用 Body0422 动态目标坐标系。"""
+        arm_index = int(arm)
+        self._reference_pos_body[arm_index] = np.asarray(pos, dtype=np.float64)
+        if quat is not None:
+            self._reference_quat[arm_index] = np.asarray(quat, dtype=np.float64)
+        self._sync_target_frame_markers()
+        mujoco.mj_forward(self.model, self.data)
+
+    def set_all_reference_poses(
+        self,
+        pos: np.ndarray,
+        quat: np.ndarray | None = None,
+    ) -> None:
+        """设置左右控制器参考点显示；不会从 viewer 反向写回控制目标。"""
+        pos_values = np.asarray(pos, dtype=np.float64).reshape(Config.NUM_ARMS, 3)
+        quat_values = None if quat is None else np.asarray(quat, dtype=np.float64).reshape(Config.NUM_ARMS, 4)
+        self._reference_pos_body[:] = pos_values
+        if quat_values is not None:
+            self._reference_quat[:] = quat_values
+        self._sync_target_frame_markers()
+
+    def set_all_reference_poses_base(
+        self,
+        pos: np.ndarray,
+        quat: np.ndarray | None = None,
+    ) -> None:
+        """用 base/world 位姿设置 reference marker，内部转换为 Body0422 坐标。"""
+        pos_values = np.asarray(pos, dtype=np.float64).reshape(Config.NUM_ARMS, 3)
+        quat_values = None if quat is None else np.asarray(quat, dtype=np.float64).reshape(Config.NUM_ARMS, 4)
+        self._reference_pos_body[:] = self.base_to_target_frame_pos(pos_values)
+        for arm in range(Config.NUM_ARMS):
+            if quat_values is not None:
+                self._reference_quat[arm] = self.base_to_target_frame_quat(quat_values[arm])
+        self._sync_target_frame_markers()
+
+    def get_all_reference_poses(self) -> tuple[np.ndarray, np.ndarray]:
+        """获取左右控制器参考点；位置使用 Body0422 动态目标坐标系。"""
+        return self._reference_pos_body.copy(), self._reference_quat.copy()
+
+    def get_all_reference_poses_base(self) -> tuple[np.ndarray, np.ndarray]:
+        """获取左右控制器参考点；位置转换到 base/world 坐标用于显示。"""
+        quat_base = np.zeros((Config.NUM_ARMS, 4), dtype=np.float64)
+        for arm in range(Config.NUM_ARMS):
+            quat = self._reference_quat[arm]
+            if np.all(np.isfinite(quat)) and np.linalg.norm(quat) > 1e-12:
+                quat_base[arm] = self.target_frame_to_base_quat(quat)
+        return self.target_frame_to_base_pos(self._reference_pos_body), quat_base
+
     def get_target_pose(self, arm: int = Config.LEFT_ARM) -> tuple[np.ndarray, np.ndarray]:
         """获取目标位姿；位置使用 Body0422 动态目标坐标系。"""
         arm_index = int(arm)
@@ -551,6 +612,20 @@ class MujocoSimEnv:
             self.data.mocap_quat[mocap_id] = target_quat_base[arm]
             self._last_synced_target_mocap_pos[arm] = target_base[arm]
             self._last_synced_target_mocap_quat[arm] = target_quat_base[arm]
+
+        reference_base = self.target_frame_to_base_pos(self._reference_pos_body)
+        for arm in range(Config.NUM_ARMS):
+            mocap_id = int(self.reference_mocap_ids[arm])
+            if mocap_id < 0:
+                continue
+            quat = self._reference_quat[arm]
+            if np.all(np.isfinite(quat)) and np.linalg.norm(quat) > 1e-12:
+                reference_quat_base = self.target_frame_to_base_quat(quat)
+                self.data.mocap_pos[mocap_id] = reference_base[arm]
+                self.data.mocap_quat[mocap_id] = reference_quat_base
+            else:
+                self.data.mocap_pos[mocap_id] = origin
+                self.data.mocap_quat[mocap_id] = target_frame_quat
 
     def get_jacobian_7dof(self, arm: int = Config.LEFT_ARM) -> np.ndarray:
         """

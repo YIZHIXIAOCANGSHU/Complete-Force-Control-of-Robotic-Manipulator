@@ -79,21 +79,21 @@
  * KD_CART_* 调大: 阻尼更强、超调更小，但过大可能放大速度噪声并让动作发涩。
  * XYZ 单位近似 N/m；ROLL/PITCH/YAW 作用在轴角姿态误差上。
  */
-#define KP_CART_X 300.0
-#define KP_CART_Y 300.0
-#define KP_CART_Z 300.0
+#define KP_CART_X 10.0
+#define KP_CART_Y 10.0
+#define KP_CART_Z 10.0
 
-#define KD_CART_X 90.0
-#define KD_CART_Y 90.0
-#define KD_CART_Z 90.0
+#define KD_CART_X 2.0
+#define KD_CART_Y 2.0
+#define KD_CART_Z 2.0
 
-#define KP_CART_ROLL 8.0
-#define KP_CART_PITCH 8.0
-#define KP_CART_YAW 8.0
+#define KP_CART_ROLL 0.5
+#define KP_CART_PITCH 0.5
+#define KP_CART_YAW 0.5
 
-#define KD_CART_ROLL 4.0
-#define KD_CART_PITCH 4.0
-#define KD_CART_YAW 4.0
+#define KD_CART_ROLL 0.2
+#define KD_CART_PITCH 0.2
+#define KD_CART_YAW 0.2
 
 /* ================================================================
  *  力矩限制
@@ -213,8 +213,8 @@
  * END_EFFECTOR_LINEAR_SPEED_MPS 表示 S 曲线峰值线速度。实际 TCP 速度由
  * v_tcp = J(q) * qd 估计，并在笛卡尔阻尼项中闭环跟踪 ref_twist。
  */
-#define END_EFFECTOR_LINEAR_SPEED_MPS 0.05
-#define END_EFFECTOR_REAL_SPEED_LIMIT_MPS 0.05
+#define END_EFFECTOR_LINEAR_SPEED_MPS 0.01
+#define END_EFFECTOR_REAL_SPEED_LIMIT_MPS 0.02
 #define END_EFFECTOR_TARGET_POS_TOL_M 0.0025
 #define END_EFFECTOR_TARGET_ORI_TOL_RAD 0.005
 #define END_EFFECTOR_ARRIVAL_SPEED_TOL_MPS 0.02

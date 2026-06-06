@@ -274,9 +274,12 @@ double *q_right = &in.q[ARM_RIGHT * ARM_JOINTS]; /* q[7] */
 ```c
 typedef struct {
   double tau[NUM_JOINTS];
+  double tau_gravity[NUM_JOINTS];
+  double tau_gc[NUM_JOINTS];
   int status;
   double ee_pos[NUM_ARMS][3];
   double ee_quat[NUM_ARMS][4];
+  double ee_twist[NUM_ARMS][6];
   double traj_t;
   int step_count;
 } stm_output_t;
@@ -287,9 +290,12 @@ typedef struct {
 | 字段 | 单位/格式 | 含义 | 平台层建议动作 |
 | --- | --- | --- | --- |
 | `tau[14]` | `Nm` | 左 7 轴 + 右 7 轴期望力矩 | `status == OK` 时下发激活臂力矩；非激活臂和安全态为 0 |
+| `tau_gravity[14]` | `Nm` | 纯重力补偿 `G(q)` | 诊断重力方向/量级；非激活臂和安全态为 0 |
+| `tau_gc[14]` | `Nm` | 限幅后的重力 + 科氏/离心补偿 `G(q)+C(q,qd)` | 可用于只下发动力学补偿；非激活臂和安全态为 0 |
 | `status` | 枚举整数 | 本轮控制/安全状态 | `< 0` 时禁止继续正常力矩控制 |
 | `ee_pos[2][3]` | `m` | 控制器 FK 得到的实际 TCP 位置 | 用于调试、日志、上位机显示 |
 | `ee_quat[2][4]` | `wxyz` | 控制器 FK 得到的实际 TCP 姿态 | 用于调试、日志、上位机显示 |
+| `ee_twist[2][6]` | `m/s, rad/s` | 控制器 `J(q) * qd_filtered` 得到的 TCP twist | 用于调试速度反馈和限速 |
 | `traj_t` | `s` | 控制器内部累计时间 | 用于诊断 elapsed 是否正确传入 |
 | `step_count` | 次 | 控制器调用次数 | 用于诊断主循环是否稳定运行 |
 
@@ -308,7 +314,7 @@ typedef struct {
 - `STM_ARM_MASK_RIGHT`：`tau[0..6] = 0`，`tau[7..13]` 正常计算
 - `STM_ARM_MASK_BOTH` 或 `0`：左右臂都计算
 
-当 `status < 0` 时，控制器会输出全 0 力矩。真机平台层仍应把 `status < 0` 当作安全状态处理。
+当 `status < 0` 时，控制器会输出全 0 的 `tau`、`tau_gravity` 和 `tau_gc`。真机平台层仍应把 `status < 0` 当作安全状态处理。
 
 ### `status`
 
@@ -352,7 +358,7 @@ typedef struct {
 
 其余数据与 STM 核心输入一致：`active_arm_mask`、`q[14]`、`qd[14]`、`body_q[3]`、`target_pos[2][3]`、`target_quat[2][4]`。
 
-当前 PC 输出包也只是包装了核心输出：`status`、`tau[14]`、`ee_pos[2][3]`、`ee_quat[2][4]`、`traj_t`、`step_count`。如果你直接移植到 STM32H7，不需要保留 `magic/mode` 或 stdin/stdout 逻辑。
+当前 PC 输出包也只是包装了核心输出：`status`、`tau[14]`、`tau_gravity[14]`、`tau_gc[14]`、`ee_pos[2][3]`、`ee_quat[2][4]`、`ee_twist[2][6]`、`traj_t`、`step_count`。如果你直接移植到 STM32H7，不需要保留 `magic/mode` 或 stdin/stdout 逻辑。
 
 ## 默认躯干角和目标位姿
 
@@ -507,7 +513,7 @@ direction = (target_pos - start_pos) / L
 duration_s = 1.875 * L / END_EFFECTOR_LINEAR_SPEED_MPS
 ```
 
-其中 `END_EFFECTOR_LINEAR_SPEED_MPS` 是五次 S 曲线的峰值线速度。当前配置为 `0.05 m/s`，不是平均速度。
+其中 `END_EFFECTOR_LINEAR_SPEED_MPS` 是五次 S 曲线的峰值线速度。当前配置为 `0.01 m/s`，不是平均速度。
 
 每周期按传入的真实 `elapsed_s` 推进路径时间：
 
@@ -607,10 +613,10 @@ F = K * error + D * (ref_twist - J(q) * qd)
 
 | 参数 | 当前值 | 含义 | 调大 | 调小 |
 | --- | --- | --- | --- | --- |
-| `KP_CART_X/Y/Z` | `170` | TCP 平移刚度，近似 `N/m` | 跟踪更硬、误差更小，但更容易超速/振荡/力矩饱和 | 更柔顺、更安全，但误差变大、收敛慢 |
-| `KD_CART_X/Y/Z` | `65` | TCP 平移阻尼，近似 `N/(m/s)` | 抑制超调和速度误差，但过大会放大速度噪声、动作发涩 | 阻尼不足，容易冲过目标 |
-| `KP_CART_ROLL/PITCH/YAW` | `8` | 姿态轴角误差刚度 | 姿态收敛更快，但腕部力矩可能更大 | 姿态误差收敛慢 |
-| `KD_CART_ROLL/PITCH/YAW` | `4.0` | 姿态角速度阻尼 | 姿态更稳，但速度噪声更敏感 | 姿态容易晃 |
+| `KP_CART_X/Y/Z` | `10` | TCP 平移刚度，近似 `N/m` | 跟踪更硬、误差更小，但更容易超速/振荡/力矩饱和 | 更柔顺、更安全，但误差变大、收敛慢 |
+| `KD_CART_X/Y/Z` | `2` | TCP 平移阻尼，近似 `N/(m/s)` | 抑制超调和速度误差，但过大会放大速度噪声、动作发涩 | 阻尼不足，容易冲过目标 |
+| `KP_CART_ROLL/PITCH/YAW` | `0.5` | 姿态轴角误差刚度 | 姿态收敛更快，但腕部力矩可能更大 | 姿态误差收敛慢 |
+| `KD_CART_ROLL/PITCH/YAW` | `0.2` | 姿态角速度阻尼 | 姿态更稳，但速度噪声更敏感 | 姿态容易晃 |
 
 推荐真机调参顺序：
 
@@ -625,8 +631,8 @@ F = K * error + D * (ref_twist - J(q) * qd)
 
 | 参数 | 当前值 | 含义 | 调节影响 |
 | --- | --- | --- | --- |
-| `END_EFFECTOR_LINEAR_SPEED_MPS` | `0.05` | 五次 S 曲线峰值 TCP 线速度，单位 `m/s` | 调大路径更快，但加速度、力矩和关节速度峰值都会上升 |
-| `END_EFFECTOR_REAL_SPEED_LIMIT_MPS` | `0.05` | 基于 `J(q) * qd_filtered` 的真实 TCP 线速度限幅，单位 `m/s` | 调大允许实际末端更快；调小会更早进入制动 |
+| `END_EFFECTOR_LINEAR_SPEED_MPS` | `0.01` | 五次 S 曲线峰值 TCP 线速度，单位 `m/s` | 调大路径更快，但加速度、力矩和关节速度峰值都会上升 |
+| `END_EFFECTOR_REAL_SPEED_LIMIT_MPS` | `0.02` | 基于 `J(q) * qd_filtered` 的真实 TCP 线速度限幅，单位 `m/s` | 调大允许实际末端更快；调小会更早进入制动 |
 | `END_EFFECTOR_TARGET_POS_TOL_M` | `0.0025` | 位置到点容差，单位 `m` | 调小更精确但更难判定到点；调大更容易结束 |
 | `END_EFFECTOR_TARGET_ORI_TOL_RAD` | `0.005` | 姿态到点容差，单位 `rad` | 调小姿态要求更严，可能停留更久 |
 | `END_EFFECTOR_ARRIVAL_SPEED_TOL_MPS` | `0.02` | 到点时 TCP 切向速度阈值，单位 `m/s` | 调小要求更稳才到点；调大可能还在滑动时判定到点 |

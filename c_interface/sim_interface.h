@@ -33,10 +33,18 @@ void sim_get_state(double *qpos, double *qvel, double ee_pos[2][3],
                    double target_quat[2][4]);
 
 /**
- * 发送控制力矩到仿真环境，并步进仿真。
+ * 发送完整控制输出到仿真环境，并步进仿真。
  * 阻塞等待下一个仿真步的状态返回，从而更新内部的缓存状态。
  * @param tau 关节力矩 (14维)
+ * @param ref_pos 左右参考 TCP 位置 (Body0422 动态目标坐标, 2x3)
+ * @param ref_quat 左右参考 TCP 姿态四元数 [w,x,y,z] (2x4)
  * @return 成功返回0, 超时或失败返回-1
+ */
+int sim_apply_control_output(const double *tau, const double ref_pos[2][3],
+                             const double ref_quat[2][4]);
+
+/**
+ * 兼容旧接口：只发送力矩，reference 字段置 0。
  */
 int sim_apply_torque(const double *tau);
 

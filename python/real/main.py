@@ -39,6 +39,13 @@ def main() -> None:
         const="gravity",
         help="compute full control, but send pure gravity compensation torque G(q) on CAN",
     )
+    send_group.add_argument(
+        "--gc-only",
+        dest="send_mode",
+        action="store_const",
+        const="gc",
+        help="compute full control, but send gravity + Coriolis compensation torque G+C on CAN",
+    )
     args = parser.parse_args()
 
     from real.runtime import run_real_control

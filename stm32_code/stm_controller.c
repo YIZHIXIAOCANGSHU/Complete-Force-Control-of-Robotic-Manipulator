@@ -52,6 +52,20 @@ static int stm_controller_is_finite_vec(const double *values, int count) {
   return 1;
 }
 
+static double stm_controller_clamp_joint_torque(double value, int joint) {
+  double limit = TORQUE_LIMIT_CHECK[joint];
+  if (!isfinite(value)) {
+    return value;
+  }
+  if (value > limit) {
+    return limit;
+  }
+  if (value < -limit) {
+    return -limit;
+  }
+  return value;
+}
+
 static void stm_controller_clear_target_state(void) {
   memset(g_controller.target_valid, 0, sizeof(g_controller.target_valid));
   memset(g_controller.target_pos, 0, sizeof(g_controller.target_pos));
@@ -385,9 +399,18 @@ static void stm_controller_prepare_output(stm_output_t *out) {
   out->status = STM_STATUS_SAFETY_LATCHED;
 }
 
+static void stm_controller_zero_command_output(stm_output_t *out) {
+  memset(out->tau, 0, sizeof(out->tau));
+  memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
+  memset(out->tau_gc, 0, sizeof(out->tau_gc));
+  memset(out->ref_pos, 0, sizeof(out->ref_pos));
+  memset(out->ref_quat, 0, sizeof(out->ref_quat));
+}
+
 static int stm_controller_check_joint_safety(const double q[NUM_JOINTS],
                                              const double qd[NUM_JOINTS],
                                              const double tau[NUM_JOINTS],
+                                             const double tau_gc[NUM_JOINTS],
                                              uint8_t active_arm_mask) {
   uint8_t mask = stm_controller_normalize_arm_mask(active_arm_mask);
 
@@ -421,6 +444,10 @@ static int stm_controller_check_joint_safety(const double q[NUM_JOINTS],
       int joint = offset + i;
       if (!isfinite(tau[joint])) {
         STM_LOG_ERROR("[SAFETY] J%d torque is non-finite.\n", joint + 1);
+        return -1;
+      }
+      if (!isfinite(tau_gc[joint])) {
+        STM_LOG_ERROR("[SAFETY] J%d gc torque is non-finite.\n", joint + 1);
         return -1;
       }
       if (fabs(tau[joint]) > TORQUE_LIMIT_CHECK[joint]) {
@@ -482,8 +509,7 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
 
   if (stm_controller_update_safety_recovery(in->qd, elapsed_s)) {
     out->status = STM_STATUS_WAITING_ZERO;
-    memset(out->tau, 0, sizeof(out->tau));
-    memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
+    stm_controller_zero_command_output(out);
     goto finalize_step;
   }
 
@@ -507,8 +533,7 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
       stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
                                         active_arm_mask);
       out->status = STM_STATUS_SAFETY_LATCHED;
-      memset(out->tau, 0, sizeof(out->tau));
-      memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
+      stm_controller_zero_command_output(out);
       goto finalize_step;
     }
     control_filter_velocities_arm(arm, in->qd + offset, filtered_qd + offset);
@@ -516,6 +541,13 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
                                            &arm_kinematics[arm]);
     control_compute_gravity_torque_arm(arm, in->q + offset,
                                        out->tau_gravity + offset);
+    control_compute_gc_torque_arm(arm, in->q + offset, filtered_qd + offset,
+                                  out->tau_gc + offset);
+    for (int i = 0; i < ARM_JOINTS; ++i) {
+      int joint = offset + i;
+      out->tau_gc[joint] =
+          stm_controller_clamp_joint_torque(out->tau_gc[joint], joint);
+    }
     memcpy(out->ee_pos[arm], arm_kinematics[arm].pos, sizeof(double) * 3);
     memcpy(out->ee_quat[arm], arm_kinematics[arm].quat_wxyz,
            sizeof(double) * 4);
@@ -529,8 +561,7 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
       stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
                                         active_arm_mask);
       out->status = STM_STATUS_SAFETY_LATCHED;
-      memset(out->tau, 0, sizeof(out->tau));
-      memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
+      stm_controller_zero_command_output(out);
       goto finalize_step;
     }
   }
@@ -551,6 +582,8 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
     if (stm_controller_path_arrived(path, &arm_kinematics[arm], v_tcp[arm])) {
       memset(ref_twist[arm], 0, sizeof(ref_twist[arm]));
     }
+    memcpy(out->ref_pos[arm], path->ref_pos, sizeof(out->ref_pos[arm]));
+    memcpy(out->ref_quat[arm], path->ref_quat, sizeof(out->ref_quat[arm]));
     control_step_v2_arm_with_reference(arm, path->ref_pos, path->ref_quat,
                                        ref_twist[arm], in->q + offset,
                                        filtered_qd + offset,
@@ -558,15 +591,14 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
                                        out->tau + offset);
   }
 
-  if (stm_controller_check_joint_safety(in->q, filtered_qd, out->tau,
+  if (stm_controller_check_joint_safety(in->q, filtered_qd, out->tau, out->tau_gc,
                                         active_arm_mask) == 0) {
     out->status = STM_STATUS_OK;
   } else {
     stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
                                       active_arm_mask);
     out->status = STM_STATUS_SAFETY_LATCHED;
-    memset(out->tau, 0, sizeof(out->tau));
-    memset(out->tau_gravity, 0, sizeof(out->tau_gravity));
+    stm_controller_zero_command_output(out);
   }
 
 finalize_step:

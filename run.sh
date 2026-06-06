@@ -77,6 +77,7 @@ show_real_send_menu() {
     echo "  1) send control     - 正常下发 C/STM32 计算力矩"
     echo "  2) no-send/observe  - CAN 只下发 0，计算结果只显示到 Rerun"
     echo "  3) gravity-only     - 只下发纯重力补偿 G(q)"
+    echo "  4) gc-only          - 只下发重力 + 科氏/离心补偿 G+C"
     echo "  q) 退出"
     echo "----------------------------------------------------------"
 }
@@ -127,6 +128,10 @@ select_real_send_from_menu() {
                 ;;
             3)
                 REAL_SEND_ARG="--gravity-only"
+                break
+                ;;
+            4)
+                REAL_SEND_ARG="--gc-only"
                 break
                 ;;
             q|Q)

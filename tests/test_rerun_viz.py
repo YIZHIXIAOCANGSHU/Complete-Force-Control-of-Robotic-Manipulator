@@ -112,6 +112,36 @@ def _text_logs(dummy_rr: DummyRR) -> list[str]:
     ]
 
 
+def _first_level_tab_names(blueprint) -> list[str]:
+    root = blueprint["root"]
+    assert root["kind"] == "Tabs"
+    return [child.get("name") for child in root["children"]]
+
+
+def _first_level_tab(blueprint, name: str):
+    root = blueprint["root"]
+    assert root["kind"] == "Tabs"
+    for child in root["children"]:
+        if child.get("name") == name:
+            return child
+    raise AssertionError(f"Missing first-level tab {name}")
+
+
+def _child_by_name(node, name: str):
+    for child in node.get("children", []):
+        if child.get("name") == name:
+            return child
+    raise AssertionError(f"Missing child {name}")
+
+
+def _time_series_origins(node) -> set[str]:
+    return {
+        child["origin"]
+        for child in _iter_nodes(node)
+        if child.get("kind") == "TimeSeriesView"
+    }
+
+
 def test_sim_udp_server_passes_step_count_to_rerun_logger():
     source = (Path(__file__).resolve().parents[1] / "python" / "sim" / "udp_server.py").read_text(
         encoding="utf-8"
@@ -201,10 +231,16 @@ def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
     tab_names = {
         node["name"]
         for node in _iter_nodes(dummy_rr.blueprint)
-        if node.get("kind") in ("Vertical", "Spatial3DView", "TimeSeriesView", "TextLogView") and node.get("name")
+        if node.get("kind") in ("Tabs", "Vertical", "Spatial3DView", "TimeSeriesView", "TextLogView")
+        and node.get("name")
     }
     expected_tabs = {
+        "Status",
         "3D",
+        "Tracking Detail",
+        "Joint Detail",
+        "Torque Detail",
+        "Safety",
         "Left Position",
         "Right Position",
         "Left Rotation",
@@ -230,6 +266,83 @@ def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
     assert "Right Arm" not in tab_names
 
 
+def test_setup_realtime_styles_adds_status_dashboard_without_removing_details(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+    monkeypatch.setattr(rerun_viz, "rrb", DummyRRB)
+
+    rerun_viz.setup_realtime_styles()
+
+    assert _first_level_tab_names(dummy_rr.blueprint)[:7] == [
+        "Status",
+        "3D",
+        "Tracking Detail",
+        "Joint Detail",
+        "Torque Detail",
+        "Safety",
+        "Performance",
+    ]
+    status_tab = _first_level_tab(dummy_rr.blueprint, "Status")
+    assert not any(node.get("kind") == "Spatial3DView" for node in _iter_nodes(status_tab))
+    assert status_tab["kind"] == "Tabs"
+    assert [child.get("name") for child in status_tab["children"]] == [
+        "Tracking",
+        "Torque",
+        "Safety",
+        "Link",
+    ]
+
+    tracking_status = _child_by_name(status_tab, "Tracking")
+    assert _time_series_origins(tracking_status) == {
+        "/dashboard/position_error_norm_mm",
+        "/dashboard/reference_error_norm_mm",
+        "/dashboard/rotation_error_norm_deg",
+        "/dashboard/tcp_speed_mps",
+    }
+    assert not any(node.get("kind") == "Spatial3DView" for node in _iter_nodes(tracking_status))
+    assert _time_series_origins(_child_by_name(status_tab, "Torque")) == {
+        "/dashboard/torque_utilization",
+    }
+    assert _time_series_origins(_child_by_name(status_tab, "Safety")) == {
+        "/dashboard/min_joint_limit_margin_rad",
+        "/dashboard/min_velocity_margin_rad_s",
+    }
+    link_origins = _time_series_origins(_child_by_name(status_tab, "Link"))
+    assert link_origins == {
+        "/performance/c_engine_time",
+        "/performance/link_latency",
+        "/performance/link_cycle_hz",
+        "/performance/tx_overwrite_count",
+        "/performance/can_backpressure_count",
+    }
+
+    names_by_origin = {
+        node["origin"]: node["name"]
+        for node in _iter_nodes(dummy_rr.blueprint)
+        if node.get("kind") == "TimeSeriesView"
+    }
+    assert names_by_origin["/dashboard/position_error_norm_mm"] == "Position Error Norm (mm)"
+    assert names_by_origin["/dashboard/reference_error_norm_mm"] == "Reference Error Norm (mm)"
+    assert names_by_origin["/dashboard/rotation_error_norm_deg"] == "Rotation Error Norm (deg)"
+    assert names_by_origin["/dashboard/tcp_speed_mps"] == "TCP Speed (m/s)"
+    assert names_by_origin["/dashboard/torque_utilization"] == "Command Torque Utilization"
+    assert names_by_origin["/dashboard/min_joint_limit_margin_rad"] == "Min Joint Limit Margin (rad)"
+    assert names_by_origin["/dashboard/min_velocity_margin_rad_s"] == "Min Velocity Margin (rad/s)"
+    assert names_by_origin["/performance/link_latency"] == "Control Link Period (ms)"
+    assert names_by_origin["/performance/link_cycle_hz"] == "Control Link Rate (Hz)"
+    assert names_by_origin["/performance/tx_overwrite_count"] == "TX Pending Overwrites"
+    assert names_by_origin["/performance/can_backpressure_count"] == "CAN Backpressure Count"
+
+    assert "/arms/left/fast_status/position_error_norm_mm" in names_by_origin
+    assert "/arms/right/fast_status/reference_error_norm_mm" in names_by_origin
+    assert "/arms/left/position/X" in names_by_origin
+    assert "/arms/right/rotation/Yaw" in names_by_origin
+    assert "/arms/left/joint_q/J1" in names_by_origin
+    assert "/arms/right/torque_gap/J7" in names_by_origin
+    assert "/arms/left/velocity_margin/J1" in names_by_origin
+
+
 def test_setup_realtime_styles_uses_balanced_performance_views_by_default(monkeypatch):
     dummy_rr = DummyRR()
     monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
@@ -246,6 +359,8 @@ def test_setup_realtime_styles_uses_balanced_performance_views_by_default(monkey
     }
     assert "/performance/sim_service_ms" in origins
     assert "/performance/viewer_sync_ms" in origins
+    assert "/performance/tx_overwrite_count" in origins
+    assert "/performance/can_backpressure_count" in origins
     assert "/performance/sim_socket_timeout_count" not in origins
     assert "/performance/viewer_skip_count" not in origins
     assert not _has_log(dummy_rr, "performance/sim_socket_timeout_count")
@@ -362,7 +477,115 @@ def test_log_realtime_step_logs_tcp_speed_and_velocity(monkeypatch):
     assert _logged_scalar(dummy_rr, "arms/left/tcp_speed/linear/value") == pytest.approx(0.005)
     assert _logged_scalar(dummy_rr, "arms/right/tcp_velocity/Z/value") == pytest.approx(-0.002)
     assert _logged_scalar(dummy_rr, "arms/right/tcp_speed/linear/value") == pytest.approx(0.002)
-    assert _logged_scalar(dummy_rr, "limits/tcp_speed/value") == pytest.approx(0.05)
+    assert _logged_scalar(dummy_rr, "limits/tcp_speed/value") == pytest.approx(
+        rerun_viz.Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS
+    )
+
+
+def test_log_realtime_step_logs_reference_pose(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+
+    rerun_viz.log_realtime_step(
+        t=0.1,
+        pos_actual=np.array([[0.10, 0.20, 0.30], [0.40, 0.50, 0.60]], dtype=np.float64),
+        pos_desired=np.zeros((2, 3), dtype=np.float64),
+        pos_reference=np.array([[0.11, 0.22, 0.33], [0.0, 0.0, 0.0]], dtype=np.float64),
+        quat_actual=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)),
+        quat_desired=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)),
+        quat_reference=np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float64),
+        tau_total=np.zeros(rerun_viz.Config.NUM_JOINTS),
+        cycle_time=1.25,
+        step_count=0,
+    )
+
+    assert _logged_scalar(dummy_rr, "arms/left/position/X/reference") == pytest.approx(110.0)
+    assert _logged_scalar(dummy_rr, "arms/left/position/Y/reference") == pytest.approx(220.0)
+    assert _logged_scalar(dummy_rr, "arms/left/rotation/Roll/reference") == pytest.approx(0.0)
+    assert not _has_log(dummy_rr, "arms/right/position/X/reference")
+    assert _has_log(dummy_rr, "trajectory_3d/reference_point")
+    assert _has_log(dummy_rr, "trajectory_3d/reference_error_line")
+
+
+def test_log_realtime_step_logs_fast_status_aggregates(monkeypatch):
+    dummy_rr = DummyRR()
+    monkeypatch.setattr(rerun_viz, "RERUN_AVAILABLE", True)
+    monkeypatch.setattr(rerun_viz, "rr", dummy_rr)
+
+    tau_total = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
+    tau_actual = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
+    tau_raw = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
+    tau_total[0] = 20.0
+    tau_actual[0] = -10.0
+    tau_raw[0] = 40.0
+    tau_total[rerun_viz.Config.ARM_JOINTS] = 20.0
+
+    safe_min, safe_max = rerun_viz._joint_safe_limits_rad()
+    q = (safe_min + safe_max) * 0.5
+    q[0] = safe_min[0] + 0.03
+    q[rerun_viz.Config.ARM_JOINTS] = safe_max[rerun_viz.Config.ARM_JOINTS] - 0.04
+    qd = np.zeros(rerun_viz.Config.NUM_JOINTS, dtype=np.float64)
+    qd[1] = rerun_viz.Config.JOINT_VEL_LIMIT - 0.20
+    qd[rerun_viz.Config.ARM_JOINTS + 1] = -(rerun_viz.Config.JOINT_VEL_LIMIT - 0.30)
+
+    rerun_viz.log_realtime_step(
+        t=0.1,
+        pos_actual=np.array([[0.10, 0.20, 0.30], [0.40, 0.50, 0.60]], dtype=np.float64),
+        pos_desired=np.array([[0.07, 0.16, 0.30], [0.40, 0.45, 0.60]], dtype=np.float64),
+        pos_reference=np.array([[0.10, 0.22, 0.30], [0.0, 0.0, 0.0]], dtype=np.float64),
+        quat_actual=np.array(
+            [[0.9238795325, 0.3826834324, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        quat_desired=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)),
+        quat_reference=np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float64),
+        tau_total=tau_total,
+        tau_actual=tau_actual,
+        tau_raw=tau_raw,
+        q=q,
+        qd=qd,
+        ee_twist=np.array(
+            [[0.003, 0.004, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, -0.002, 0.0, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        cycle_time=1.25,
+        step_count=0,
+    )
+
+    assert _logged_scalar(dummy_rr, "arms/left/fast_status/position_error_norm_mm/value") == pytest.approx(50.0)
+    assert _logged_scalar(dummy_rr, "arms/right/fast_status/position_error_norm_mm/value") == pytest.approx(50.0)
+    assert _logged_scalar(dummy_rr, "dashboard/position_error_norm_mm/left") == pytest.approx(50.0)
+    assert _logged_scalar(dummy_rr, "dashboard/position_error_norm_mm/right") == pytest.approx(50.0)
+    assert _logged_scalar(dummy_rr, "arms/left/fast_status/reference_error_norm_mm/value") == pytest.approx(20.0)
+    assert _logged_scalar(dummy_rr, "dashboard/reference_error_norm_mm/left") == pytest.approx(20.0)
+    assert not _has_log(dummy_rr, "arms/right/fast_status/reference_error_norm_mm/value")
+    assert not _has_log(dummy_rr, "dashboard/reference_error_norm_mm/right")
+    assert _logged_scalar(dummy_rr, "arms/left/fast_status/rotation_error_norm_deg/value") == pytest.approx(45.0)
+    assert _logged_scalar(dummy_rr, "dashboard/rotation_error_norm_deg/left") == pytest.approx(45.0)
+    assert _logged_scalar(dummy_rr, "arms/left/fast_status/tcp_speed_mps/value") == pytest.approx(0.005)
+    assert _logged_scalar(dummy_rr, "arms/right/fast_status/tcp_speed_mps/value") == pytest.approx(0.002)
+    assert _logged_scalar(dummy_rr, "dashboard/tcp_speed_mps/left") == pytest.approx(0.005)
+    assert _logged_scalar(dummy_rr, "dashboard/tcp_speed_mps/right") == pytest.approx(0.002)
+    assert _logged_scalar(dummy_rr, "dashboard/tcp_speed_mps/limit") == pytest.approx(
+        rerun_viz.Config.END_EFFECTOR_REAL_SPEED_LIMIT_MPS
+    )
+    assert _logged_scalar(dummy_rr, "arms/left/fast_status/torque_utilization/command") == pytest.approx(0.5)
+    assert _logged_scalar(dummy_rr, "arms/left/fast_status/torque_utilization/actual") == pytest.approx(0.25)
+    assert _logged_scalar(dummy_rr, "arms/left/fast_status/torque_utilization/raw") == pytest.approx(1.0)
+    assert _logged_scalar(dummy_rr, "arms/right/fast_status/torque_utilization/command") == pytest.approx(0.5)
+    assert _logged_scalar(dummy_rr, "dashboard/torque_utilization/left") == pytest.approx(0.5)
+    assert _logged_scalar(dummy_rr, "dashboard/torque_utilization/right") == pytest.approx(0.5)
+    assert _logged_scalar(dummy_rr, "arms/left/fast_status/min_joint_limit_margin_rad/value") == pytest.approx(0.03)
+    assert _logged_scalar(dummy_rr, "arms/right/fast_status/min_joint_limit_margin_rad/value") == pytest.approx(0.04)
+    assert _logged_scalar(dummy_rr, "dashboard/min_joint_limit_margin_rad/left") == pytest.approx(0.03)
+    assert _logged_scalar(dummy_rr, "dashboard/min_joint_limit_margin_rad/right") == pytest.approx(0.04)
+    assert _logged_scalar(dummy_rr, "dashboard/min_joint_limit_margin_rad/warning_threshold") == pytest.approx(0.02)
+    assert _logged_scalar(dummy_rr, "arms/left/fast_status/min_velocity_margin_rad_s/value") == pytest.approx(0.20)
+    assert _logged_scalar(dummy_rr, "arms/right/fast_status/min_velocity_margin_rad_s/value") == pytest.approx(0.30)
+    assert _logged_scalar(dummy_rr, "dashboard/min_velocity_margin_rad_s/left") == pytest.approx(0.20)
+    assert _logged_scalar(dummy_rr, "dashboard/min_velocity_margin_rad_s/right") == pytest.approx(0.30)
+    assert _logged_scalar(dummy_rr, "dashboard/min_velocity_margin_rad_s/warning_threshold") == pytest.approx(0.2)
 
 
 def test_log_realtime_step_logs_balanced_sim_performance_metrics(monkeypatch):

@@ -60,6 +60,17 @@ class FakeTransport:
         self.closed = True
 
 
+def _feedback_sample(motor_id: int, *, offset: float = 0.0, can_id: int | None = None, state: int = 1):
+    return (
+        int(motor_id),
+        int(motor_id if can_id is None else can_id),
+        int(state),
+        0.1 * motor_id + float(offset),
+        0.01 * motor_id + float(offset),
+        0.001 * motor_id + float(offset),
+    )
+
+
 class BlockingTransport(FakeTransport):
     def __init__(self, config=None, frames=None) -> None:
         super().__init__(config=config, frames=frames)
@@ -97,6 +108,21 @@ class ChunkedFeedbackTransport(FakeTransport):
         return self.current_chunk.pop(0)
 
 
+class BatchFeedbackTransport(FakeTransport):
+    def __init__(self, chunks) -> None:
+        super().__init__(frames=[])
+        self.chunks = [list(chunk) for chunk in chunks]
+        self.batch_calls: list[tuple[int, float, float]] = []
+        self.second_batch_event = runtime.threading.Event()
+
+    def read_feedback_batch(self, max_frames: int, first_timeout_s: float, drain_timeout_s: float = 0.0):
+        self.batch_calls.append((int(max_frames), float(first_timeout_s), float(drain_timeout_s)))
+        chunk = self.chunks.pop(0) if self.chunks else []
+        if len(self.batch_calls) >= 2:
+            self.second_batch_event.set()
+        return chunk
+
+
 class SlowStartupTransport(FakeTransport):
     def __init__(self, frames=None) -> None:
         super().__init__(frames=frames)
@@ -127,8 +153,11 @@ class StopAfterOneBridge:
             status=0,
             tau=np.arange(1.0, Config.NUM_JOINTS + 1.0),
             tau_gravity=np.arange(101.0, 101.0 + Config.NUM_JOINTS),
+            tau_gc=np.arange(201.0, 201.0 + Config.NUM_JOINTS),
             ee_pos=np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float64),
             ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
+            ref_pos=np.array([[0.11, 0.21, 0.31], [0.0, 0.0, 0.0]], dtype=np.float64),
+            ref_quat=np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float64),
             ee_twist=np.array([[0.01, 0.02, 0.03, 0.1, 0.2, 0.3], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=np.float64),
             traj_t=0.123,
         )
@@ -155,6 +184,7 @@ class StopAfterTwoBridge:
             status=0,
             tau=np.ones(Config.NUM_JOINTS, dtype=np.float64),
             tau_gravity=np.full(Config.NUM_JOINTS, 0.5, dtype=np.float64),
+            tau_gc=np.full(Config.NUM_JOINTS, 0.75, dtype=np.float64),
             ee_pos=np.zeros((Config.NUM_ARMS, 3), dtype=np.float64),
             ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
             ee_twist=np.zeros((Config.NUM_ARMS, 6), dtype=np.float64),
@@ -183,6 +213,7 @@ class MovingTcpZeroTwistBridge:
             status=0,
             tau=np.ones(Config.NUM_JOINTS, dtype=np.float64),
             tau_gravity=np.full(Config.NUM_JOINTS, 0.5, dtype=np.float64),
+            tau_gc=np.full(Config.NUM_JOINTS, 0.75, dtype=np.float64),
             ee_pos=ee_pos,
             ee_quat=np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
             ee_twist=np.zeros((Config.NUM_ARMS, 6), dtype=np.float64),
@@ -309,6 +340,55 @@ def test_real_feedback_worker_publishes_complete_arm_snapshot_across_reads():
     np.testing.assert_allclose(snapshot.qd[Config.ARM_JOINTS :], [0.01 * i for i in range(1, 8)])
 
 
+def test_real_feedback_hub_batch_publishes_latest_complete_snapshot():
+    hub = runtime.RealFeedbackHub()
+    first_cycle = [_feedback_sample(i) for i in range(1, 8)]
+    second_cycle = [_feedback_sample(i, offset=1.0) for i in range(1, 8)]
+
+    seq = hub.record_feedback_batch(Config.LEFT_ARM, tuple(range(1, 8)), first_cycle + second_cycle)
+    snapshot = hub.wait_for_next(runtime.ACTIVE_ARM_MASK["left"], last_seq=0, timeout_s=0.0)
+
+    assert seq == 2
+    assert snapshot is not None
+    assert snapshot.seq == 2
+    np.testing.assert_allclose(snapshot.q[: Config.ARM_JOINTS], [1.0 + 0.1 * i for i in range(1, 8)])
+    np.testing.assert_allclose(snapshot.qd[: Config.ARM_JOINTS], [1.0 + 0.01 * i for i in range(1, 8)])
+    assert hub.wait_for_next(
+        runtime.ACTIVE_ARM_MASK["left"],
+        last_seq=snapshot.seq,
+        timeout_s=0.0,
+        last_arm_seq=snapshot.arm_seq,
+    ) is None
+
+
+def test_real_feedback_worker_uses_batch_rx_and_does_not_wait_for_control_consumption(monkeypatch):
+    monkeypatch.setattr(runtime, "REAL_FEEDBACK_BATCH_RX", True)
+    monkeypatch.setattr(runtime, "REAL_FEEDBACK_WAIT_FOR_CONSUME", False)
+    transport = BatchFeedbackTransport(
+        [
+            [_feedback_sample(i) for i in range(1, 8)],
+            [_feedback_sample(i, offset=1.0) for i in range(1, 8)],
+        ]
+    )
+    arm_runtime = runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", transport)
+    hub = runtime.RealFeedbackHub()
+    worker = runtime.RealFeedbackWorker(arm_runtime, hub, poll_sleep_s=0.001, join_timeout_s=0.5)
+
+    runtime.shutdown_event.clear()
+    try:
+        worker.start()
+        assert transport.second_batch_event.wait(timeout=1.0)
+        snapshot = hub.wait_for_next(runtime.ACTIVE_ARM_MASK["left"], last_seq=0, timeout_s=1.0)
+    finally:
+        worker.stop()
+        runtime.shutdown_event.clear()
+
+    assert snapshot is not None
+    assert snapshot.seq == 2
+    np.testing.assert_allclose(snapshot.q[: Config.ARM_JOINTS], [1.0 + 0.1 * i for i in range(1, 8)])
+    assert len(transport.batch_calls) >= 2
+
+
 def test_real_feedback_worker_drains_available_frames_before_sleeping():
     sleeps = []
 
@@ -358,6 +438,8 @@ class FakeEnv:
         self.target_init_calls = 0
         self.target_pos = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
         self.target_quat = np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1))
+        self.reference_pos = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
+        self.reference_quat = np.zeros((Config.NUM_ARMS, 4), dtype=np.float64)
         self.ee_pos = np.array([[0.11, 0.22, 0.33], [0.44, 0.55, 0.66]], dtype=np.float64)
         self.ee_quat = np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1))
 
@@ -386,6 +468,10 @@ class FakeEnv:
         self.target_init_calls += 1
         self.target_pos = np.asarray(pos, dtype=np.float64).copy()
         self.target_quat = np.asarray(quat, dtype=np.float64).copy()
+
+    def set_all_reference_poses(self, pos, quat):
+        self.reference_pos = np.asarray(pos, dtype=np.float64).copy()
+        self.reference_quat = np.asarray(quat, dtype=np.float64).copy()
 
     def get_all_target_poses(self):
         return self.target_pos.copy(), self.target_quat.copy()
@@ -455,6 +541,38 @@ def test_usb2fdcan_read_available_uses_nonblocking_recv_timeout():
 
     assert socket_transport.timeouts == [0.0, 0.0]
     assert transport.stats.read_count == 1
+
+
+def test_usb2fdcan_read_feedback_batch_drains_and_tracks_filter_stats():
+    feedback_payload = bytes([0x10, 0x00, 0x00, 0x00, 0x80, 0x00, 0x80, 0x00])
+    control_echo_payload = bytes([0x10, 0x00, 0x33, 0x00, 0x80, 0x00, 0x80, 0x00])
+    socket_transport = FakeSocketTransport(
+        [
+            (0x01, feedback_payload),
+            (0x7FE, feedback_payload),
+            (0x02, control_echo_payload),
+            (0x02, b"\x10\x00"),
+            (0x12, feedback_payload),
+            None,
+        ]
+    )
+    transport = Usb2FdcanTransport(
+        Usb2FdcanConfig(read_timeout=0.123),
+        socket_transport=socket_transport,
+    )
+
+    samples = transport.read_feedback_batch(16, first_timeout_s=0.123, drain_timeout_s=0.0)
+
+    assert [sample[0] for sample in samples] == [1, 2]
+    assert [sample[1] for sample in samples] == [0x01, 0x12]
+    assert socket_transport.timeouts == [0.123, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert transport.stats.read_count == 5
+    assert transport.stats.batch_read_count == 1
+    assert transport.stats.batch_feedback_count == 2
+    assert transport.stats.feedback_count == 2
+    assert transport.stats.unknown_feedback_id_count == 1
+    assert transport.stats.ignored_control_echo_count == 1
+    assert transport.stats.ignored_short_count == 1
 
 
 def test_open_arm_runtimes_uses_can0_for_left_and_can1_for_right(monkeypatch):
@@ -592,7 +710,8 @@ def test_real_feedback_can_accumulate_across_multiple_reads_before_control():
     assert transport.read_available_calls
 
 
-def test_real_feedback_complete_trigger_resets_mask_between_control_steps():
+def test_real_feedback_complete_trigger_resets_mask_between_control_steps(monkeypatch):
+    monkeypatch.setattr(runtime, "REAL_FEEDBACK_WAIT_FOR_CONSUME", True)
     first_cycle = [_feedback_frame(i) for i in range(1, 8)]
     second_cycle_partial = [_feedback_frame(i) for i in range(1, 4)]
     second_cycle_rest = [_feedback_frame(i) for i in range(4, 8)]
@@ -653,7 +772,8 @@ def test_real_control_repeats_zero_requests_until_startup_feedback_is_complete(m
     assert len(zero_requests) >= Config.ARM_JOINTS * 2
 
 
-def test_real_control_does_not_zero_last_command_while_waiting_for_next_feedback_set():
+def test_real_control_does_not_zero_last_command_while_waiting_for_next_feedback_set(monkeypatch):
+    monkeypatch.setattr(runtime, "REAL_FEEDBACK_WAIT_FOR_CONSUME", True)
     transport = ShutdownAfterFirstControlThenPartialFeedbackTransport(
         [
             [_feedback_frame(i) for i in range(1, 8)],
@@ -736,6 +856,60 @@ def test_real_feedback_timeout_reports_missing_motors_from_hub_masks(monkeypatch
     assert "feedback timeout" in captured
     assert "can1: motor id 5,6,7" in captured
     assert "can0: motor id" not in captured
+    assert "[CAN Diagnostics]" in captured
+    assert "partial_ids=1,2,3,4" in captured
+    assert "id5 age=never" in captured
+    assert "[CAN RX Stats]" in captured
+
+
+def test_real_both_consumes_ready_snapshot_before_timeout_check(monkeypatch, capsys):
+    monkeypatch.setattr(runtime, "CAN_FEEDBACK_TIMEOUT_S", 0.1)
+    clock_values = iter([0.0, 0.2])
+    monkeypatch.setattr(runtime, "_THREAD_WAIT_CLOCK", lambda: next(clock_values, 0.2))
+
+    def publish_complete_both(runtimes_arg, hub):
+        _ = runtimes_arg
+        hub.record_feedback_batch(
+            Config.LEFT_ARM,
+            tuple(range(1, 8)),
+            [_feedback_sample(i) for i in range(1, 8)],
+        )
+        hub.record_feedback_batch(
+            Config.RIGHT_ARM,
+            tuple(range(1, 8)),
+            [_feedback_sample(i, offset=1.0) for i in range(1, 8)],
+        )
+        return ()
+
+    monkeypatch.setattr(runtime, "_start_feedback_workers", publish_complete_both)
+    left_transport = FakeTransport()
+    right_transport = FakeTransport()
+    runtimes = (
+        runtime.ArmCanRuntime(Config.LEFT_ARM, "can0", left_transport),
+        runtime.ArmCanRuntime(Config.RIGHT_ARM, "can1", right_transport),
+    )
+    bridge = StopAfterOneBridge()
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_can_control_loop(
+            mode="both",
+            bridge=bridge,
+            runtimes=runtimes,
+            shared_state=runtime.RealSharedState(),
+            startup_enable=False,
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    captured = capsys.readouterr().out
+    assert "feedback timeout" not in captured
+    assert len(bridge.calls) == 1
+    np.testing.assert_allclose(bridge.calls[0]["q"][: Config.ARM_JOINTS], [0.1 * i for i in range(1, 8)])
+    np.testing.assert_allclose(
+        bridge.calls[0]["q"][Config.ARM_JOINTS :],
+        [1.0 + 0.1 * i for i in range(1, 8)],
+    )
 
 
 def test_real_external_shutdown_zeroes_and_disables_active_arm():
@@ -922,6 +1096,31 @@ def test_mirror_real_feedback_initializes_both_targets_to_sim_initial_tcp_pose()
     np.testing.assert_allclose(target_quat, initial_target_quat)
 
 
+def test_mirror_real_feedback_updates_reference_marker_from_shared_output():
+    env = FakeEnv()
+    shared = runtime.RealSharedState()
+    ref_pos = np.array([[0.11, 0.22, 0.33], [0.0, 0.0, 0.0]], dtype=np.float64)
+    ref_quat = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float64)
+    shared.update_feedback(
+        np.zeros(Config.NUM_JOINTS, dtype=np.float64),
+        np.zeros(Config.NUM_JOINTS, dtype=np.float64),
+        np.zeros(Config.NUM_JOINTS, dtype=np.float64),
+        runtime.ACTIVE_ARM_MASK["left"],
+    )
+    shared.update_control_output(
+        np.zeros(Config.NUM_JOINTS, dtype=np.float64),
+        np.zeros((Config.NUM_ARMS, 3), dtype=np.float64),
+        np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1)),
+        ref_pos=ref_pos,
+        ref_quat=ref_quat,
+    )
+
+    runtime.mirror_real_state_to_env(env, shared, runtime.ACTIVE_ARM_MASK["left"])
+
+    np.testing.assert_allclose(env.reference_pos, ref_pos)
+    np.testing.assert_allclose(env.reference_quat, ref_quat)
+
+
 def test_real_control_step_logs_full_rerun_payload(monkeypatch):
     times = iter([0.0, 0.1, 0.1, 0.1])
     monkeypatch.setattr(runtime.time, "perf_counter", lambda: next(times, 0.1))
@@ -956,8 +1155,10 @@ def test_real_control_step_logs_full_rerun_payload(monkeypatch):
             "ee_twist",
             "pos_actual",
             "pos_desired",
+            "pos_reference",
             "quat_actual",
             "quat_desired",
+            "quat_reference",
             "elapsed_s",
             "right_j7_diag",
             "c_bridge_ms",
@@ -970,6 +1171,10 @@ def test_real_control_step_logs_full_rerun_payload(monkeypatch):
     np.testing.assert_allclose(payload["tau_raw"], np.arange(1.0, Config.NUM_JOINTS + 1.0))
     np.testing.assert_allclose(payload["tau_total"][: Config.ARM_JOINTS], np.arange(1.0, Config.ARM_JOINTS + 1.0))
     np.testing.assert_allclose(payload["tau_total"][Config.ARM_JOINTS :], 0.0)
+    np.testing.assert_allclose(payload["pos_reference"][0], [0.11, 0.21, 0.31])
+    np.testing.assert_allclose(payload["quat_reference"][0], [1.0, 0.0, 0.0, 0.0])
+    np.testing.assert_allclose(payload["pos_reference"][1], 0.0)
+    np.testing.assert_allclose(payload["quat_reference"][1], 0.0)
     np.testing.assert_allclose(payload["ee_twist"][0], [0.01, 0.02, 0.03, 0.1, 0.2, 0.3])
     np.testing.assert_allclose(payload["ee_twist"][1], 0.0)
     np.testing.assert_allclose(payload["tau_actual"][: Config.ARM_JOINTS], [0.001 * i for i in range(1, 8)])
@@ -1054,6 +1259,43 @@ def test_real_gravity_only_sends_gravity_but_logs_full_control(monkeypatch):
     assert payload["tx_label"] == "Gravity compensation MIT torque"
     assert payload["right_j7_diag"]["tau_cmd_raw"] == pytest.approx(14.0)
     assert payload["right_j7_diag"]["tau_cmd_sent"] == pytest.approx(114.0)
+
+
+def test_real_gc_only_sends_gc_but_logs_full_control(monkeypatch):
+    times = iter([0.0, 0.1, 0.1, 0.1])
+    monkeypatch.setattr(runtime.time, "perf_counter", lambda: next(times, 0.1))
+
+    transport = FakeTransport(frames=(_feedback_frame(i) for i in range(1, 8)))
+    runtimes = (runtime.ArmCanRuntime(Config.RIGHT_ARM, "can1", transport),)
+    bridge = StopAfterOneBridge()
+    logger = FakeRerunLogger()
+
+    runtime.shutdown_event.clear()
+    try:
+        runtime.run_real_can_control_loop(
+            mode="right",
+            bridge=bridge,
+            runtimes=runtimes,
+            shared_state=runtime.RealSharedState(),
+            rerun_logger=logger,
+            startup_enable=False,
+            send_mode="gc",
+        )
+    finally:
+        runtime.shutdown_event.clear()
+
+    sent = [cmd[2] for cmd in transport.commands if cmd[0] == "torque" and cmd[2] not in (0.0, None)]
+    assert sent == [float(value) for value in range(208, 215)]
+    assert len(logger.payloads) == 1
+    payload = logger.payloads[0]
+    expected_raw = np.arange(1.0, Config.NUM_JOINTS + 1.0)
+    expected_display = expected_raw.copy()
+    expected_display[: Config.ARM_JOINTS] = 0.0
+    np.testing.assert_allclose(payload["tau_raw"], expected_raw)
+    np.testing.assert_allclose(payload["tau_total"], expected_display)
+    assert payload["tx_label"] == "G+C compensation MIT torque"
+    assert payload["right_j7_diag"]["tau_cmd_raw"] == pytest.approx(14.0)
+    assert payload["right_j7_diag"]["tau_cmd_sent"] == pytest.approx(214.0)
 
 
 def test_real_bridge_timeout_zeroes_and_disables_active_arm(capsys):
@@ -1144,6 +1386,7 @@ def test_real_rerun_logging_is_throttled_before_enqueue(monkeypatch):
 
 
 def test_real_rerun_tcp_speed_falls_back_to_position_delta_when_controller_twist_is_zero(monkeypatch):
+    monkeypatch.setattr(runtime, "REAL_FEEDBACK_WAIT_FOR_CONSUME", True)
     times = iter([0.0, 0.1, 0.1, 0.2, 0.2])
     monkeypatch.setattr(runtime.time, "perf_counter", lambda: next(times, 0.2))
     monkeypatch.setattr(runtime.Config, "RERUN_LOG_STRIDE", 1)

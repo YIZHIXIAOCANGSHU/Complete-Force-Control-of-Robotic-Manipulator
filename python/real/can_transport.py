@@ -15,7 +15,7 @@ import struct
 import subprocess
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
@@ -26,6 +26,7 @@ CAN_MTU = 16
 CANFD_MTU = 72
 CAN_RAW_FD_FRAMES = getattr(socket, "CAN_RAW_FD_FRAMES", 5)
 SOL_CAN_RAW = getattr(socket, "SOL_CAN_RAW", socket.SOL_CAN_BASE + socket.CAN_RAW)
+CAN_RAW_FILTER = getattr(socket, "CAN_RAW_FILTER", 1)
 CANFD_BRS = getattr(socket, "CANFD_BRS", 0x01)
 
 CLEAR_ERROR_CMD = 0xFB
@@ -133,12 +134,16 @@ class DecodedFeedbackFrame:
     rotor_temperature: float
 
 
+FeedbackSample = tuple[int, int, int, float, float, float]
+
+
 @dataclass(frozen=True)
 class _MotorMapping:
     motor_id: int
     can_id: int
     mst_id: int
     motor_type: DM_Motor_Type
+    limits: MotorLimits
 
 
 @dataclass(frozen=True)
@@ -149,6 +154,8 @@ class Usb2FdcanConfig:
     configure_interface: bool = False
     force_fd: bool = True
     read_timeout: float = 0.002
+    rx_buffer_bytes: int = 1_048_576
+    filter_feedback: bool = True
     motor_ids: tuple[int, ...] = DEFAULT_MOTOR_IDS
     motor_can_ids: tuple[int, ...] = DEFAULT_MOTOR_CAN_IDS
     motor_mst_ids: tuple[int, ...] = DEFAULT_MOTOR_MST_IDS
@@ -157,10 +164,18 @@ class Usb2FdcanConfig:
 
 @dataclass
 class Usb2FdcanStats:
+    started_at_s: float = 0.0
     send_count: int = 0
     read_count: int = 0
     feedback_count: int = 0
     backpressure_count: int = 0
+    batch_read_count: int = 0
+    batch_feedback_count: int = 0
+    ignored_short_count: int = 0
+    ignored_control_echo_count: int = 0
+    unknown_feedback_id_count: int = 0
+    state_error_count: int = 0
+    drain_limit_hit_count: int = 0
     last_zero_packet: bytes = b""
 
 
@@ -279,6 +294,23 @@ def decode_feedback(data: bytes, motor_type: DM_Motor_Type | str) -> MotorFeedba
     )
 
 
+def decode_feedback_fast(data: bytes, limits: MotorLimits) -> tuple[int, float, float, float, float, float]:
+    if len(data) < 8:
+        raise ValueError("Motor feedback requires 8 bytes")
+    state_code = (data[0] >> 4) & 0x0F
+    q_uint = (data[1] << 8) | data[2]
+    dq_uint = (data[3] << 4) | (data[4] >> 4)
+    tau_uint = ((data[4] & 0x0F) << 8) | data[5]
+    return (
+        int(state_code),
+        uint_to_float(q_uint, -limits.pmax, limits.pmax, 16),
+        uint_to_float(dq_uint, -limits.vmax, limits.vmax, 12),
+        uint_to_float(tau_uint, -limits.tmax, limits.tmax, 12),
+        float(data[6]),
+        float(data[7]),
+    )
+
+
 def configure_can_interface(interface: str, nominal_bitrate: int, data_bitrate: int) -> None:
     commands = [
         ["ip", "link", "set", interface, "down"],
@@ -318,12 +350,28 @@ def ensure_interface_ready(interface: str, nominal_bitrate: int, data_bitrate: i
 
 
 class SocketCanTransport:
-    def __init__(self, interface: str, *, force_fd: bool = True, fd_flags: int = CANFD_BRS) -> None:
+    def __init__(
+        self,
+        interface: str,
+        *,
+        force_fd: bool = True,
+        fd_flags: int = CANFD_BRS,
+        rx_buffer_bytes: int = 0,
+        feedback_can_ids: tuple[int, ...] = (),
+    ) -> None:
         self.interface = str(interface)
         self.force_fd = bool(force_fd)
         self.fd_flags = int(fd_flags)
         self.socket = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
         self.socket.setsockopt(SOL_CAN_RAW, CAN_RAW_FD_FRAMES, 1)
+        if int(rx_buffer_bytes) > 0:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(rx_buffer_bytes))
+        if feedback_can_ids:
+            can_filters = b"".join(
+                struct.pack("=II", int(can_id) & socket.CAN_SFF_MASK, socket.CAN_SFF_MASK)
+                for can_id in feedback_can_ids
+            )
+            self.socket.setsockopt(SOL_CAN_RAW, CAN_RAW_FILTER, can_filters)
         self.socket.settimeout(0.1)
         self.socket.bind((self.interface,))
 
@@ -354,6 +402,7 @@ class Usb2FdcanTransport:
     def __init__(self, config: Usb2FdcanConfig, *, socket_transport: Any | None = None) -> None:
         self.config = config
         self.stats = Usb2FdcanStats()
+        self.stats.started_at_s = time.monotonic()
         self._decoded_frames: deque[DecodedFeedbackFrame] = deque()
         self._mappings = self._build_mappings(config)
         self._feedback_mapping = self._build_feedback_mapping(self._mappings)
@@ -363,7 +412,13 @@ class Usb2FdcanTransport:
             if config.configure_interface:
                 configure_can_interface(config.interface, config.nominal_bitrate, config.data_bitrate)
             ensure_interface_ready(config.interface, config.nominal_bitrate, config.data_bitrate)
-            self._socket_transport = SocketCanTransport(config.interface, force_fd=config.force_fd)
+            feedback_can_ids = tuple(self._feedback_mapping) if config.filter_feedback else ()
+            self._socket_transport = SocketCanTransport(
+                config.interface,
+                force_fd=config.force_fd,
+                rx_buffer_bytes=config.rx_buffer_bytes,
+                feedback_can_ids=feedback_can_ids,
+            )
 
     @staticmethod
     def _build_mappings(config: Usb2FdcanConfig) -> tuple[_MotorMapping, ...]:
@@ -379,7 +434,8 @@ class Usb2FdcanTransport:
                 motor_id=int(motor_id),
                 can_id=int(config.motor_can_ids[index]),
                 mst_id=int(config.motor_mst_ids[index]),
-                motor_type=parse_motor_type(config.motor_types[index]),
+                motor_type=(motor_type := parse_motor_type(config.motor_types[index])),
+                limits=get_motor_limits(motor_type),
             )
             for index, motor_id in enumerate(config.motor_ids)
         )
@@ -490,34 +546,54 @@ class Usb2FdcanTransport:
                 break
 
     def _append_feedback_frame(self, can_id: int, payload: bytes) -> None:
-        if len(payload) < 8:
+        sample = self._decode_feedback_sample(int(can_id), payload)
+        if sample is None:
             return
-        if len(payload) >= 3 and payload[2] in (0x33, 0x55, 0xAA):
-            return
-        mapping = self._feedback_mapping.get(int(can_id))
-        if mapping is None:
-            return
+        motor_id, _, state, position, velocity, torque = sample
+        mapping = self._feedback_mapping[int(can_id)]
         decoded = decode_feedback(payload, mapping.motor_type)
-        if int(decoded.state_code) not in VALID_FEEDBACK_STATE_CODES:
-            raise ValueError(
-                f"feedback_state_error motor_id={int(mapping.motor_id)} can_id=0x{int(can_id):03X} "
-                f"state=0x{int(decoded.state_code):X}"
-            )
         self._decoded_frames.append(
             DecodedFeedbackFrame(
-                motor_id=int(mapping.motor_id),
+                motor_id=int(motor_id),
                 can_id=int(mapping.can_id),
                 mst_id=int(mapping.mst_id),
-                state=int(decoded.state_code),
+                state=int(state),
                 controller_id=int(decoded.controller_id),
-                position=float(decoded.position),
-                velocity=float(decoded.velocity),
-                torque=float(decoded.torque),
+                position=float(position),
+                velocity=float(velocity),
+                torque=float(torque),
                 mos_temperature=float(decoded.mos_temp),
                 rotor_temperature=float(decoded.rotor_temp),
             )
         )
         self.stats.feedback_count += 1
+
+    def _decode_feedback_sample(self, can_id: int, payload: bytes) -> FeedbackSample | None:
+        if len(payload) < 8:
+            self.stats.ignored_short_count += 1
+            return None
+        if len(payload) >= 3 and payload[2] in (0x33, 0x55, 0xAA):
+            self.stats.ignored_control_echo_count += 1
+            return None
+        mapping = self._feedback_mapping.get(int(can_id))
+        if mapping is None:
+            self.stats.unknown_feedback_id_count += 1
+            return None
+        state, position, velocity, torque, _, _ = decode_feedback_fast(payload, mapping.limits)
+        if int(state) not in VALID_FEEDBACK_STATE_CODES:
+            self.stats.state_error_count += 1
+            raise ValueError(
+                f"feedback_state_error motor_id={int(mapping.motor_id)} can_id=0x{int(can_id):03X} "
+                f"state=0x{int(state):X}"
+            )
+        return (
+            int(mapping.motor_id),
+            int(can_id),
+            int(state),
+            float(position),
+            float(velocity),
+            float(torque),
+        )
 
     def read(self, size: int) -> bytes:
         read_budget = max(1, int(size))
@@ -545,6 +621,34 @@ class Usb2FdcanTransport:
         self.stats.read_count += reads
         return b""
 
+    def read_feedback_batch(
+        self,
+        max_frames: int,
+        first_timeout_s: float,
+        drain_timeout_s: float = 0.0,
+    ) -> list[FeedbackSample]:
+        read_budget = max(1, int(max_frames))
+        samples: list[FeedbackSample] = []
+        reads = 0
+        timeout_s = max(0.0, float(first_timeout_s))
+        while reads < read_budget:
+            packet = self._socket_transport.recv(timeout=timeout_s)
+            timeout_s = max(0.0, float(drain_timeout_s))
+            if packet is None:
+                break
+            can_id, payload = packet
+            sample = self._decode_feedback_sample(int(can_id), payload)
+            reads += 1
+            if sample is not None:
+                samples.append(sample)
+        self.stats.read_count += reads
+        self.stats.batch_read_count += 1
+        self.stats.batch_feedback_count += len(samples)
+        self.stats.feedback_count += len(samples)
+        if reads >= read_budget:
+            self.stats.drain_limit_hit_count += 1
+        return samples
+
     def pop_feedback_frame(self) -> DecodedFeedbackFrame | None:
         if not self._decoded_frames:
             return None
@@ -571,6 +675,7 @@ __all__ = [
     "DEFAULT_MOTOR_TYPES",
     "DM_Motor_Type",
     "DecodedFeedbackFrame",
+    "FeedbackSample",
     "MotorFeedback",
     "Usb2FdcanConfig",
     "Usb2FdcanStats",

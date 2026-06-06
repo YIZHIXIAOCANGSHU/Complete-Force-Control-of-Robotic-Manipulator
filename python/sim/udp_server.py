@@ -19,14 +19,20 @@ import numpy as np
 from config import Config
 from mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
 import rerun_viz
-from sim.state_packets import CONTROL_INPUT_PACKET_SIZE, TORQUE_OUTPUT_PACKET_SIZE
+from sim.state_packets import (
+    CONTROL_INPUT_PACKET_SIZE,
+    OUTPUT_REF_POS_OFFSET,
+    OUTPUT_REF_QUAT_OFFSET,
+    OUTPUT_TAU_OFFSET,
+    TORQUE_OUTPUT_PACKET_SIZE,
+)
 
 
-DEFAULT_MC_SAMPLES = 20000
-DEFAULT_MC_PROGRESS_INTERVAL = 100
+DEFAULT_MC_SAMPLES = 500000
+DEFAULT_MC_PROGRESS_INTERVAL = 10000
 DEFAULT_MC_FALLBACK_LIMIT = np.pi
 DEFAULT_MC_MAX_VIS_POINTS = 2000
-DEFAULT_MC_MAX_HULL_POINTS = 6000
+DEFAULT_MC_MAX_HULL_POINTS = 50000
 DEFAULT_REPORT_SAMPLES = 500000
 DEFAULT_REPORT_PROGRESS_INTERVAL = 10000
 DEFAULT_REPORT_CONTROL_DURATION_S = 10.0
@@ -723,6 +729,27 @@ def compute_largest_internal_workspace_box(hull: WorkspaceHull) -> InternalWorks
     )
 
 
+def compute_internal_workspace_box_intersection(boxes: list[InternalWorkspaceBox]) -> InternalWorkspaceBox:
+    """Compute the common axis-aligned safe range shared by internal workspace boxes."""
+    if not boxes or any(box.is_empty for box in boxes):
+        return _empty_internal_workspace_box()
+    lower = np.max(np.asarray([box.lower for box in boxes], dtype=np.float64), axis=0)
+    upper = np.min(np.asarray([box.upper for box in boxes], dtype=np.float64), axis=0)
+    span = upper - lower
+    if lower.shape != (3,) or upper.shape != (3,) or np.any(span <= 0.0):
+        return _empty_internal_workspace_box()
+    center = 0.5 * (lower + upper)
+    half_size = 0.5 * span
+    volume = float(np.prod(span))
+    return InternalWorkspaceBox(
+        center=center,
+        half_size=half_size,
+        lower=lower,
+        upper=upper,
+        volume=volume,
+    )
+
+
 def _expand_box_half_size_at_center(
     normals: np.ndarray,
     offsets: np.ndarray,
@@ -1292,6 +1319,36 @@ def _format_internal_workspace_box(box: InternalWorkspaceBox, hull_point_count: 
     return "\n".join(lines)
 
 
+def _format_safe_box_summary_block(
+    label: str,
+    box: InternalWorkspaceBox,
+) -> list[str]:
+    lines = [f"{label}："]
+    if box.is_empty:
+        lines.append("  不可用（内部安全盒为空或左右交集为空）")
+        return lines
+    lines.append("  轴          最小值        最大值        跨度          中心值")
+    for axis, lo, hi, span, center in zip(
+        ("x", "y", "z"),
+        box.lower,
+        box.upper,
+        2.0 * box.half_size,
+        box.center,
+    ):
+        lines.append(f"  {axis:<5} {lo:>12.6f} {hi:>12.6f} {span:>12.6f} {center:>12.6f}")
+    lines.append(f"  体积(m^3)：{box.volume:.9f}")
+    return lines
+
+
+def _format_safe_box_summary(internal_boxes: list[InternalWorkspaceBox]) -> str:
+    common_box = compute_internal_workspace_box_intersection(internal_boxes)
+    lines = ["安全盒范围汇总(m)："]
+    for label, box in zip(("左臂", "右臂"), internal_boxes):
+        lines.extend(_format_safe_box_summary_block(label, box))
+    lines.extend(_format_safe_box_summary_block("公共交集", common_box))
+    return "\n".join(lines)
+
+
 def _format_monte_carlo_report(
     *,
     samples: int,
@@ -1360,6 +1417,8 @@ def _format_dual_monte_carlo_report(
         f"随机种子：{seed_text}",
         f"关节下限(rad)：{_format_vector(joint_lower)}",
         f"关节上限(rad)：{_format_vector(joint_upper)}",
+        "",
+        _format_safe_box_summary(internal_boxes),
     ]
     for arm, label in enumerate(("左臂", "右臂")):
         lines.extend(
@@ -1533,6 +1592,8 @@ def _collect_monte_carlo_workspace(
     progress_interval: int,
     fallback_joint_limit: float = DEFAULT_MC_FALLBACK_LIMIT,
     max_hull_points: int = DEFAULT_MC_MAX_HULL_POINTS,
+    allow_partial_on_interrupt: bool = False,
+    progress_label: str = "[Report MC]",
 ) -> MonteCarloWorkspaceResult:
     if samples <= 0:
         raise ValueError("samples 必须为正数")
@@ -1561,33 +1622,46 @@ def _collect_monte_carlo_workspace(
         for _ in range(Config.NUM_ARMS)
     ]
     last_qpos = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
+    sampled_count = 0
 
-    for index in range(samples):
-        last_qpos = rng.uniform(joint_lower, joint_upper)
-        env.set_qpos(last_qpos)
-        env.set_qvel(np.zeros_like(last_qpos))
-        env.forward()
+    try:
+        for index in range(samples):
+            last_qpos = rng.uniform(joint_lower, joint_upper)
+            env.set_qpos(last_qpos)
+            env.set_qvel(np.zeros_like(last_qpos))
+            env.forward()
 
-        pos = env.get_all_ee_pos()
-        quat = env.get_all_ee_quat()
-        for arm in range(Config.NUM_ARMS):
-            points[arm][index] = pos[arm]
-            quats[arm][index] = quat[arm]
-            pos_stats[arm].update(pos[arm])
-            quat_stats[arm].update(quat[arm])
-            quat_norm_stats[arm].update(np.array([np.linalg.norm(quat[arm])], dtype=np.float64))
+            pos = env.get_all_ee_pos()
+            quat = env.get_all_ee_quat()
+            for arm in range(Config.NUM_ARMS):
+                points[arm][index] = pos[arm]
+                quats[arm][index] = quat[arm]
+                pos_stats[arm].update(pos[arm])
+                quat_stats[arm].update(quat[arm])
+                quat_norm_stats[arm].update(np.array([np.linalg.norm(quat[arm])], dtype=np.float64))
 
-        current = index + 1
-        if progress_interval and (current % progress_interval == 0 or current == samples):
-            sys.stdout.write(
-                "\r"
-                f"[Report MC] {current:>{len(str(samples))}}/{samples} "
-                f"左臂={_format_vector(pos[Config.LEFT_ARM], precision=4)} "
-                f"右臂={_format_vector(pos[Config.RIGHT_ARM], precision=4)}"
-            )
-            sys.stdout.flush()
+            sampled_count = index + 1
+            if progress_interval and (sampled_count % progress_interval == 0 or sampled_count == samples):
+                sys.stdout.write(
+                    "\r"
+                    f"{progress_label} {sampled_count:>{len(str(samples))}}/{samples} "
+                    f"左臂={_format_vector(pos[Config.LEFT_ARM], precision=4)} "
+                    f"右臂={_format_vector(pos[Config.RIGHT_ARM], precision=4)}"
+                )
+                sys.stdout.flush()
+    except KeyboardInterrupt:
+        if not allow_partial_on_interrupt:
+            raise
+        if progress_interval:
+            sys.stdout.write("\n")
+        print("[MC] 用户中断，输出已经采集到的范围。")
     if progress_interval:
         sys.stdout.write("\n")
+    if sampled_count <= 0:
+        raise ValueError("没有采到样本")
+
+    points = [arm_points[:sampled_count].copy() for arm_points in points]
+    quats = [arm_quats[:sampled_count].copy() for arm_quats in quats]
 
     hull_points = [select_visualization_points(arm_points, max_hull_points) for arm_points in points]
     workspace_hulls = [compute_workspace_hull(arm_points) for arm_points in hull_points]
@@ -1597,7 +1671,7 @@ def _collect_monte_carlo_workspace(
     quat_norm_snapshots = [stats.snapshot() for stats in quat_norm_stats]
     hull_point_count = len(hull_points[Config.LEFT_ARM])
     report_text = _format_dual_monte_carlo_report(
-        samples=samples,
+        samples=sampled_count,
         seed=seed,
         joint_lower=joint_lower,
         joint_upper=joint_upper,
@@ -1609,7 +1683,7 @@ def _collect_monte_carlo_workspace(
         last_qpos=last_qpos,
     )
     return MonteCarloWorkspaceResult(
-        samples=samples,
+        samples=sampled_count,
         seed=seed,
         joint_lower=joint_lower,
         joint_upper=joint_upper,
@@ -2315,109 +2389,54 @@ def run_monte_carlo_range_check(
     print("=" * 60)
     sys.stdout.flush()
 
-    env = _create_sim_env()
-    env.reset(Config.HOME_QPOS)
-    env.forward()
-    joint_lower, joint_upper = resolve_sampling_bounds(
-        env.joint_lower,
-        env.joint_upper,
-        fallback_limit=fallback_joint_limit,
-    )
-
-    rng = np.random.default_rng(seed)
-    pos_stats = [RangeAccumulator(3) for _ in range(Config.NUM_ARMS)]
-    quat_stats = [RangeAccumulator(4) for _ in range(Config.NUM_ARMS)]
-    quat_norm_stats = [RangeAccumulator(1) for _ in range(Config.NUM_ARMS)]
-    last_qpos = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-    ee_points: list[list[np.ndarray]] = [[] for _ in range(Config.NUM_ARMS)]
-    ee_quats: list[list[np.ndarray]] = [[] for _ in range(Config.NUM_ARMS)]
-
     print(f"[MC] 采样数量={samples}, 随机种子={'随机' if seed is None else seed}")
     print("[MC] 使用原 sim 的 MujocoSimEnv 做双臂 FK 采样，按 Ctrl+C 可提前输出已采样范围。")
 
+    env = _create_sim_env()
     try:
-        for index in range(samples):
-            last_qpos = rng.uniform(joint_lower, joint_upper)
-            env.set_qpos(last_qpos)
-            env.set_qvel(np.zeros_like(last_qpos))
-            env.forward()
-
-            pos = env.get_all_ee_pos()
-            quat = env.get_all_ee_quat()
-            for arm in range(Config.NUM_ARMS):
-                pos_stats[arm].update(pos[arm])
-                quat_stats[arm].update(quat[arm])
-                quat_norm_stats[arm].update(np.array([np.linalg.norm(quat[arm])], dtype=np.float64))
-                ee_points[arm].append(pos[arm])
-                ee_quats[arm].append(quat[arm])
-
-            current = index + 1
-            if progress_interval and (current % progress_interval == 0 or current == samples):
-                sys.stdout.write(
-                    "\r"
-                    f"[MC] {current:>{len(str(samples))}}/{samples} "
-                    f"左臂={_format_vector(pos[Config.LEFT_ARM], precision=4)} "
-                    f"右臂={_format_vector(pos[Config.RIGHT_ARM], precision=4)}"
-                )
-                sys.stdout.flush()
-        if progress_interval:
-            sys.stdout.write("\n")
-    except KeyboardInterrupt:
-        if progress_interval:
-            sys.stdout.write("\n")
-        print("[MC] 用户中断，输出已经采集到的范围。")
-
-    if pos_stats[Config.LEFT_ARM].count == 0:
+        mc_result = _collect_monte_carlo_workspace(
+            env=env,
+            samples=samples,
+            seed=seed,
+            progress_interval=progress_interval,
+            fallback_joint_limit=fallback_joint_limit,
+            max_hull_points=max_hull_points,
+            allow_partial_on_interrupt=True,
+            progress_label="[MC]",
+        )
+    except ValueError as exc:
+        if "没有采到样本" not in str(exc):
+            raise
         print("[MC] 没有采到样本，结束。")
         return
 
-    points_array = [np.asarray(points, dtype=np.float64) for points in ee_points]
-    hull_points = [select_visualization_points(points, max_hull_points) for points in points_array]
-    workspace_hulls = [compute_workspace_hull(points) for points in hull_points]
-    internal_boxes = [compute_largest_internal_workspace_box(hull) for hull in workspace_hulls]
-    pos_snapshots = [stats.snapshot() for stats in pos_stats]
-    quat_snapshots = [stats.snapshot() for stats in quat_stats]
-    quat_norm_snapshots = [stats.snapshot() for stats in quat_norm_stats]
-
-    report_text = _format_dual_monte_carlo_report(
-        samples=pos_snapshots[Config.LEFT_ARM].count,
-        seed=seed,
-        joint_lower=joint_lower,
-        joint_upper=joint_upper,
-        pos_stats=pos_snapshots,
-        quat_stats=quat_snapshots,
-        quat_norm_stats=quat_norm_snapshots,
-        internal_boxes=internal_boxes,
-        hull_point_count=len(hull_points[Config.LEFT_ARM]),
-        last_qpos=last_qpos,
-    )
-    print(report_text)
+    print(mc_result.report_text)
 
     if output_dir is not None:
         _write_monte_carlo_report_assets(
             output_dir,
-            samples=pos_snapshots[Config.LEFT_ARM].count,
+            samples=mc_result.samples,
             seed=seed,
-            joint_lower=joint_lower,
-            joint_upper=joint_upper,
-            points=points_array,
-            quats=[np.asarray(quats, dtype=np.float64) for quats in ee_quats],
-            pos_stats=pos_snapshots,
-            quat_stats=quat_snapshots,
-            quat_norm_stats=quat_norm_snapshots,
-            internal_boxes=internal_boxes,
-            hull_point_count=len(hull_points[Config.LEFT_ARM]),
-            report_text=report_text,
+            joint_lower=mc_result.joint_lower,
+            joint_upper=mc_result.joint_upper,
+            points=mc_result.points,
+            quats=mc_result.quats,
+            pos_stats=mc_result.pos_stats,
+            quat_stats=mc_result.quat_stats,
+            quat_norm_stats=mc_result.quat_norm_stats,
+            internal_boxes=mc_result.internal_boxes,
+            hull_point_count=mc_result.hull_point_count,
+            report_text=mc_result.report_text,
         )
 
     if show_viewer:
         _show_monte_carlo_workspace_viewer(
             env,
-            points=points_array,
-            pos_stats=pos_snapshots,
-            last_qpos=last_qpos,
-            hull=workspace_hulls,
-            internal_box=internal_boxes,
+            points=mc_result.points,
+            pos_stats=mc_result.pos_stats,
+            last_qpos=mc_result.last_qpos,
+            hull=mc_result.workspace_hulls,
+            internal_box=mc_result.internal_boxes,
             max_visual_points=max_visual_points,
             max_hull_points=max_hull_points,
         )
@@ -2501,10 +2520,20 @@ def run_udp_server(ready_file: str | None = None) -> None:
                     continue
 
                 service_start_s = time.perf_counter()
-                tau = np.frombuffer(data, dtype="<f8", count=Config.NUM_JOINTS)
+                control_output = np.frombuffer(data, dtype="<f8", count=TORQUE_OUTPUT_PACKET_SIZE)
+                tau = control_output[
+                    OUTPUT_TAU_OFFSET : OUTPUT_TAU_OFFSET + Config.NUM_JOINTS
+                ]
+                ref_pos = control_output[
+                    OUTPUT_REF_POS_OFFSET : OUTPUT_REF_POS_OFFSET + Config.NUM_ARMS * 3
+                ].reshape(Config.NUM_ARMS, 3)
+                ref_quat = control_output[
+                    OUTPUT_REF_QUAT_OFFSET : OUTPUT_REF_QUAT_OFFSET + Config.NUM_ARMS * 4
+                ].reshape(Config.NUM_ARMS, 4)
                 rerun_payload = None
                 with env_lock:
                     body_gui.apply_pending()
+                    env.set_all_reference_poses(ref_pos, ref_quat)
                     clipped_tau = env.clip_torque(tau)
                     step_start_s = time.perf_counter()
                     env.apply_torque(clipped_tau)
@@ -2529,12 +2558,15 @@ def run_udp_server(ready_file: str | None = None) -> None:
                             quat_desired,
                             *twist_values,
                         ) = env.get_state_snapshot(include_twist=include_twist)
+                        ref_pos_base, ref_quat_base = env.get_all_reference_poses_base()
                         rerun_payload = {
                             "t": step_count * Config.DT,
                             "pos_actual": pos_current,
                             "pos_desired": pos_desired,
                             "quat_actual": quat_current,
                             "quat_desired": quat_desired,
+                            "pos_reference": ref_pos_base,
+                            "quat_reference": ref_quat_base,
                             "tau_total": clipped_tau.copy(),
                             "q": q,
                             "qd": qd,

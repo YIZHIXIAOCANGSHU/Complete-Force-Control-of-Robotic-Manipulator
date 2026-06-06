@@ -216,20 +216,20 @@ class Config:
     # === 控制器参数 ===
     # 笛卡尔 PD 与 stm32_code/config.h 保持一致；末端参考由五次 S 曲线生成，
     # END_EFFECTOR_LINEAR_SPEED_MPS 表示峰值线速度。
-    KP_CART_X = 300.0
-    KP_CART_Y = 300.0
-    KP_CART_Z = 300.0
-    KD_CART_X = 90.0
-    KD_CART_Y = 90.0
-    KD_CART_Z = 90.0
-    KP_CART_ROLL = 8.0
-    KP_CART_PITCH = 8.0
-    KP_CART_YAW = 8.0
-    KD_CART_ROLL = 4.0
-    KD_CART_PITCH = 4.0
-    KD_CART_YAW = 4.0
-    END_EFFECTOR_LINEAR_SPEED_MPS = 0.05
-    END_EFFECTOR_REAL_SPEED_LIMIT_MPS = 0.05
+    KP_CART_X = 10.0
+    KP_CART_Y = 10.0
+    KP_CART_Z = 10.0
+    KD_CART_X = 2.0
+    KD_CART_Y = 2.0
+    KD_CART_Z = 2.0
+    KP_CART_ROLL = 0.5
+    KP_CART_PITCH = 0.5
+    KP_CART_YAW = 0.5
+    KD_CART_ROLL = 0.2
+    KD_CART_PITCH = 0.2
+    KD_CART_YAW = 0.2
+    END_EFFECTOR_LINEAR_SPEED_MPS = 0.01
+    END_EFFECTOR_REAL_SPEED_LIMIT_MPS = 0.02
     END_EFFECTOR_TARGET_POS_TOL_M = 0.0025
     END_EFFECTOR_TARGET_ORI_TOL_RAD = 0.005
 

@@ -508,3 +508,12 @@ void control_compute_gravity_torque_arm(int side, const double q[ARM_JOINTS],
   control_init_context(arm_side);
   rbdl_calc_gravity(&ctx->rbdl_model, q, tau_g);
 }
+
+void control_compute_gc_torque_arm(int side, const double q[ARM_JOINTS],
+                                   const double qd[ARM_JOINTS],
+                                   double tau_gc[ARM_JOINTS]) {
+  int arm_side = normalize_side(side);
+  ControlArmContext *ctx = control_get_context(arm_side);
+  control_init_context(arm_side);
+  rbdl_calc_gc(&ctx->rbdl_model, q, qd, tau_gc);
+}

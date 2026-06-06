@@ -13,7 +13,7 @@ MAGIC = 0xAA55
 MODE_CONTROL = 1
 MODE_FK_ONLY = 2
 INPUT_STRUCT = struct.Struct("<HBBd14d14d3d6d8d")
-OUTPUT_STRUCT = struct.Struct("<Hi14d14d6d8d12ddi")
+OUTPUT_STRUCT = struct.Struct("<Hi14d14d14d6d8d6d8d12ddi")
 
 
 def _build_packet(mode: int, active_arm_mask: int, *, qd_value: float = 0.0) -> bytes:
@@ -54,37 +54,61 @@ def _exchange(mode: int, active_arm_mask: int, *, qd_value: float = 0.0):
     assert parsed[0] == MAGIC
     tau = np.asarray(parsed[2:16], dtype=np.float64)
     tau_gravity = np.asarray(parsed[16:30], dtype=np.float64)
-    ee_pos = np.asarray(parsed[30:36], dtype=np.float64).reshape(2, 3)
-    ee_twist = np.asarray(parsed[44:56], dtype=np.float64).reshape(2, 6)
-    return parsed[1], tau, tau_gravity, ee_pos, ee_twist
+    tau_gc = np.asarray(parsed[30:44], dtype=np.float64)
+    ee_pos = np.asarray(parsed[44:50], dtype=np.float64).reshape(2, 3)
+    ref_pos = np.asarray(parsed[58:64], dtype=np.float64).reshape(2, 3)
+    ref_quat = np.asarray(parsed[64:72], dtype=np.float64).reshape(2, 4)
+    ee_twist = np.asarray(parsed[72:84], dtype=np.float64).reshape(2, 6)
+    return parsed[1], tau, tau_gravity, tau_gc, ee_pos, ref_pos, ref_quat, ee_twist
 
 
 def test_real_controller_left_mask_zeroes_right_arm_output():
-    status, tau, tau_gravity, _, _ = _exchange(MODE_CONTROL, 1 << 0)
+    status, tau, tau_gravity, tau_gc, _ee_pos, ref_pos, ref_quat, _ee_twist = _exchange(
+        MODE_CONTROL, 1 << 0, qd_value=0.25
+    )
 
     assert status == 0
     assert np.any(np.abs(tau[:7]) > 1e-9)
     assert np.any(np.abs(tau_gravity[:7]) > 1e-9)
+    assert np.any(np.abs(tau_gc[:7]) > 1e-9)
+    assert np.linalg.norm(ref_pos[0]) > 1e-9
+    assert np.linalg.norm(ref_quat[0]) > 1e-9
     np.testing.assert_allclose(tau[7:], 0.0)
     np.testing.assert_allclose(tau_gravity[7:], 0.0)
+    np.testing.assert_allclose(tau_gc[7:], 0.0)
+    np.testing.assert_allclose(ref_pos[1], 0.0)
+    np.testing.assert_allclose(ref_quat[1], 0.0)
 
 
 def test_real_controller_right_mask_zeroes_left_arm_output():
-    status, tau, tau_gravity, _, _ = _exchange(MODE_CONTROL, 1 << 1)
+    status, tau, tau_gravity, tau_gc, _ee_pos, ref_pos, ref_quat, _ee_twist = _exchange(
+        MODE_CONTROL, 1 << 1, qd_value=0.25
+    )
 
     assert status == 0
     np.testing.assert_allclose(tau[:7], 0.0)
     np.testing.assert_allclose(tau_gravity[:7], 0.0)
+    np.testing.assert_allclose(tau_gc[:7], 0.0)
+    np.testing.assert_allclose(ref_pos[0], 0.0)
+    np.testing.assert_allclose(ref_quat[0], 0.0)
     assert np.any(np.abs(tau[7:]) > 1e-9)
     assert np.any(np.abs(tau_gravity[7:]) > 1e-9)
+    assert np.any(np.abs(tau_gc[7:]) > 1e-9)
+    assert np.linalg.norm(ref_pos[1]) > 1e-9
+    assert np.linalg.norm(ref_quat[1]) > 1e-9
 
 
 def test_real_controller_fk_only_returns_pose_and_zero_torque():
-    status, tau, tau_gravity, ee_pos, ee_twist = _exchange(MODE_FK_ONLY, (1 << 0) | (1 << 1))
+    status, tau, tau_gravity, tau_gc, ee_pos, ref_pos, ref_quat, ee_twist = _exchange(
+        MODE_FK_ONLY, (1 << 0) | (1 << 1)
+    )
 
     assert status == 0
     np.testing.assert_allclose(tau, 0.0)
     np.testing.assert_allclose(tau_gravity, 0.0)
+    np.testing.assert_allclose(tau_gc, 0.0)
+    np.testing.assert_allclose(ref_pos, 0.0)
+    np.testing.assert_allclose(ref_quat, 0.0)
     assert np.all(np.isfinite(ee_pos))
     assert ee_twist.shape == (2, 6)
     assert np.all(np.isfinite(ee_twist))
@@ -94,11 +118,16 @@ def test_real_controller_fk_only_returns_pose_and_zero_torque():
 
 
 def test_real_controller_fk_only_returns_active_arm_twist_and_zeroes_inactive_arm():
-    status, tau, tau_gravity, _ee_pos, ee_twist = _exchange(MODE_FK_ONLY, 1 << 0, qd_value=0.25)
+    status, tau, tau_gravity, tau_gc, _ee_pos, ref_pos, ref_quat, ee_twist = _exchange(
+        MODE_FK_ONLY, 1 << 0, qd_value=0.25
+    )
 
     assert status == 0
     np.testing.assert_allclose(tau, 0.0)
     np.testing.assert_allclose(tau_gravity, 0.0)
+    np.testing.assert_allclose(tau_gc, 0.0)
+    np.testing.assert_allclose(ref_pos, 0.0)
+    np.testing.assert_allclose(ref_quat, 0.0)
     assert np.all(np.isfinite(ee_twist))
     assert np.linalg.norm(ee_twist[0]) > 1e-9
     np.testing.assert_allclose(ee_twist[1], 0.0)

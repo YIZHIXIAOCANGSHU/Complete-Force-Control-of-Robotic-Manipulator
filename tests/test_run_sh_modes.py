@@ -170,6 +170,13 @@ def test_real_both_gravity_only_routes_to_real_entrypoint_with_gravity_flag():
     assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "both", "--gravity-only"]
 
 
+def test_real_both_gc_only_routes_to_real_entrypoint_with_gc_flag():
+    completed = _run_script("real", "both", "--gc-only")
+
+    assert completed.returncode == 0, completed.stderr
+    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "both", "--gc-only"]
+
+
 def test_real_both_routes_to_real_entrypoint():
     completed = _run_script("real", "both")
 
@@ -206,6 +213,14 @@ def test_interactive_menu_can_select_real_right_gravity_only():
     assert completed.returncode == 0, completed.stderr
     assert "Real 控制量下发" in completed.stdout
     assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right", "--gravity-only"]
+
+
+def test_interactive_menu_can_select_real_right_gc_only():
+    completed = _run_script(input_text="2\n2\n4\n")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Real 控制量下发" in completed.stdout
+    assert _fake_python_args(completed) == ["python/real/main.py", "--arm", "right", "--gc-only"]
 
 
 def test_interactive_menu_can_select_mc():
