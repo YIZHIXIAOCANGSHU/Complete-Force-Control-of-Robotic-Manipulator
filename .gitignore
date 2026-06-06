@@ -4,4 +4,5 @@ __pycache__/
 .pytest_cache/
 .venv/
 c_interface/c_main
+c_interface/real/real_controller
 c_interface/serial_gravity_comp
