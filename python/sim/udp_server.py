@@ -21,8 +21,6 @@ from sim.state_packets import (
     TORQUE_OUTPUT_PACKET_SIZE,
 )
 
-
-
 from sim.env_factory import _create_sim_env
 from sim.mc_report import _collect_monte_carlo_workspace, run_monte_carlo_range_check, run_sim_report
 from sim.mc_viewer import _show_monte_carlo_workspace_viewer, _workspace_box_edges
@@ -93,6 +91,21 @@ from sim.workspace import (
 )
 
 
+_CONTROL_OUTPUT_DTYPE = np.dtype("<f8")
+_EXPECTED_TORQUE_BYTES = TORQUE_OUTPUT_PACKET_SIZE * _CONTROL_OUTPUT_DTYPE.itemsize
+_TAU_OUTPUT_SLICE = slice(OUTPUT_TAU_OFFSET, OUTPUT_TAU_OFFSET + Config.NUM_JOINTS)
+_REF_POS_OUTPUT_SLICE = slice(
+    OUTPUT_REF_POS_OFFSET,
+    OUTPUT_REF_POS_OFFSET + Config.NUM_ARMS * 3,
+)
+_REF_QUAT_OUTPUT_SLICE = slice(
+    OUTPUT_REF_QUAT_OFFSET,
+    OUTPUT_REF_QUAT_OFFSET + Config.NUM_ARMS * 4,
+)
+_REF_POS_OUTPUT_SHAPE = (Config.NUM_ARMS, 3)
+_REF_QUAT_OUTPUT_SHAPE = (Config.NUM_ARMS, 4)
+
+
 def _should_log_sim_rerun_step(step_count: int) -> bool:
     stride = max(1, int(Config.RERUN_LOG_STRIDE))
     return stride <= 1 or int(step_count) % stride == 0
@@ -116,6 +129,12 @@ def _sim_viewer_stats(viewer_worker) -> dict[str, float | int]:
             "viewer_lock_wait_ms": 0.0,
         }
     return viewer_worker.stats_snapshot()
+
+
+def _should_print_sim_stats(now_s: float, last_print_s: float | None) -> bool:
+    if Config.SIM_STATS_INTERVAL_S <= 0.0:
+        return False
+    return last_print_s is None or now_s - last_print_s >= Config.SIM_STATS_INTERVAL_S
 
 
 def _maybe_print_sim_stats(
@@ -506,7 +525,7 @@ def run_udp_server(ready_file: str | None = None) -> None:
     step_count = 0
     state_packet = np.empty(CONTROL_INPUT_PACKET_SIZE, dtype=np.float64)
     state_packet_view = memoryview(state_packet).cast("B")
-    expected_torque_bytes = TORQUE_OUTPUT_PACKET_SIZE * np.dtype("<f8").itemsize
+    expected_torque_bytes = _EXPECTED_TORQUE_BYTES
     last_loop_end_s = None
     last_stats_print_s = None
     socket_timeout_count = 0
@@ -529,16 +548,10 @@ def run_udp_server(ready_file: str | None = None) -> None:
                     continue
 
                 service_start_s = time.perf_counter()
-                control_output = np.frombuffer(data, dtype="<f8", count=TORQUE_OUTPUT_PACKET_SIZE)
-                tau = control_output[
-                    OUTPUT_TAU_OFFSET : OUTPUT_TAU_OFFSET + Config.NUM_JOINTS
-                ]
-                ref_pos = control_output[
-                    OUTPUT_REF_POS_OFFSET : OUTPUT_REF_POS_OFFSET + Config.NUM_ARMS * 3
-                ].reshape(Config.NUM_ARMS, 3)
-                ref_quat = control_output[
-                    OUTPUT_REF_QUAT_OFFSET : OUTPUT_REF_QUAT_OFFSET + Config.NUM_ARMS * 4
-                ].reshape(Config.NUM_ARMS, 4)
+                control_output = np.frombuffer(data, dtype=_CONTROL_OUTPUT_DTYPE, count=TORQUE_OUTPUT_PACKET_SIZE)
+                tau = control_output[_TAU_OUTPUT_SLICE]
+                ref_pos = control_output[_REF_POS_OUTPUT_SLICE].reshape(_REF_POS_OUTPUT_SHAPE)
+                ref_quat = control_output[_REF_QUAT_OUTPUT_SLICE].reshape(_REF_QUAT_OUTPUT_SHAPE)
                 rerun_payload = None
                 with env_lock:
                     body_gui.apply_pending()
@@ -600,8 +613,15 @@ def run_udp_server(ready_file: str | None = None) -> None:
                         loop_hz = 1.0 / loop_dt_s
                 last_loop_end_s = loop_end_s
 
-                rerun_overwrites, rerun_drops = _sim_rerun_stats(rerun_logger)
-                viewer_stats = _sim_viewer_stats(viewer_worker)
+                should_log_rerun = rerun_payload is not None
+                should_print_stats = _should_print_sim_stats(loop_end_s, last_stats_print_s)
+                if should_log_rerun or should_print_stats:
+                    rerun_overwrites, rerun_drops = _sim_rerun_stats(rerun_logger)
+                    viewer_stats = _sim_viewer_stats(viewer_worker)
+                else:
+                    rerun_overwrites = 0
+                    rerun_drops = 0
+                    viewer_stats = None
                 if rerun_payload is not None:
                     rerun_logger.log_step(
                         **rerun_payload,
@@ -617,18 +637,19 @@ def run_udp_server(ready_file: str | None = None) -> None:
                         sim_socket_timeout_count=socket_timeout_count,
                         **viewer_stats,
                     )
-                last_stats_print_s = _maybe_print_sim_stats(
-                    now_s=loop_end_s,
-                    last_print_s=last_stats_print_s,
-                    loop_hz=loop_hz,
-                    loop_ms=loop_ms,
-                    mujoco_step_ms=mujoco_step_ms,
-                    state_packet_ms=state_packet_ms,
-                    rerun_overwrite_count=rerun_overwrites,
-                    rerun_drop_count=rerun_drops,
-                    viewer_stats=viewer_stats,
-                    socket_timeout_count=socket_timeout_count,
-                )
+                if should_print_stats:
+                    last_stats_print_s = _maybe_print_sim_stats(
+                        now_s=loop_end_s,
+                        last_print_s=last_stats_print_s,
+                        loop_hz=loop_hz,
+                        loop_ms=loop_ms,
+                        mujoco_step_ms=mujoco_step_ms,
+                        state_packet_ms=state_packet_ms,
+                        rerun_overwrite_count=rerun_overwrites,
+                        rerun_drop_count=rerun_drops,
+                        viewer_stats=viewer_stats,
+                        socket_timeout_count=socket_timeout_count,
+                    )
                 step_count += 1
 
             except socket.timeout:
