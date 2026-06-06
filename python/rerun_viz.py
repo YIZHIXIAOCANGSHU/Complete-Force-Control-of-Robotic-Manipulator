@@ -492,7 +492,7 @@ def setup_realtime_styles():
             return None
         return rrb.TimeSeriesView(name=name, origin=f"/{path}")
 
-    performance_views = [
+    performance_overview_views = [
         performance_view("Python Control Step Time (ms)", "performance/c_engine_time"),
         performance_view("Control Link Rate (Hz)", "performance/link_cycle_hz"),
         performance_view("Control Link Period (ms)", "performance/link_latency"),
@@ -503,25 +503,26 @@ def setup_realtime_styles():
         performance_view("Sim Rerun Overwrites", "performance/sim_rerun_overwrite_count"),
         performance_view("Sim Rerun Drops", "performance/sim_rerun_drop_count"),
         performance_view("Viewer Sync Time (ms)", "performance/viewer_sync_ms"),
+        performance_view("TX Pending Overwrites", "performance/tx_overwrite_count"),
+        performance_view("CAN Backpressure Count", "performance/can_backpressure_count"),
+    ]
+    performance_detailed_views = [
         performance_view("Control Link Throughput (kbps)", "performance/link_transfer_kbps"),
         performance_view("STM32 Calculation Time (ms)", "performance/stm32_calc_time"),
         performance_view("STM32 Calculation Rate (Hz)", "performance/stm32_calc_hz"),
         performance_view("Feedback Wait (ms)", "performance/feedback_wait_ms"),
-        performance_view("TX Pending Overwrites", "performance/tx_overwrite_count"),
-        performance_view("CAN Backpressure Count", "performance/can_backpressure_count"),
         performance_view("Control Target Hz", "performance/control_target_hz"),
         performance_view("Sim Socket Timeouts", "performance/sim_socket_timeout_count"),
         performance_view("Viewer Sync Count", "performance/viewer_sync_count"),
         performance_view("Viewer Skip Count", "performance/viewer_skip_count"),
         performance_view("Viewer Lock Wait (ms)", "performance/viewer_lock_wait_ms"),
     ]
-    performance_views = [view for view in performance_views if view is not None]
 
     def control_link_view():
         return rrb.Vertical(
             rrb.TextLogView(name="Control Link Log", origin="/control_link_log"),
             link_latency_view(),
-            name="Control Link",
+            name="Link",
         )
 
     def arm_axis_view(
@@ -636,38 +637,38 @@ def setup_realtime_styles():
         return rrb.Horizontal(
             fast_status_detail_view("left", "Left"),
             fast_status_detail_view("right", "Right"),
-            name="Fast Status Detail",
+            name="Fast Status",
         )
 
     def tracking_detail_view():
-        return rrb.Vertical(
+        return rrb.Tabs(
             fast_status_detail_tab(),
             rrb.Horizontal(
                 arm_axis_view("left", "Left", "position", "Position", ("X", "Y", "Z"), _POSITION_DISPLAY_UNIT),
                 arm_axis_view("right", "Right", "position", "Position", ("X", "Y", "Z"), _POSITION_DISPLAY_UNIT),
-                name="Position Detail",
+                name="Position",
             ),
             rrb.Horizontal(
                 arm_axis_view("left", "Left", "rotation", "Rotation", ("Roll", "Pitch", "Yaw"), "deg"),
                 arm_axis_view("right", "Right", "rotation", "Rotation", ("Roll", "Pitch", "Yaw"), "deg"),
-                name="Rotation Detail",
+                name="Rotation",
             ),
             rrb.Horizontal(
                 arm_axis_view("left", "Left", "position_error", "Position Error", ("X", "Y", "Z"), "mm"),
                 arm_axis_view("right", "Right", "position_error", "Position Error", ("X", "Y", "Z"), "mm"),
-                name="Position Error Detail",
+                name="Position Error",
             ),
             rrb.Horizontal(
                 arm_axis_view("left", "Left", "rotation_error", "Rotation Error", ("Roll", "Pitch", "Yaw"), "deg"),
                 arm_axis_view("right", "Right", "rotation_error", "Rotation Error", ("Roll", "Pitch", "Yaw"), "deg"),
-                name="Rotation Error Detail",
+                name="Rotation Error",
             ),
             tcp_speed_view(),
             name="Tracking Detail",
         )
 
     def joint_detail_view():
-        return rrb.Vertical(
+        return rrb.Tabs(
             rrb.Horizontal(
                 arm_joint_axis_view("left", "Left", "joint_q", "Joint Q", "rad"),
                 arm_joint_axis_view("right", "Right", "joint_q", "Joint Q", "rad"),
@@ -682,26 +683,26 @@ def setup_realtime_styles():
         )
 
     def torque_detail_view():
-        return rrb.Vertical(
+        return rrb.Tabs(
             rrb.Horizontal(
                 arm_joint_axis_view("left", "Left", "torque", "Torque", "N*m"),
                 arm_joint_axis_view("right", "Right", "torque", "Torque", "N*m"),
-                name="Command Torque",
+                name="Command",
             ),
             rrb.Horizontal(
                 arm_joint_axis_view("left", "Left", "torque_raw", "Raw Torque", "N*m"),
                 arm_joint_axis_view("right", "Right", "torque_raw", "Raw Torque", "N*m"),
-                name="Raw Torque",
+                name="Raw",
             ),
             rrb.Horizontal(
                 arm_joint_axis_view("left", "Left", "torque_actual", "Actual Torque", "N*m"),
                 arm_joint_axis_view("right", "Right", "torque_actual", "Actual Torque", "N*m"),
-                name="Actual Torque",
+                name="Actual",
             ),
             rrb.Horizontal(
                 arm_joint_axis_view("left", "Left", "torque_gap", "Torque Gap", "N*m"),
                 arm_joint_axis_view("right", "Right", "torque_gap", "Torque Gap", "N*m"),
-                name="Torque Gap",
+                name="Gap",
             ),
             rrb.Horizontal(
                 rrb.TimeSeriesView(
@@ -712,13 +713,13 @@ def setup_realtime_styles():
                     name="Right Torque Utilization",
                     origin="/arms/right/fast_status/torque_utilization",
                 ),
-                name="Torque Utilization",
+                name="Utilization",
             ),
             name="Torque Detail",
         )
 
     def safety_view():
-        return rrb.Vertical(
+        return rrb.Tabs(
             rrb.Horizontal(
                 arm_joint_axis_view("left", "Left", "velocity_margin", "Velocity Safety Margin", "rad/s"),
                 arm_joint_axis_view("right", "Right", "velocity_margin", "Velocity Safety Margin", "rad/s"),
@@ -734,44 +735,60 @@ def setup_realtime_styles():
                 arm_joint_axis_view("right", "Right", "limit_margin_high", "High Limit Margin", "rad"),
                 name="High Limit Margin",
             ),
-            rrb.Horizontal(
-                rrb.TimeSeriesView(
-                    name="Left Min Joint Limit Margin (rad)",
-                    origin="/arms/left/fast_status/min_joint_limit_margin_rad",
+            rrb.Vertical(
+                rrb.Horizontal(
+                    rrb.TimeSeriesView(
+                        name="Left Min Joint Limit Margin (rad)",
+                        origin="/arms/left/fast_status/min_joint_limit_margin_rad",
+                    ),
+                    rrb.TimeSeriesView(
+                        name="Right Min Joint Limit Margin (rad)",
+                        origin="/arms/right/fast_status/min_joint_limit_margin_rad",
+                    ),
+                    name="Limit Margin Summary",
                 ),
-                rrb.TimeSeriesView(
-                    name="Right Min Joint Limit Margin (rad)",
-                    origin="/arms/right/fast_status/min_joint_limit_margin_rad",
+                rrb.Horizontal(
+                    rrb.TimeSeriesView(
+                        name="Left Min Velocity Margin (rad/s)",
+                        origin="/arms/left/fast_status/min_velocity_margin_rad_s",
+                    ),
+                    rrb.TimeSeriesView(
+                        name="Right Min Velocity Margin (rad/s)",
+                        origin="/arms/right/fast_status/min_velocity_margin_rad_s",
+                    ),
+                    name="Velocity Margin Summary",
                 ),
-                name="Limit Margin Summary",
+                name="Summary",
             ),
-            rrb.Horizontal(
-                rrb.TimeSeriesView(
-                    name="Left Min Velocity Margin (rad/s)",
-                    origin="/arms/left/fast_status/min_velocity_margin_rad_s",
-                ),
-                rrb.TimeSeriesView(
-                    name="Right Min Velocity Margin (rad/s)",
-                    origin="/arms/right/fast_status/min_velocity_margin_rad_s",
-                ),
-                name="Velocity Margin Summary",
-            ),
-            rrb.TextLogView(name="Safety Warnings", origin="/control_link_log"),
+            rrb.TextLogView(name="Warnings", origin="/control_link_log"),
             name="Safety",
         )
+
+    def details_view():
+        return rrb.Tabs(
+            tracking_detail_view(),
+            joint_detail_view(),
+            torque_detail_view(),
+            safety_view(),
+            name="Details",
+        )
+
+    def performance_view_group():
+        overview_views = [view for view in performance_overview_views if view is not None]
+        detailed_views = [view for view in performance_detailed_views if view is not None]
+        children = [
+            rrb.Vertical(*overview_views, name="Overview"),
+        ]
+        if detailed_views:
+            children.append(rrb.Vertical(*detailed_views, name="Detailed"))
+        return rrb.Tabs(*children, name="Performance")
 
     blueprint = rrb.Blueprint(
         rrb.Tabs(
             status_view(),
             rrb.Spatial3DView(name="3D", origin="/trajectory_3d"),
-            tracking_detail_view(),
-            joint_detail_view(),
-            torque_detail_view(),
-            safety_view(),
-            rrb.Vertical(
-                *performance_views,
-                name="Performance",
-            ),
+            details_view(),
+            performance_view_group(),
             control_link_view(),
         ),
         collapse_panels=True,

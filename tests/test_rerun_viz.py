@@ -134,6 +134,15 @@ def _child_by_name(node, name: str):
     raise AssertionError(f"Missing child {name}")
 
 
+def _child_names(node) -> list[str]:
+    return [child.get("name") for child in node.get("children", [])]
+
+
+def _assert_tabs_children(node, expected_names: list[str]) -> None:
+    assert node["kind"] == "Tabs"
+    assert _child_names(node) == expected_names
+
+
 def _time_series_origins(node) -> set[str]:
     return {
         child["origin"]
@@ -228,19 +237,26 @@ def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
     assert "/tracking/rot/Roll" not in names_by_origin
     assert "/error/X" not in names_by_origin
 
-    tab_names = {
+    tile_names = {
         node["name"]
         for node in _iter_nodes(dummy_rr.blueprint)
-        if node.get("kind") in ("Tabs", "Vertical", "Spatial3DView", "TimeSeriesView", "TextLogView")
+        if node.get("kind")
+        in ("Tabs", "Vertical", "Horizontal", "Spatial3DView", "TimeSeriesView", "TextLogView")
         and node.get("name")
     }
-    expected_tabs = {
+    expected_tiles = {
         "Status",
         "3D",
+        "Details",
         "Tracking Detail",
         "Joint Detail",
         "Torque Detail",
         "Safety",
+        "Fast Status",
+        "Position",
+        "Rotation",
+        "Position Error",
+        "Rotation Error",
         "Left Position",
         "Right Position",
         "Left Rotation",
@@ -258,12 +274,20 @@ def test_setup_realtime_styles_labels_position_views_in_mm(monkeypatch):
         "Right Torque",
         "Left Torque Gap",
         "Right Torque Gap",
+        "Command",
+        "Raw",
+        "Actual",
+        "Gap",
+        "Utilization",
+        "Summary",
+        "Warnings",
         "Performance",
-        "Control Link",
+        "Overview",
+        "Link",
     }
-    assert expected_tabs <= tab_names
-    assert "Left Arm" not in tab_names
-    assert "Right Arm" not in tab_names
+    assert expected_tiles <= tile_names
+    assert "Left Arm" not in tile_names
+    assert "Right Arm" not in tile_names
 
 
 def test_setup_realtime_styles_adds_status_dashboard_without_removing_details(monkeypatch):
@@ -274,24 +298,24 @@ def test_setup_realtime_styles_adds_status_dashboard_without_removing_details(mo
 
     rerun_viz.setup_realtime_styles()
 
-    assert _first_level_tab_names(dummy_rr.blueprint)[:7] == [
+    assert _first_level_tab_names(dummy_rr.blueprint) == [
         "Status",
         "3D",
-        "Tracking Detail",
-        "Joint Detail",
-        "Torque Detail",
-        "Safety",
+        "Details",
         "Performance",
+        "Link",
     ]
     status_tab = _first_level_tab(dummy_rr.blueprint, "Status")
     assert not any(node.get("kind") == "Spatial3DView" for node in _iter_nodes(status_tab))
-    assert status_tab["kind"] == "Tabs"
-    assert [child.get("name") for child in status_tab["children"]] == [
-        "Tracking",
-        "Torque",
-        "Safety",
-        "Link",
-    ]
+    _assert_tabs_children(
+        status_tab,
+        [
+            "Tracking",
+            "Torque",
+            "Safety",
+            "Link",
+        ],
+    )
 
     tracking_status = _child_by_name(status_tab, "Tracking")
     assert _time_series_origins(tracking_status) == {
@@ -316,6 +340,27 @@ def test_setup_realtime_styles_adds_status_dashboard_without_removing_details(mo
         "/performance/tx_overwrite_count",
         "/performance/can_backpressure_count",
     }
+    performance_tab = _first_level_tab(dummy_rr.blueprint, "Performance")
+    _assert_tabs_children(performance_tab, ["Overview"])
+
+    details_tab = _first_level_tab(dummy_rr.blueprint, "Details")
+    _assert_tabs_children(
+        details_tab,
+        ["Tracking Detail", "Joint Detail", "Torque Detail", "Safety"],
+    )
+    _assert_tabs_children(
+        _child_by_name(details_tab, "Tracking Detail"),
+        ["Fast Status", "Position", "Rotation", "Position Error", "Rotation Error", "TCP Speed"],
+    )
+    _assert_tabs_children(_child_by_name(details_tab, "Joint Detail"), ["Joint Position", "Joint Velocity"])
+    _assert_tabs_children(
+        _child_by_name(details_tab, "Torque Detail"),
+        ["Command", "Raw", "Actual", "Gap", "Utilization"],
+    )
+    _assert_tabs_children(
+        _child_by_name(details_tab, "Safety"),
+        ["Velocity Margin", "Low Limit Margin", "High Limit Margin", "Summary", "Warnings"],
+    )
 
     names_by_origin = {
         node["origin"]: node["name"]
@@ -352,6 +397,9 @@ def test_setup_realtime_styles_uses_balanced_performance_views_by_default(monkey
 
     rerun_viz.setup_realtime_styles()
 
+    performance_tab = _first_level_tab(dummy_rr.blueprint, "Performance")
+    _assert_tabs_children(performance_tab, ["Overview"])
+
     origins = {
         node["origin"]
         for node in _iter_nodes(dummy_rr.blueprint)
@@ -375,6 +423,9 @@ def test_setup_realtime_styles_full_profile_includes_detailed_performance_views(
     monkeypatch.setattr(rerun_viz.Config, "RERUN_DETAILED_PERF", True)
 
     rerun_viz.setup_realtime_styles()
+
+    performance_tab = _first_level_tab(dummy_rr.blueprint, "Performance")
+    _assert_tabs_children(performance_tab, ["Overview", "Detailed"])
 
     origins = {
         node["origin"]
