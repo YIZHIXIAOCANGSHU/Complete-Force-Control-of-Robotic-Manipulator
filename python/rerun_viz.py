@@ -17,232 +17,54 @@ except ImportError:
     print("警告: rerun-sdk 未安装，将跳过 Rerun 可视化")
 
 from config import Config
+from rerun_runtime.constants import (
+    ACTUAL_COLOR as _ACTUAL_COLOR,
+    ARM_DISPLAY_NAMES as _ARM_DISPLAY_NAMES,
+    ARM_LABELS as _ARM_LABELS,
+    AXIS_COLORS as _AXIS_COLORS,
+    ERROR_COLOR as _ERROR_COLOR,
+    JOINT_COLORS as _JOINT_COLORS,
+    LEFT_ARM_COLOR as _LEFT_ARM_COLOR,
+    LIMIT_COLOR as _LIMIT_COLOR,
+    MODE_COLORS as _MODE_COLORS,
+    POSITION_DISPLAY_UNIT as _POSITION_DISPLAY_UNIT,
+    REFERENCE_COLOR as _REFERENCE_COLOR,
+    RIGHT_ARM_COLOR as _RIGHT_ARM_COLOR,
+    SAFETY_LOG_MARGIN_RAD as _SAFETY_LOG_MARGIN_RAD,
+    SAFETY_LOG_MARGIN_RAD_S as _SAFETY_LOG_MARGIN_RAD_S,
+    SAFETY_TEXT_LOG_INTERVAL_STEPS as _SAFETY_TEXT_LOG_INTERVAL_STEPS,
+    TARGET_COLOR as _TARGET_COLOR,
+)
+from rerun_runtime.math_utils import (
+    _as_arm_array,
+    _position_to_display_units,
+    _safe_pose_name,
+    _torque_utilization,
+    compute_rotation_error,
+    compute_rotation_error_single,
+    quat_to_euler,
+    quaternion_multiply,
+    quaternion_to_euler,
+)
+from rerun_runtime.performance import (
+    DETAILED_PERFORMANCE_PATHS as _DETAILED_PERFORMANCE_PATHS,
+    ESSENTIAL_PERFORMANCE_PATHS as _ESSENTIAL_PERFORMANCE_PATHS,
+    _rerun_should_log_perf,
+)
+from rerun_runtime.safety import (
+    _format_safety_warnings,
+    _joint_safe_limits_rad,
+    _joint_safety_margins,
+)
 
-_AXIS_COLORS = {
-    'X':     [230, 80, 80],
-    'Y':     [80, 190, 80],
-    'Z':     [80, 120, 230],
-    'Roll':  [230, 80, 80],
-    'Pitch': [80, 190, 80],
-    'Yaw':   [80, 120, 230],
-}
-
-_MODE_COLORS = {
-    'mujoco': [50, 150, 230],
-    'c_engine': [230, 100, 50],
-}
-_ACTUAL_COLOR = [50, 150, 230]
-_TARGET_COLOR = [80, 200, 90]
-_REFERENCE_COLOR = [240, 150, 40]
-_ERROR_COLOR = [220, 70, 70]
-_LIMIT_COLOR = [130, 130, 130]
-_LEFT_ARM_COLOR = [50, 150, 230]
-_RIGHT_ARM_COLOR = [230, 120, 50]
-
-_JOINT_COLORS = [
-    [230, 50, 50],
-    [230, 140, 30],
-    [210, 200, 30],
-    [50, 200, 50],
-    [50, 200, 200],
-    [50, 80, 230],
-    [150, 50, 230],
-] * 2
-
-_POSITION_DISPLAY_UNIT = "mm"
-_POSITION_DISPLAY_SCALE = 1000.0
-_SAFETY_LOG_MARGIN_RAD = 0.02
-_SAFETY_LOG_MARGIN_RAD_S = 0.2
-_SAFETY_TEXT_LOG_INTERVAL_STEPS = 500
 _last_safety_warning_signature: str | None = None
 _last_safety_warning_step: int | None = None
-
-
-_POSE_NAME_MAP = {
-    "零位": "zero",
-    "伸展位": "extend",
-    "随机位": "random",
-}
-
-_ARM_LABELS = ("left", "right")
-_ARM_DISPLAY_NAMES = ("Left", "Right")
-_ESSENTIAL_PERFORMANCE_PATHS = {
-    "performance/c_engine_time",
-    "performance/elapsed_s",
-    "performance/link_latency",
-    "performance/link_cycle_hz",
-    "performance/sim_target_hz",
-    "performance/sim_service_ms",
-    "performance/sim_mujoco_step_ms",
-    "performance/sim_state_packet_ms",
-    "performance/sim_rerun_overwrite_count",
-    "performance/sim_rerun_drop_count",
-    "performance/viewer_sync_ms",
-    "performance/tx_overwrite_count",
-    "performance/can_backpressure_count",
-}
-_DETAILED_PERFORMANCE_PATHS = {
-    "performance/link_transfer_kbps",
-    "performance/stm32_calc_time",
-    "performance/stm32_calc_hz",
-    "performance/feedback_wait_ms",
-    "performance/control_target_hz",
-    "performance/sim_socket_timeout_count",
-    "performance/viewer_sync_count",
-    "performance/viewer_skip_count",
-    "performance/viewer_lock_wait_ms",
-}
-
-
-def _rerun_detailed_perf_enabled() -> bool:
-    return bool(getattr(Config, "RERUN_DETAILED_PERF", False))
-
-
-def _rerun_should_log_perf(path: str) -> bool:
-    return path in _ESSENTIAL_PERFORMANCE_PATHS or (
-        _rerun_detailed_perf_enabled() and path in _DETAILED_PERFORMANCE_PATHS
-    )
 
 
 def _log_perf_scalar(path: str, value) -> None:
     if value is None or not _rerun_should_log_perf(path):
         return
     rr.log(path, rr.Scalars(float(value)))
-
-
-def _as_arm_array(values: np.ndarray, width: int) -> np.ndarray:
-    array = np.asarray(values, dtype=np.float64)
-    if array.shape == (width,):
-        return array.reshape(1, width)
-    if array.shape == (Config.NUM_ARMS * width,):
-        return array.reshape(Config.NUM_ARMS, width)
-    if array.shape == (Config.NUM_ARMS, width):
-        return array
-    raise ValueError(f"expected shape ({width},) or ({Config.NUM_ARMS}, {width}), got {array.shape}")
-
-
-def _torque_utilization(tau_values: np.ndarray, torque_limits: np.ndarray) -> float:
-    limits = np.asarray(torque_limits, dtype=np.float64)
-    safe_limits = np.where(np.abs(limits) > 1e-12, np.abs(limits), 1.0)
-    ratios = np.abs(np.asarray(tau_values, dtype=np.float64)) / safe_limits
-    return float(np.max(ratios)) if ratios.size else 0.0
-
-def _safe_pose_name(name: str) -> str:
-    """将中文姿态名转为 ASCII 安全名称"""
-    return _POSE_NAME_MAP.get(name, f"pose_{hash(name) % 10000}")
-
-
-def _position_to_display_units(position: np.ndarray) -> np.ndarray:
-    """将内部米制位置转换为 Rerun 图表展示使用的毫米。"""
-    return np.asarray(position, dtype=np.float64) * _POSITION_DISPLAY_SCALE
-
-
-def quaternion_to_euler(w, x, y, z):
-    """
-    四元数转欧拉角 (Roll, Pitch, Yaw) - ZYX 顺序
-    """
-    import math
-    # roll (x-axis rotation)
-    sinr_cosp = 2 * (w * x + y * z)
-    cosr_cosp = 1 - 2 * (x * x + y * y)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
-
-    # pitch (y-axis rotation)
-    sinp = 2 * (w * y - z * x)
-    if abs(sinp) >= 1:
-        pitch = math.copysign(math.pi / 2, sinp) # use 90 degrees if out of range
-    else:
-        pitch = math.asin(sinp)
-
-    # yaw (z-axis rotation)
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-
-    return np.array([roll, pitch, yaw])
-
-def quat_to_euler(quat):
-    """适配 [w, x, y, z] 或 [x, y, z, w] 的包装"""
-    # 假设输入是 [w, x, y, z]
-    return quaternion_to_euler(quat[0], quat[1], quat[2], quat[3])
-
-def quaternion_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    """四元数乘法 [w, x, y, z]"""
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
-    return np.array([
-        w1*w2 - x1*x2 - y1*y2 - z1*z2,
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-        w1*z2 + x1*y2 - y1*x2 + z1*w2
-    ])
-
-def compute_rotation_error(quat_actual: np.ndarray, quat_desired: np.ndarray) -> np.ndarray:
-    """
-    计算旋转误差 (欧拉角表示, 单位 deg)
-    quat_actual: (N, 4), quat_desired: (N, 4), 格式 [w,x,y,z]
-    返回: (N, 3) [roll_err, pitch_err, yaw_err] in degrees
-    """
-    N = len(quat_actual)
-    errors = np.zeros((N, 3))
-    for i in range(N):
-        q_act = quat_actual[i]
-        q_des = quat_desired[i]
-        q_des_inv = np.array([q_des[0], -q_des[1], -q_des[2], -q_des[3]])
-        q_err = quaternion_multiply(q_act, q_des_inv)
-        if q_err[0] < 0:
-            q_err = -q_err
-        errors[i] = quat_to_euler(q_err)
-    return np.degrees(errors)
-
-
-def compute_rotation_error_single(quat_actual: np.ndarray, quat_desired: np.ndarray) -> np.ndarray:
-    """单步姿态误差，避免为单个样本构造额外批量数组。"""
-    q_des_inv = np.array([quat_desired[0], -quat_desired[1], -quat_desired[2], -quat_desired[3]])
-    q_err = quaternion_multiply(quat_actual, q_des_inv)
-    if q_err[0] < 0:
-        q_err = -q_err
-    return np.rad2deg(quat_to_euler(q_err))
-
-
-def _joint_safe_limits_rad() -> tuple[np.ndarray, np.ndarray]:
-    limits = np.asarray(Config.JOINT_LIMITS_RAD, dtype=np.float64)
-    span = limits[:, 1] - limits[:, 0]
-    inset = float(Config.CONTROL_JOINT_LIMIT_INSET_RATIO) * span
-    return limits[:, 0] + inset, limits[:, 1] - inset
-
-
-def _joint_safety_margins(q: np.ndarray | None, qd: np.ndarray | None):
-    q_margin_low = q_margin_high = vel_margin = None
-    if q is not None:
-        q_values = np.asarray(q, dtype=np.float64).reshape(Config.NUM_JOINTS)
-        safe_min, safe_max = _joint_safe_limits_rad()
-        q_margin_low = q_values - safe_min
-        q_margin_high = safe_max - q_values
-    if qd is not None:
-        qd_values = np.asarray(qd, dtype=np.float64).reshape(Config.NUM_JOINTS)
-        vel_margin = float(Config.JOINT_VEL_LIMIT) - np.abs(qd_values)
-    return q_margin_low, q_margin_high, vel_margin
-
-
-def _format_safety_warnings(
-    q_margin_low: np.ndarray | None,
-    q_margin_high: np.ndarray | None,
-    vel_margin: np.ndarray | None,
-) -> str | None:
-    warnings = []
-    for arm, arm_label in enumerate(_ARM_LABELS):
-        offset = arm * Config.ARM_JOINTS
-        for i in range(Config.ARM_JOINTS):
-            joint = f"{arm_label}/J{i + 1}"
-            index = offset + i
-            if q_margin_low is not None and q_margin_low[index] <= _SAFETY_LOG_MARGIN_RAD:
-                warnings.append(f"{joint} low_limit_margin={q_margin_low[index]:.4f}rad")
-            if q_margin_high is not None and q_margin_high[index] <= _SAFETY_LOG_MARGIN_RAD:
-                warnings.append(f"{joint} high_limit_margin={q_margin_high[index]:.4f}rad")
-            if vel_margin is not None and vel_margin[index] <= _SAFETY_LOG_MARGIN_RAD_S:
-                warnings.append(f"{joint} vel_margin={vel_margin[index]:.4f}rad/s")
-    return "; ".join(warnings) if warnings else None
 
 
 def _safety_warning_signature(safety_warning: str) -> str:
