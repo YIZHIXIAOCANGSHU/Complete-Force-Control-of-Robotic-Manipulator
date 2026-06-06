@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import os
-import queue
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -16,6 +14,19 @@ from config import Config, _env_bool, _env_float, _env_int
 from mujoco_viewer import VIEWER_AVAILABLE, launch_passive_viewer
 from real.can_transport import Usb2FdcanConfig, Usb2FdcanTransport
 from real.controller_bridge import RealControllerBridge
+from real.feedback import RealFeedbackHub as _ConfiguredRealFeedbackHub
+from real.mirror import (
+    RealSharedState,
+    _copy_active_arm_pose_values,
+    _copy_active_arm_values,
+    mirror_real_state_to_env,
+)
+from real.rerun_logger import RealRerunLogger
+from real.types import ArmCanRuntime, RealFeedbackSnapshot
+from real.workers import (
+    RealFeedbackWorker as _ConfiguredRealFeedbackWorker,
+    RealTxWorker as _ConfiguredRealTxWorker,
+)
 from sim.env import MujocoSimEnv
 import rerun_viz
 
@@ -47,6 +58,10 @@ ACTIVE_ARM_MASK = {
     "right": 1 << Config.RIGHT_ARM,
     "both": (1 << Config.LEFT_ARM) | (1 << Config.RIGHT_ARM),
 }
+ARM_JOINT_SLICES = tuple(
+    slice(arm * Config.ARM_JOINTS, (arm + 1) * Config.ARM_JOINTS)
+    for arm in range(Config.NUM_ARMS)
+)
 ARM_INTERFACE = {
     Config.LEFT_ARM: LEFT_CAN_INTERFACE,
     Config.RIGHT_ARM: RIGHT_CAN_INTERFACE,
@@ -62,365 +77,16 @@ shutdown_event = threading.Event()
 _THREAD_WAIT_CLOCK = time.monotonic
 
 
-@dataclass(frozen=True)
-class ArmCanRuntime:
-    arm: int
-    interface: str
-    transport: object
-    motor_ids: tuple[int, ...] = MOTOR_IDS
-
-
-@dataclass(frozen=True)
-class RealFeedbackSnapshot:
-    seq: int
-    timestamp_s: float
-    q: np.ndarray
-    qd: np.ndarray
-    tau_actual: np.ndarray
-    complete_mask: int
-    received_joint_masks: dict[int, int]
-    arm_seq: dict[int, int]
-
-
-class RealSharedState:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self.q = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-        self.qd = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-        self.tau_actual = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-        self.tau_total = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-        self.ee_pos = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
-        self.ee_quat = np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1))
-        self.ref_pos = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
-        self.ref_quat = np.zeros((Config.NUM_ARMS, 4), dtype=np.float64)
-        self.target_pos = np.zeros((Config.NUM_ARMS, 3), dtype=np.float64)
-        self.target_quat = np.tile([1.0, 0.0, 0.0, 0.0], (Config.NUM_ARMS, 1))
-        self.active_arm_mask = 0
-        self.feedback_valid = False
-        self.targets_initialized = False
-
-    def update_feedback(self, q: np.ndarray, qd: np.ndarray, tau_actual: np.ndarray, active_arm_mask: int) -> None:
-        with self._lock:
-            self.q[:] = np.asarray(q, dtype=np.float64).reshape(Config.NUM_JOINTS)
-            self.qd[:] = np.asarray(qd, dtype=np.float64).reshape(Config.NUM_JOINTS)
-            self.tau_actual[:] = np.asarray(tau_actual, dtype=np.float64).reshape(Config.NUM_JOINTS)
-            self.active_arm_mask = int(active_arm_mask)
-            self.feedback_valid = True
-
-    def update_control_output(
-        self,
-        tau_total: np.ndarray,
-        ee_pos: np.ndarray,
-        ee_quat: np.ndarray,
-        ref_pos: np.ndarray | None = None,
-        ref_quat: np.ndarray | None = None,
-    ) -> None:
-        with self._lock:
-            self.tau_total[:] = np.asarray(tau_total, dtype=np.float64).reshape(Config.NUM_JOINTS)
-            self.ee_pos[:] = np.asarray(ee_pos, dtype=np.float64).reshape(Config.NUM_ARMS, 3)
-            self.ee_quat[:] = np.asarray(ee_quat, dtype=np.float64).reshape(Config.NUM_ARMS, 4)
-            if ref_pos is not None:
-                self.ref_pos[:] = np.asarray(ref_pos, dtype=np.float64).reshape(Config.NUM_ARMS, 3)
-            if ref_quat is not None:
-                self.ref_quat[:] = np.asarray(ref_quat, dtype=np.float64).reshape(Config.NUM_ARMS, 4)
-
-    def set_targets(self, target_pos: np.ndarray, target_quat: np.ndarray) -> None:
-        with self._lock:
-            self.target_pos[:] = np.asarray(target_pos, dtype=np.float64).reshape(Config.NUM_ARMS, 3)
-            self.target_quat[:] = np.asarray(target_quat, dtype=np.float64).reshape(Config.NUM_ARMS, 4)
-            self.targets_initialized = True
-
-    def snapshot_control_inputs(self):
-        with self._lock:
-            return (
-                self.q.copy(),
-                self.qd.copy(),
-                self.tau_actual.copy(),
-                self.target_pos.copy(),
-                self.target_quat.copy(),
-            )
-
-    def snapshot_targets(self):
-        with self._lock:
-            return self.target_pos.copy(), self.target_quat.copy()
-
-    def targets_ready(self) -> bool:
-        with self._lock:
-            return bool(self.targets_initialized)
-
-    def snapshot_mirror(self):
-        with self._lock:
-            return (
-                self.q.copy(),
-                self.qd.copy(),
-                self.ref_pos.copy(),
-                self.ref_quat.copy(),
-                bool(self.feedback_valid),
-                bool(self.targets_initialized),
-            )
-
-
-class RealRerunLogger:
-    def __init__(
-        self,
-        queue_size: int | None = None,
-        *,
-        max_hz: float | None = None,
-        perf_counter=time.perf_counter,
-        sleep_fn=time.sleep,
-    ) -> None:
-        self._queue = queue.Queue(maxsize=max(1, int(queue_size or _env_int("AM_D02_RERUN_QUEUE_SIZE", 512))))
-        effective_max_hz = Config.RERUN_MAX_HZ if max_hz is None else float(max_hz)
-        self._period_s = 1.0 / effective_max_hz if effective_max_hz > 0.0 else 0.0
-        self._last_log_time: float | None = None
-        self._perf_counter = perf_counter
-        self._sleep_fn = sleep_fn
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._worker, name="real-rerun-logger", daemon=True)
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def _worker(self) -> None:
-        while not self._stop_event.is_set() or not self._queue.empty():
-            try:
-                payload = self._queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            while True:
-                try:
-                    payload = self._queue.get_nowait()
-                except queue.Empty:
-                    break
-            if self._last_log_time is not None and self._period_s > 0.0:
-                elapsed_s = self._perf_counter() - self._last_log_time
-                if elapsed_s < self._period_s:
-                    self._sleep_fn(self._period_s - elapsed_s)
-            rerun_viz.log_realtime_step(**payload)
-            self._last_log_time = self._perf_counter()
-
-    def log_step(self, **payload) -> None:
-        if self._stop_event.is_set():
-            return
-        try:
-            self._queue.put_nowait(payload)
-        except queue.Full:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._queue.put_nowait(payload)
-            except queue.Full:
-                pass
-
-    def close(self) -> None:
-        self._stop_event.set()
-        self._thread.join(timeout=1.0)
-
-
-class RealFeedbackHub:
+class RealFeedbackHub(_ConfiguredRealFeedbackHub):
     def __init__(self, perf_counter=_THREAD_WAIT_CLOCK) -> None:
-        self._condition = threading.Condition()
-        self._q = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-        self._qd = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-        self._tau_actual = np.zeros(Config.NUM_JOINTS, dtype=np.float64)
-        self._received_joint_masks = {arm: 0 for arm in range(Config.NUM_ARMS)}
-        self._motor_seq = np.zeros((Config.NUM_ARMS, Config.ARM_JOINTS), dtype=np.int64)
-        self._last_feedback_time = np.zeros((Config.NUM_ARMS, Config.ARM_JOINTS), dtype=np.float64)
-        self._feedback_count = np.zeros((Config.NUM_ARMS, Config.ARM_JOINTS), dtype=np.int64)
-        self._last_state = np.full((Config.NUM_ARMS, Config.ARM_JOINTS), -1, dtype=np.int64)
-        self._last_can_id = np.zeros((Config.NUM_ARMS, Config.ARM_JOINTS), dtype=np.int64)
-        self._arm_seq = {arm: 0 for arm in range(Config.NUM_ARMS)}
-        self._arm_timestamp_s = {arm: 0.0 for arm in range(Config.NUM_ARMS)}
-        self._consumed_arm_seq = {arm: 0 for arm in range(Config.NUM_ARMS)}
-        self._complete_mask = 0
-        self._seq = 0
-        self._timestamp_s = 0.0
-        self._error: Exception | None = None
-        self._perf_counter = perf_counter
-
-    def record_feedback_frame(self, arm: int, motor_ids: tuple[int, ...], frame) -> int:
-        sample = (
-            int(frame.motor_id),
-            int(getattr(frame, "can_id", int(frame.motor_id))),
-            int(getattr(frame, "state", 0)),
-            float(frame.position),
-            float(frame.velocity),
-            float(frame.torque),
+        super().__init__(
+            shutdown_event=shutdown_event,
+            wait_clock=_THREAD_WAIT_CLOCK,
+            perf_counter=perf_counter,
         )
-        return self.record_feedback_batch(arm, motor_ids, (sample,))
-
-    def record_feedback_batch(self, arm: int, motor_ids: tuple[int, ...], samples) -> int:
-        arm_index = int(arm)
-        valid_motor_mask = 0
-        for motor_id in motor_ids:
-            local = int(motor_id) - 1
-            if 0 <= local < Config.ARM_JOINTS:
-                valid_motor_mask |= 1 << local
-        full_arm_mask = (1 << Config.ARM_JOINTS) - 1
-        now_s = self._perf_counter()
-        published_seq = 0
-        with self._condition:
-            arm_mask = int(self._received_joint_masks.get(arm_index, 0))
-            for sample in samples:
-                motor_id = int(sample[0])
-                joint_local = motor_id - 1
-                joint_bit = 1 << joint_local if 0 <= joint_local < Config.ARM_JOINTS else 0
-                if (valid_motor_mask & joint_bit) == 0:
-                    continue
-                joint_global = arm_index * Config.ARM_JOINTS + joint_local
-                self._q[joint_global] = float(sample[3])
-                self._qd[joint_global] = float(sample[4])
-                self._tau_actual[joint_global] = float(sample[5])
-                self._motor_seq[arm_index, joint_local] += 1
-                self._last_feedback_time[arm_index, joint_local] = now_s
-                self._feedback_count[arm_index, joint_local] += 1
-                self._last_can_id[arm_index, joint_local] = int(sample[1])
-                self._last_state[arm_index, joint_local] = int(sample[2])
-                arm_mask |= joint_bit
-                if arm_mask == full_arm_mask:
-                    self._complete_mask |= 1 << arm_index
-                    self._received_joint_masks[arm_index] = 0
-                    arm_mask = 0
-                    self._seq += 1
-                    published_seq = int(self._seq)
-                    self._arm_seq[arm_index] = published_seq
-                    self._arm_timestamp_s[arm_index] = now_s
-                    self._timestamp_s = now_s
-            self._received_joint_masks[arm_index] = arm_mask
-            if published_seq:
-                self._condition.notify_all()
-        return published_seq
-
-    def wait_until_consumed(self, arm: int, seq: int, timeout_s: float) -> None:
-        deadline = _THREAD_WAIT_CLOCK() + max(0.0, float(timeout_s))
-        arm_index = int(arm)
-        seq_value = int(seq)
-        with self._condition:
-            while (
-                not shutdown_event.is_set()
-                and self._error is None
-                and int(self._consumed_arm_seq.get(arm_index, 0)) < seq_value
-            ):
-                remaining = deadline - _THREAD_WAIT_CLOCK()
-                if remaining <= 0.0:
-                    return
-                self._condition.wait(timeout=remaining)
-
-    def set_error(self, exc: Exception) -> None:
-        with self._condition:
-            self._error = exc
-            self._condition.notify_all()
-
-    def latest_received_joint_masks(
-        self,
-        active_arm_mask: int | None = None,
-        last_arm_seq: dict[int, int] | None = None,
-    ) -> dict[int, int]:
-        with self._condition:
-            masks = dict(self._received_joint_masks)
-            if active_arm_mask is not None and last_arm_seq is not None:
-                full_arm_mask = (1 << Config.ARM_JOINTS) - 1
-                for arm in range(Config.NUM_ARMS):
-                    if (int(active_arm_mask) & (1 << arm)) != 0 and self._arm_seq[arm] > int(last_arm_seq.get(arm, 0)):
-                        masks[arm] = full_arm_mask
-            return masks
-
-    def feedback_diagnostics(self, runtimes: tuple[ArmCanRuntime, ...], active_arm_mask: int) -> str:
-        now_s = self._perf_counter()
-        parts = []
-        full_arm_mask = (1 << Config.ARM_JOINTS) - 1
-        with self._condition:
-            for runtime in runtimes:
-                arm = int(runtime.arm)
-                if (int(active_arm_mask) & (1 << arm)) == 0:
-                    continue
-                partial_mask = int(self._received_joint_masks.get(arm, 0))
-                received_ids = [
-                    str(int(motor_id))
-                    for motor_id in runtime.motor_ids
-                    if partial_mask & (1 << (int(motor_id) - 1))
-                ]
-                complete_age_ms = None
-                if int(self._arm_seq.get(arm, 0)) > 0:
-                    complete_age_ms = max(0.0, (now_s - float(self._arm_timestamp_s.get(arm, 0.0))) * 1000.0)
-                motor_parts = []
-                for motor_id in runtime.motor_ids:
-                    local = int(motor_id) - 1
-                    last_time = float(self._last_feedback_time[arm, local])
-                    if last_time <= 0.0:
-                        age = "never"
-                    else:
-                        age = f"{max(0.0, (now_s - last_time) * 1000.0):.1f}ms"
-                    count = int(self._feedback_count[arm, local])
-                    can_id = int(self._last_can_id[arm, local])
-                    state = int(self._last_state[arm, local])
-                    if can_id:
-                        motor_parts.append(
-                            f"id{int(motor_id)} age={age} count={count} can=0x{can_id:03X} state=0x{state:X}"
-                        )
-                    else:
-                        motor_parts.append(f"id{int(motor_id)} age={age} count={count}")
-                arm_complete = (self._complete_mask & (1 << arm)) != 0
-                complete_age = "n/a" if complete_age_ms is None else f"{complete_age_ms:.1f}ms"
-                parts.append(
-                    f"{runtime.interface}: partial_ids={','.join(received_ids) if received_ids else 'none'} "
-                    f"partial_mask=0x{partial_mask:02X}/0x{full_arm_mask:02X} "
-                    f"complete={arm_complete} complete_age={complete_age} "
-                    f"motors=[{'; '.join(motor_parts)}]"
-                )
-        return " | ".join(parts) if parts else "no active feedback diagnostics"
-
-    def wait_for_next(
-        self,
-        active_arm_mask: int,
-        *,
-        last_seq: int,
-        timeout_s: float,
-        last_arm_seq: dict[int, int] | None = None,
-    ) -> RealFeedbackSnapshot | None:
-        deadline = _THREAD_WAIT_CLOCK() + max(0.0, float(timeout_s))
-        with self._condition:
-            while True:
-                if self._error is not None:
-                    raise self._error
-                active_ready = (self._complete_mask & int(active_arm_mask)) == int(active_arm_mask)
-                if active_ready and last_arm_seq is not None:
-                    active_ready = all(
-                        self._arm_seq[arm] > int(last_arm_seq.get(arm, 0))
-                        for arm in range(Config.NUM_ARMS)
-                        if (int(active_arm_mask) & (1 << arm)) != 0
-                    )
-                if self._seq > int(last_seq) and active_ready:
-                    snapshot = RealFeedbackSnapshot(
-                        seq=int(self._seq),
-                        timestamp_s=float(self._timestamp_s),
-                        q=self._q.copy(),
-                        qd=self._qd.copy(),
-                        tau_actual=self._tau_actual.copy(),
-                        complete_mask=int(self._complete_mask),
-                        received_joint_masks=dict(self._received_joint_masks),
-                        arm_seq=dict(self._arm_seq),
-                    )
-                    for arm in range(Config.NUM_ARMS):
-                        if (int(active_arm_mask) & (1 << arm)) != 0:
-                            self._consumed_arm_seq[arm] = max(
-                                int(self._consumed_arm_seq.get(arm, 0)),
-                                int(snapshot.arm_seq.get(arm, 0)),
-                            )
-                    self._condition.notify_all()
-                    return snapshot
-                if shutdown_event.is_set():
-                    return None
-                remaining = deadline - _THREAD_WAIT_CLOCK()
-                if remaining <= 0.0:
-                    return None
-                self._condition.wait(timeout=remaining)
-        return None
 
 
-class RealFeedbackWorker:
+class RealFeedbackWorker(_ConfiguredRealFeedbackWorker):
     def __init__(
         self,
         runtime: ArmCanRuntime,
@@ -430,209 +96,36 @@ class RealFeedbackWorker:
         join_timeout_s: float | None = None,
         sleep_fn=time.sleep,
     ) -> None:
-        self.runtime = runtime
-        self.hub = hub
-        self._poll_sleep_s = REAL_IDLE_SLEEP_S if poll_sleep_s is None else max(0.0, float(poll_sleep_s))
-        self._join_timeout_s = REAL_THREAD_JOIN_TIMEOUT_S if join_timeout_s is None else max(0.0, float(join_timeout_s))
-        self._sleep_fn = sleep_fn
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(
-            target=self._worker,
-            name=f"real-feedback-{runtime.interface}",
-            daemon=True,
+        super().__init__(
+            runtime,
+            hub,
+            poll_sleep_s=poll_sleep_s,
+            join_timeout_s=join_timeout_s,
+            sleep_fn=sleep_fn,
+            default_idle_sleep_s=REAL_IDLE_SLEEP_S,
+            default_join_timeout_s=REAL_THREAD_JOIN_TIMEOUT_S,
+            read_chunk_size=CAN_READ_CHUNK_SIZE,
+            feedback_batch_rx=REAL_FEEDBACK_BATCH_RX,
+            feedback_wait_for_consume=REAL_FEEDBACK_WAIT_FOR_CONSUME,
+            control_target_hz=REAL_CONTROL_TARGET_HZ,
+            shutdown_event=shutdown_event,
         )
 
-    def start(self) -> None:
-        self._thread.start()
 
-    def request_stop(self) -> None:
-        self._stop_event.set()
-
-    def join(self) -> None:
-        self._thread.join(timeout=self._join_timeout_s)
-
-    def stop(self) -> None:
-        self.request_stop()
-        self.join()
-
-    def _worker(self) -> None:
-        while not self._stop_event.is_set() and not shutdown_event.is_set():
-            processed_frames = 0
-            published_seq = 0
-            try:
-                if REAL_FEEDBACK_BATCH_RX and hasattr(self.runtime.transport, "read_feedback_batch"):
-                    samples = self.runtime.transport.read_feedback_batch(
-                        CAN_READ_CHUNK_SIZE,
-                        first_timeout_s=self._poll_sleep_s,
-                        drain_timeout_s=0.0,
-                    )
-                    processed_frames = len(samples)
-                    if samples:
-                        published_seq = self.hub.record_feedback_batch(
-                            self.runtime.arm,
-                            self.runtime.motor_ids,
-                            samples,
-                        )
-                elif hasattr(self.runtime.transport, "read_available"):
-                    self.runtime.transport.read_available(CAN_READ_CHUNK_SIZE)
-                    pop_feedback_frame = self.runtime.transport.pop_feedback_frame
-                    while True:
-                        frame = pop_feedback_frame()
-                        if frame is None:
-                            break
-                        published_seq = (
-                            self.hub.record_feedback_frame(self.runtime.arm, self.runtime.motor_ids, frame)
-                            or published_seq
-                        )
-                        processed_frames += 1
-                else:
-                    self.runtime.transport.read(CAN_READ_CHUNK_SIZE)
-                    pop_feedback_frame = self.runtime.transport.pop_feedback_frame
-                    while True:
-                        frame = pop_feedback_frame()
-                        if frame is None:
-                            break
-                        published_seq = (
-                            self.hub.record_feedback_frame(self.runtime.arm, self.runtime.motor_ids, frame)
-                            or published_seq
-                        )
-                        processed_frames += 1
-            except Exception as exc:
-                self.hub.set_error(exc)
-                shutdown_event.set()
-                break
-            if processed_frames == 0 and self._poll_sleep_s > 0.0:
-                self._sleep_fn(self._poll_sleep_s)
-            elif published_seq and REAL_FEEDBACK_WAIT_FOR_CONSUME:
-                self.hub.wait_until_consumed(
-                    self.runtime.arm,
-                    published_seq,
-                    timeout_s=max(0.0001, 1.0 / REAL_CONTROL_TARGET_HZ),
-                )
-
-
-class RealTxWorker:
+class RealTxWorker(_ConfiguredRealTxWorker):
     def __init__(
         self,
         runtime: ArmCanRuntime,
         *,
         join_timeout_s: float | None = None,
     ) -> None:
-        self.runtime = runtime
-        self._join_timeout_s = REAL_THREAD_JOIN_TIMEOUT_S if join_timeout_s is None else max(0.0, float(join_timeout_s))
-        self._condition = threading.Condition()
-        self._pending_tau: np.ndarray | None = None
-        self._overwritten_pending_count = 0
-        self._busy = False
-        self._finalize_on_stop = False
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(
-            target=self._worker,
-            name=f"real-tx-{runtime.interface}",
-            daemon=True,
+        super().__init__(
+            runtime,
+            join_timeout_s=join_timeout_s,
+            default_join_timeout_s=REAL_THREAD_JOIN_TIMEOUT_S,
+            shutdown_event=shutdown_event,
+            wait_clock=_THREAD_WAIT_CLOCK,
         )
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def submit_torque(self, tau: np.ndarray) -> None:
-        tau_values = np.asarray(tau, dtype=np.float64).reshape(Config.NUM_JOINTS).copy()
-        with self._condition:
-            if self._stop_event.is_set():
-                return
-            if self._pending_tau is not None:
-                self._overwritten_pending_count += 1
-            self._pending_tau = tau_values
-            self._condition.notify_all()
-
-    @property
-    def overwritten_pending_count(self) -> int:
-        with self._condition:
-            return int(self._overwritten_pending_count)
-
-    def wait_idle(self, timeout: float | None = None) -> bool:
-        deadline = None if timeout is None else _THREAD_WAIT_CLOCK() + max(0.0, float(timeout))
-        with self._condition:
-            while self._busy or self._pending_tau is not None:
-                if deadline is None:
-                    remaining = None
-                else:
-                    remaining = deadline - _THREAD_WAIT_CLOCK()
-                    if remaining <= 0.0:
-                        return False
-                self._condition.wait(timeout=remaining)
-            return True
-
-    def request_stop(self, *, finalize: bool = False) -> None:
-        with self._condition:
-            self._stop_event.set()
-            self._finalize_on_stop = bool(finalize)
-            self._pending_tau = None
-            self._condition.notify_all()
-
-    def join(self) -> None:
-        self._thread.join(timeout=self._join_timeout_s)
-
-    def stop(self, *, finalize: bool = False) -> None:
-        self.request_stop(finalize=finalize)
-        self.join()
-
-    def send_zero_and_disable(self) -> None:
-        for motor_id in self.runtime.motor_ids:
-            try:
-                self.runtime.transport.send_mit_torque(int(motor_id), 0.0)
-            except Exception as exc:
-                print(f"[CAN Warning] {self.runtime.interface} motor {motor_id} zero failed: {exc}")
-        for motor_id in self.runtime.motor_ids:
-            try:
-                self.runtime.transport.disable_motor(int(motor_id))
-            except Exception as exc:
-                print(f"[CAN Warning] {self.runtime.interface} motor {motor_id} disable failed: {exc}")
-
-    def _stop_requested(self) -> bool:
-        with self._condition:
-            return self._stop_event.is_set()
-
-    def _worker(self) -> None:
-        while True:
-            with self._condition:
-                while self._pending_tau is None and not self._stop_event.is_set():
-                    self._condition.wait(timeout=0.1)
-                if self._pending_tau is None and self._stop_event.is_set():
-                    if not self._finalize_on_stop:
-                        self._condition.notify_all()
-                        return
-                    self._busy = True
-                    self._condition.notify_all()
-                    tau = None
-                else:
-                    tau = self._pending_tau
-                    self._pending_tau = None
-                    self._busy = True
-            if tau is None:
-                try:
-                    self.send_zero_and_disable()
-                finally:
-                    with self._condition:
-                        self._busy = False
-                        self._condition.notify_all()
-                return
-            try:
-                offset = self.runtime.arm * Config.ARM_JOINTS
-                for motor_id in self.runtime.motor_ids:
-                    if self._stop_requested():
-                        break
-                    self.runtime.transport.send_mit_torque(
-                        int(motor_id),
-                        float(tau[offset + int(motor_id) - 1]),
-                    )
-            except Exception as exc:
-                print(f"[CAN Error] {self.runtime.interface} torque send failed: {exc}")
-                shutdown_event.set()
-            finally:
-                with self._condition:
-                    self._busy = False
-                    self._condition.notify_all()
 
 
 def active_arms_for_mode(mode: str) -> tuple[int, ...]:
@@ -754,24 +247,6 @@ def _stop_tx_workers(workers: dict[int, RealTxWorker], *, finalize: bool) -> Non
         worker.join()
 
 
-def _copy_active_arm_values(dst: np.ndarray, src: np.ndarray, active_arm_mask: int) -> np.ndarray:
-    result = np.asarray(dst, dtype=np.float64).copy()
-    source = np.asarray(src, dtype=np.float64)
-    for arm in range(Config.NUM_ARMS):
-        if (active_arm_mask & (1 << arm)) == 0:
-            continue
-        arm_slice = slice(arm * Config.ARM_JOINTS, (arm + 1) * Config.ARM_JOINTS)
-        result[arm_slice] = source[arm_slice]
-    return result
-
-
-def _copy_active_arm_pose_values(dst: np.ndarray, src: np.ndarray, active_arm_mask: int) -> np.ndarray:
-    result = np.asarray(dst, dtype=np.float64).copy()
-    source = np.asarray(src, dtype=np.float64).reshape(result.shape)
-    for arm in range(Config.NUM_ARMS):
-        if (active_arm_mask & (1 << arm)) != 0:
-            result[arm] = source[arm]
-    return result
 
 
 def _rerun_tcp_twist_with_position_fallback(
@@ -837,10 +312,7 @@ def _copy_active_arm_torque(source: np.ndarray, active_arm_mask: int) -> np.ndar
     for arm_index in range(Config.NUM_ARMS):
         if (int(active_arm_mask) & (1 << arm_index)) == 0:
             continue
-        arm_slice = slice(
-            arm_index * Config.ARM_JOINTS,
-            (arm_index + 1) * Config.ARM_JOINTS,
-        )
+        arm_slice = ARM_JOINT_SLICES[arm_index]
         tau_to_send[arm_slice] = source_values[arm_slice]
     return tau_to_send
 
@@ -906,6 +378,12 @@ def _format_can_rx_stats(runtimes: tuple[ArmCanRuntime, ...]) -> str:
     return "; ".join(parts) if parts else "none"
 
 
+def _should_print_real_stats(now_s: float, last_print_s: float | None) -> bool:
+    if REAL_STATS_INTERVAL_S <= 0.0:
+        return False
+    return last_print_s is None or now_s - last_print_s >= REAL_STATS_INTERVAL_S
+
+
 def _maybe_print_real_stats(
     *,
     now_s: float,
@@ -942,43 +420,6 @@ def _real_c_body_q_zero() -> np.ndarray:
     return REAL_C_BODY_Q_ZERO.copy()
 
 
-def mirror_real_state_to_env(
-    env,
-    shared_state: RealSharedState,
-    active_arm_mask: int,
-    initial_target_pos_base: np.ndarray | None = None,
-    initial_target_quat_base: np.ndarray | None = None,
-) -> None:
-    q, qd, ref_pos, ref_quat, feedback_valid, targets_initialized = shared_state.snapshot_mirror()
-    if not feedback_valid:
-        return
-    env.set_qpos(_copy_active_arm_values(env.get_qpos(), q, active_arm_mask))
-    env.set_qvel(_copy_active_arm_values(env.get_qvel(), qd, active_arm_mask))
-    env.forward()
-    if hasattr(env, "set_all_reference_poses"):
-        env.set_all_reference_poses(ref_pos, ref_quat)
-    if not targets_initialized:
-        target_pos = env.get_all_ee_pos()
-        target_quat = env.get_all_ee_quat()
-        if initial_target_pos_base is not None:
-            target_pos = _copy_active_arm_pose_values(target_pos, initial_target_pos_base, active_arm_mask)
-        if initial_target_quat_base is not None:
-            target_quat = _copy_active_arm_pose_values(target_quat, initial_target_quat_base, active_arm_mask)
-        env.set_all_target_poses_base(target_pos, target_quat)
-        for arm, arm_name in enumerate(Config.ARM_NAMES):
-            if (active_arm_mask & (1 << arm)) == 0:
-                continue
-            current_tcp = env.get_all_ee_pos()[arm]
-            target_tcp = target_pos[arm]
-            distance = float(np.linalg.norm(target_tcp - current_tcp))
-            print(
-                f"[Real Target] {arm_name}: current_tcp={np.array2string(current_tcp, precision=4)} "
-                f"target_tcp={np.array2string(target_tcp, precision=4)} "
-                f"distance={distance:.4f}m target_pos=INIT_QPOS_TCP "
-                "target_quat=INIT_QPOS_TCP"
-            )
-    target_pos, target_quat = env.get_all_target_poses()
-    shared_state.set_targets(target_pos, target_quat)
 
 
 def _format_real_rx(q: np.ndarray, active_arm_mask: int) -> str:
@@ -986,8 +427,7 @@ def _format_real_rx(q: np.ndarray, active_arm_mask: int) -> str:
     for arm in range(Config.NUM_ARMS):
         if (active_arm_mask & (1 << arm)) == 0:
             continue
-        arm_slice = slice(arm * Config.ARM_JOINTS, (arm + 1) * Config.ARM_JOINTS)
-        values.extend(float(v) for v in q[arm_slice])
+        values.extend(float(v) for v in q[ARM_JOINT_SLICES[arm]])
     return ", ".join(f"{value:.3f}" for value in values)
 
 
@@ -996,8 +436,7 @@ def _format_real_tx(tau: np.ndarray, active_arm_mask: int) -> str:
     for arm in range(Config.NUM_ARMS):
         if (active_arm_mask & (1 << arm)) == 0:
             continue
-        arm_slice = slice(arm * Config.ARM_JOINTS, (arm + 1) * Config.ARM_JOINTS)
-        values.extend(float(v) for v in tau[arm_slice])
+        values.extend(float(v) for v in tau[ARM_JOINT_SLICES[arm]])
     return ", ".join(f"{value:.3f}" for value in values)
 
 
@@ -1105,6 +544,7 @@ def run_real_can_control_loop(
 ) -> None:
     active_mask = ACTIVE_ARM_MASK[mode]
     effective_send_mode = _normalize_send_mode(send_mode, send_control)
+    effective_send_label = _send_mode_label(effective_send_mode)
     last_cycle_end = None
     last_stats_print_s = None
     step_count = 0
@@ -1295,18 +735,19 @@ def run_real_can_control_loop(
                         can_backpressure_count=can_backpressure,
                         control_target_hz=REAL_CONTROL_TARGET_HZ,
                     )
-                last_stats_print_s = _maybe_print_real_stats(
-                    now_s=cycle_end,
-                    last_print_s=last_stats_print_s,
-                    cycle_hz=cycle_hz,
-                    cycle_ms=cycle_ms,
-                    c_bridge_ms=0.0,
-                    feedback_wait_ms=feedback_wait_ms,
-                    tx_overwrites=tx_overwrites,
-                    can_backpressure=can_backpressure,
-                    can_rx_stats=_format_can_rx_stats(runtimes),
-                    send_mode="feedback-only",
-                )
+                if _should_print_real_stats(cycle_end, last_stats_print_s):
+                    last_stats_print_s = _maybe_print_real_stats(
+                        now_s=cycle_end,
+                        last_print_s=last_stats_print_s,
+                        cycle_hz=cycle_hz,
+                        cycle_ms=cycle_ms,
+                        c_bridge_ms=0.0,
+                        feedback_wait_ms=feedback_wait_ms,
+                        tx_overwrites=tx_overwrites,
+                        can_backpressure=can_backpressure,
+                        can_rx_stats=_format_can_rx_stats(runtimes),
+                        send_mode="feedback-only",
+                    )
                 step_count += 1
                 continue
 
@@ -1379,11 +820,7 @@ def run_real_can_control_loop(
             tau_for_display = tau_raw.copy()
             for arm_index in range(Config.NUM_ARMS):
                 if (active_mask & (1 << arm_index)) == 0:
-                    arm_slice = slice(
-                        arm_index * Config.ARM_JOINTS,
-                        (arm_index + 1) * Config.ARM_JOINTS,
-                    )
-                    tau_for_display[arm_slice] = 0.0
+                    tau_for_display[ARM_JOINT_SLICES[arm_index]] = 0.0
             tau_to_send = _select_tau_to_send(
                 effective_send_mode,
                 tau_for_display=tau_for_display,
@@ -1392,7 +829,6 @@ def run_real_can_control_loop(
                 zero_tau=zero_tau,
                 active_arm_mask=active_mask,
             )
-            tx_label = _send_mode_label(effective_send_mode)
             shared_state.update_control_output(
                 tau_for_display,
                 result.ee_pos,
@@ -1455,7 +891,7 @@ def run_real_can_control_loop(
                     right_j7_diag=right_j7_diag,
                     rx_str=_format_real_rx(current_q, active_mask),
                     tx_str=_format_real_tx(tau_to_send, active_mask),
-                    tx_label=tx_label,
+                    tx_label=effective_send_label,
                     step_count=step_count,
                     uart_latency_ms=cycle_ms,
                     uart_cycle_hz=cycle_hz,
@@ -1466,18 +902,19 @@ def run_real_can_control_loop(
                     can_backpressure_count=can_backpressure,
                     control_target_hz=REAL_CONTROL_TARGET_HZ,
                 )
-            last_stats_print_s = _maybe_print_real_stats(
-                now_s=cycle_end,
-                last_print_s=last_stats_print_s,
-                cycle_hz=cycle_hz,
-                cycle_ms=cycle_ms,
-                c_bridge_ms=c_bridge_ms,
-                feedback_wait_ms=feedback_wait_ms,
-                tx_overwrites=tx_overwrites,
-                can_backpressure=can_backpressure,
-                can_rx_stats=_format_can_rx_stats(runtimes),
-                send_mode=effective_send_mode,
-            )
+            if _should_print_real_stats(cycle_end, last_stats_print_s):
+                last_stats_print_s = _maybe_print_real_stats(
+                    now_s=cycle_end,
+                    last_print_s=last_stats_print_s,
+                    cycle_hz=cycle_hz,
+                    cycle_ms=cycle_ms,
+                    c_bridge_ms=c_bridge_ms,
+                    feedback_wait_ms=feedback_wait_ms,
+                    tx_overwrites=tx_overwrites,
+                    can_backpressure=can_backpressure,
+                    can_rx_stats=_format_can_rx_stats(runtimes),
+                    send_mode=effective_send_mode,
+                )
             step_count += 1
     finally:
         _stop_feedback_workers(feedback_workers)
