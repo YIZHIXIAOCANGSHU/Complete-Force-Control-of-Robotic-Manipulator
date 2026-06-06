@@ -81,6 +81,12 @@ static uint8_t stm_controller_normalize_arm_mask(uint8_t active_arm_mask) {
   return mask == 0u ? STM_ARM_MASK_BOTH : mask;
 }
 
+static int stm_controller_arm_active(uint8_t active_arm_mask, int arm) {
+  return (active_arm_mask & (uint8_t)(1u << arm)) != 0u;
+}
+
+static int stm_controller_arm_offset(int arm) { return arm * ARM_JOINTS; }
+
 static double stm_controller_vec3_distance(const double a[3],
                                            const double b[3]) {
   double dx = a[0] - b[0];
@@ -315,10 +321,10 @@ static int stm_controller_joints_still(const double qd[NUM_JOINTS],
                                        uint8_t active_arm_mask) {
   uint8_t mask = stm_controller_normalize_arm_mask(active_arm_mask);
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
-    if ((mask & (1u << arm)) == 0u) {
+    if (!stm_controller_arm_active(mask, arm)) {
       continue;
     }
-    int offset = arm * ARM_JOINTS;
+    int offset = stm_controller_arm_offset(arm);
     for (int i = 0; i < ARM_JOINTS; ++i) {
       if (!isfinite(qd[offset + i])) {
         return 0;
@@ -407,6 +413,14 @@ static void stm_controller_zero_command_output(stm_output_t *out) {
   memset(out->ref_quat, 0, sizeof(out->ref_quat));
 }
 
+static void stm_controller_latch_and_zero_output(stm_output_t *out,
+                                                 uint8_t active_arm_mask) {
+  stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
+                                    active_arm_mask);
+  out->status = STM_STATUS_SAFETY_LATCHED;
+  stm_controller_zero_command_output(out);
+}
+
 static int stm_controller_check_joint_safety(const double q[NUM_JOINTS],
                                              const double qd[NUM_JOINTS],
                                              const double tau[NUM_JOINTS],
@@ -415,10 +429,10 @@ static int stm_controller_check_joint_safety(const double q[NUM_JOINTS],
   uint8_t mask = stm_controller_normalize_arm_mask(active_arm_mask);
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
-    if ((mask & (1u << arm)) == 0u) {
+    if (!stm_controller_arm_active(mask, arm)) {
       continue;
     }
-    int offset = arm * ARM_JOINTS;
+    int offset = stm_controller_arm_offset(arm);
     if (!stm_controller_is_finite_vec(q + offset, ARM_JOINTS) ||
         !stm_controller_is_finite_vec(qd + offset, ARM_JOINTS)) {
       STM_LOG_ERROR("[SAFETY] Arm %d non-finite joint state detected.\n", arm);
@@ -436,10 +450,10 @@ static int stm_controller_check_joint_safety(const double q[NUM_JOINTS],
   }
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
-    if ((mask & (1u << arm)) == 0u) {
+    if (!stm_controller_arm_active(mask, arm)) {
       continue;
     }
-    int offset = arm * ARM_JOINTS;
+    int offset = stm_controller_arm_offset(arm);
     for (int i = 0; i < ARM_JOINTS; ++i) {
       int joint = offset + i;
       if (!isfinite(tau[joint])) {
@@ -518,22 +532,19 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
   }
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
-    if ((active_arm_mask & (1u << arm)) == 0u) {
+    if (!stm_controller_arm_active(active_arm_mask, arm)) {
       memset(&g_controller.path[arm], 0, sizeof(g_controller.path[arm]));
     }
   }
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
-    if ((active_arm_mask & (1u << arm)) == 0u) {
+    if (!stm_controller_arm_active(active_arm_mask, arm)) {
       continue;
     }
-    int offset = arm * ARM_JOINTS;
+    int offset = stm_controller_arm_offset(arm);
     if (!stm_controller_is_finite_vec(in->q + offset, ARM_JOINTS) ||
         !stm_controller_is_finite_vec(in->qd + offset, ARM_JOINTS)) {
-      stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
-                                        active_arm_mask);
-      out->status = STM_STATUS_SAFETY_LATCHED;
-      stm_controller_zero_command_output(out);
+      stm_controller_latch_and_zero_output(out, active_arm_mask);
       goto finalize_step;
     }
     control_filter_velocities_arm(arm, in->qd + offset, filtered_qd + offset);
@@ -558,19 +569,16 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
                                         filtered_qd + offset, v_tcp[arm]);
     memcpy(out->ee_twist[arm], v_tcp[arm], sizeof(double) * 6);
     if (control_check_safety_arm(arm, in->q + offset, filtered_qd + offset) < 0) {
-      stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
-                                        active_arm_mask);
-      out->status = STM_STATUS_SAFETY_LATCHED;
-      stm_controller_zero_command_output(out);
+      stm_controller_latch_and_zero_output(out, active_arm_mask);
       goto finalize_step;
     }
   }
 
   for (int arm = 0; arm < NUM_ARMS; ++arm) {
-    if ((active_arm_mask & (1u << arm)) == 0u) {
+    if (!stm_controller_arm_active(active_arm_mask, arm)) {
       continue;
     }
-    int offset = arm * ARM_JOINTS;
+    int offset = stm_controller_arm_offset(arm);
     CartesianPathState *path = &g_controller.path[arm];
     if (stm_controller_target_changed(path, target_pos[arm],
                                       target_quat[arm])) {
@@ -595,10 +603,7 @@ void stm_controller_step_elapsed(const stm_input_t *in, stm_output_t *out,
                                         active_arm_mask) == 0) {
     out->status = STM_STATUS_OK;
   } else {
-    stm_controller_enter_safety_latch(STM_STATUS_SAFETY_LATCHED,
-                                      active_arm_mask);
-    out->status = STM_STATUS_SAFETY_LATCHED;
-    stm_controller_zero_command_output(out);
+    stm_controller_latch_and_zero_output(out, active_arm_mask);
   }
 
 finalize_step:
